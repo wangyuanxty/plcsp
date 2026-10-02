@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """SimPy DES 核心（《方法设计文档》§4.2：SimPy 单一后端，无物理库）。
 
-**十一约束全部接入且可独立开关**（spec §3.3，P1b 2026-10-02）——开关一律走
+**十约束全部接入且可独立开关**（spec §3.3，P1b 2026-10-02；⑥ 已砍）——开关一律走
 `ConstraintConfig`，关掉时**不消耗随机数**，故"关 = 该约束从未存在"。
 
 单位：**仿真时间 = 分钟，布局坐标 = 米**（bug#13 约定）；能耗 = kWh，走 `plcsp/energy.py`。
@@ -9,7 +9,7 @@
 边界（诚实声明）：
 - AGV 有**空载段**（2026-10-02 补齐；此前 AGV 从上一卸货点瞬移到取货点）。
 - 机器故障/AGV 故障=泊松流；⑨ 的故障**腿间检出**（不打断正在进行的行驶）。
-- ⑦ 模糊运输时间**已砍**（与 ① 拥堵重复表达不确定性）；⑥ 用三角模糊数，非正态。
+- ⑦ 模糊运输时间、⑥ 模糊加工时间**均已砍**（见 spec §3.3 的砍除记录）。
 - 完成时刻以"末工序在机台加工完毕"为准（搬运回库不计入 makespan——对齐 BKS 口径）。
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
     `layout_type` **保留但忽略**（旧调用方仍传）。
-    `constraints` = `ConstraintConfig`（十一约束开关，spec §3.3）；None → 全开。
+    `constraints` = `ConstraintConfig`（十约束开关，spec §3.3）；None → 全开。
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
@@ -97,7 +97,6 @@ class SimConfig:
     # 重扫结果：τ=0.90 → 20%/28%/48%，**三个实例都非退化**。
     # ⚠️ 没有任何单一 τ 能让三实例同时落进 20–40%——交期紧度本身就随实例变，这要如实报告。
     tau: float = 0.90
-    fuzzy_spread: float = 0.2     # ⑥ 三角模糊宽度（±20%）
 
     @property
     def eff_speed(self) -> float:
@@ -112,25 +111,7 @@ class OpLite:
         self.time = t
 
 
-# ══ 信息侧约束的纯函数（⑥ 模糊加工 · ⑧ 交期），放在模块级以便单测直接调用 ══
-
-def sample_fuzzy_time(nominal: float, spread: float = 0.2, rng_seed: int = 0) -> float:
-    """⑥ 三角模糊数 `(a, b, c) = (nom·(1−s), nom, nom·(1+s))` 抽样。
-
-    **模糊 ≠ 随机**：隶属度函数归一后就是三角分布，故按标准逆变换抽样。
-    关键性质是**有界**（落在支撑集 [a, c] 内）——正态无界，会被审稿人抓。
-    """
-    if spread < 0.0:
-        raise ValueError(f"模糊宽度必须 ≥ 0，收到 {spread}")
-    a, b, c = nominal * (1.0 - spread), nominal, nominal * (1.0 + spread)
-    if c == a:                       # spread=0 或 nominal=0：退化为确定值
-        return float(b)
-    u = float(np.random.default_rng(rng_seed).random())
-    F = (b - a) / (c - a)
-    if u < F:
-        return a + math.sqrt(u * (b - a) * (c - a))
-    return c - math.sqrt((1.0 - u) * (c - b) * (c - a))
-
+# ══ 信息侧约束的纯函数（⑧ 交期），放在模块级以便单测直接调用 ══
 
 def compute_due_dates(n_jobs: int, tau: float, m_ref: float) -> dict[int, float]:
     """⑧ 交期 `d_j = τ · M_ref`（spec §3.5）——同一实例所有作业**同值**（共同交期形）。"""
@@ -579,7 +560,7 @@ class SimWorld:
         if constraints is None:
             from .constraints import ConstraintConfig
             constraints = ConstraintConfig()
-        self.constraints = constraints      # 十一约束开关（spec §3.3）
+        self.constraints = constraints      # 十约束开关（spec §3.3）
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         """⑧ 交期 `d_j = τ·M_ref`。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
@@ -664,13 +645,7 @@ class SimWorld:
         for j, job_ops in enumerate(inst.jobs):
             plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
                 int(np.argmin([t for _, t in alts])) for alts in job_ops]
-            # ⑥ 模糊加工：标称时间 → 三角模糊数抽样。**每条 (job, op) 用派生种子**，
-            # 不碰仿真主随机流——故关掉 ⑥ 时逐位等于"该约束从未存在"。
-            fuzzy = self.constraints.fuzzy_processing
-            plans[j] = [(job_ops[oi][plan[oi]][0],
-                         (sample_fuzzy_time(job_ops[oi][plan[oi]][1], self.cfg.fuzzy_spread,
-                                            rng_seed=seed_chain * 1_000_003 + j * 1009 + oi)
-                          if fuzzy else job_ops[oi][plan[oi]][1]))
+            plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -775,13 +750,7 @@ class SimWorld:
         for j, job_ops in enumerate(inst.jobs):
             plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
                 int(np.argmin([t for _, t in alts])) for alts in job_ops]
-            # ⑥ 模糊加工：标称时间 → 三角模糊数抽样。**每条 (job, op) 用派生种子**，
-            # 不碰仿真主随机流——故关掉 ⑥ 时逐位等于"该约束从未存在"。
-            fuzzy = self.constraints.fuzzy_processing
-            plans[j] = [(job_ops[oi][plan[oi]][0],
-                         (sample_fuzzy_time(job_ops[oi][plan[oi]][1], self.cfg.fuzzy_spread,
-                                            rng_seed=seed_chain * 1_000_003 + j * 1009 + oi)
-                          if fuzzy else job_ops[oi][plan[oi]][1]))
+            plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)

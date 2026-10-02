@@ -48,14 +48,12 @@ BINDING_PCT = 2.0          # 判据（计划 Global Constraints）：|Δ%| < 2 �
 WIRED = ("congestion", "finite_buffer", "machine_failure",
          "rework", "setup_time", "maintenance",
          "agv_failure", "heterogeneous_fleet", "charging",
-         "fuzzy_processing", "due_dates")
+         "due_dates")
 
 CONSTRAINTS = ("congestion", "finite_buffer", "machine_failure", "rework", "setup_time",
-               "fuzzy_processing", "due_dates", "agv_failure", "heterogeneous_fleet",
-               "charging", "maintenance")
+               "due_dates", "agv_failure", "heterogeneous_fleet", "charging", "maintenance")
 LABELS = {"congestion": "①拥堵", "finite_buffer": "②有限缓冲", "machine_failure": "③机器故障",
-          "rework": "④返工", "setup_time": "⑤换型", "fuzzy_processing": "⑥模糊加工",
-          "due_dates": "⑧交期", "agv_failure": "⑨AGV故障", "heterogeneous_fleet": "⑩异构车队",
+          "rework": "④返工", "setup_time": "⑤换型", "due_dates": "⑧交期", "agv_failure": "⑨AGV故障", "heterogeneous_fleet": "⑩异构车队",
           "charging": "⑪充电", "maintenance": "⑫预防性维护"}
 
 
@@ -112,10 +110,6 @@ def _probe_charging(lay, cfg) -> None:
                               capacity=a.capacity, battery_kwh=0.3)
 
 
-def _probe_fuzzy_processing(lay, cfg) -> None:
-    cfg.fuzzy_spread = min(0.95, cfg.fuzzy_spread * 3.0)     # ±20% → ±60%
-
-
 PROBES: dict[str, tuple[str, Callable]] = {
     "machine_failure": ("fail_rate ×100", _probe_machine_failure),
     "finite_buffer": ("缓冲 cap 全=1", _probe_finite_buffer),
@@ -126,7 +120,6 @@ PROBES: dict[str, tuple[str, Callable]] = {
     "agv_failure": ("AGV MTBF ÷100", _probe_agv_failure),
     "heterogeneous_fleet": ("载量满/速度两极", _probe_heterogeneous_fleet),
     "charging": ("充电阈值 80%", _probe_charging),
-    "fuzzy_processing": ("模糊宽度 ×3", _probe_fuzzy_processing),
 }
 
 

@@ -1,6 +1,6 @@
 """约束配置框架的单元测试（P1b Task 1）。
 
-开关共 **11 个**（spec §3.3 十一约束）——① 拥堵已按参数化粒度恢复（commit eb1d1da）。
+开关共 **10 个**（spec §3.3 十约束）。此前 11 个——**⑥ 模糊加工已砍**（2026-10-03，用户指令）。
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from plcsp.env.constraints import ABLATION_GROUPS, ConstraintConfig
 
 ALL_FLAGS = ("congestion", "finite_buffer", "machine_failure",
-             "rework", "setup_time", "fuzzy_processing", "due_dates",
+             "rework", "setup_time", "due_dates",
              "agv_failure", "heterogeneous_fleet", "charging", "maintenance")
 
 

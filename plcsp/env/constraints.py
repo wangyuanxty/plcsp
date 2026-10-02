@@ -12,7 +12,10 @@ from dataclasses import dataclass, replace
 
 @dataclass(frozen=True)
 class ConstraintConfig:
-    """十一个约束的开关。默认全开 = 论文主配置（spec §3.3）。"""
+    """十个约束的开关。默认全开 = 论文主配置（spec §3.3）。
+
+    ⑥ 模糊加工**已砍**（2026-10-03，实测不 binding）——故为 10 而非 11。
+    """
     # A 类：基建已有
     congestion: bool = True           # ① AGV 拥堵 / 区段冲突 / 死锁（粒度见 SimConfig.zone_granularity）
     finite_buffer: bool = True        # ② 有限缓冲（in_cap/out_cap）
@@ -20,7 +23,6 @@ class ConstraintConfig:
     # B 类：近乎免费
     rework: bool = True               # ④ 工件返工
     setup_time: bool = True           # ⑤ 换型 / 准备时间（顺序相关）
-    fuzzy_processing: bool = True     # ⑥ 模糊加工时间（三角模糊数，**非**正态）
     due_dates: bool = True            # ⑧ 交期 / 拖期（τ·M_ref）
     agv_failure: bool = True          # ⑨ AGV 故障
     # C 类：真花钱
@@ -48,8 +50,8 @@ ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "-物流": _FULL.with_off("congestion", "agv_failure", "heterogeneous_fleet", "charging"),
     "-生产": _FULL.with_off("finite_buffer", "machine_failure", "rework",
                             "setup_time", "maintenance"),   # ② 机台缓冲属生产侧
-    "-信息": _FULL.with_off("fuzzy_processing", "due_dates"),
+    "-信息": _FULL.with_off("due_dates"),
     "None": _FULL.with_off("congestion", "finite_buffer", "machine_failure", "rework",
-                           "setup_time", "fuzzy_processing", "due_dates",
+                           "setup_time", "due_dates",
                            "agv_failure", "heterogeneous_fleet", "charging", "maintenance"),
 }
