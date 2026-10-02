@@ -45,7 +45,8 @@ TARGETS = ("mk01", "mk10")
 BINDING_PCT = 2.0          # 判据（计划 Global Constraints）：|Δ%| < 2 ⟹ 不 binding
 # ⚠️ 已接入 `des.py` 的约束——用于消歧"关态零影响"是"从不触发"还是"未接线"。
 # **Task 4/5/6 每接一个都要把它加进来**，否则该约束会被误报成"未接线"。
-WIRED = ("congestion", "finite_buffer", "machine_failure")
+WIRED = ("congestion", "finite_buffer", "machine_failure",
+         "rework", "setup_time", "maintenance")
 
 CONSTRAINTS = ("congestion", "finite_buffer", "machine_failure", "rework", "setup_time",
                "fuzzy_processing", "due_dates", "agv_failure", "heterogeneous_fleet",
@@ -73,10 +74,25 @@ def _probe_congestion(lay, cfg) -> None:
     cfg.zone_granularity = "all"        # 极端：全图一个区段（争用最强档）
 
 
+def _probe_rework(lay, cfg) -> None:
+    cfg.p_rework = min(1.0, cfg.p_rework * 10.0)     # 5% → 50%
+
+
+def _probe_setup_time(lay, cfg) -> None:
+    cfg.setup_min_default *= 10.0                    # 2 → 20 min
+
+
+def _probe_maintenance(lay, cfg) -> None:
+    cfg.pm_interval /= 10.0                          # 120 → 12 min 主轴工时
+
+
 PROBES: dict[str, tuple[str, Callable]] = {
     "machine_failure": ("fail_rate ×100", _probe_machine_failure),
     "finite_buffer": ("缓冲 cap 全=1", _probe_finite_buffer),
     "congestion": ("区段粒度 all", _probe_congestion),
+    "rework": ("返工率 ×10", _probe_rework),
+    "setup_time": ("换型时长 ×10", _probe_setup_time),
+    "maintenance": ("保养间隔 ÷10", _probe_maintenance),
 }
 
 

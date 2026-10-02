@@ -69,6 +69,11 @@ class SimConfig:
                                   #   算出的是时间不是能量。活代码不再读它；能耗走 `plcsp/energy.py`
                                   #   的 M2 模型。字段保留仅供旧脚本构造 cfg 时不报错。
     aisle_width: float = 1.5      # 通道宽（米）：窄通道限速 = Phase A2 真权衡来源
+    # ── 约束参数（**全部 assumed**，无文献出处；见 spec §9 的 assumed 表）──
+    p_rework: float = 0.05        # ④ 返工率 [1/工序]
+    setup_min_default: float = 2.0   # ⑤ 异型换型时长 [min]（同作业连做 = 0）
+    pm_interval: float = 120.0    # ⑫ 预防性维护间隔 [min 主轴工时]
+    pm_duration: float = 10.0     # ⑫ 维护停机时长 [min]
 
     @property
     def eff_speed(self) -> float:
@@ -93,44 +98,73 @@ def _try_acquire(env, res, timeout):
 
 
 class MachineSim:
-    """机台：输入缓冲 → 加工（故障中断-恢复）→ 输出缓冲（满则阻塞）。缓冲满=阻塞源。"""
+    """机台：输入缓冲 → 换型 → 加工（故障中断-恢复）→ 保养 → 输出缓冲（满则阻塞）。
+
+    **开关一律从 `ConstraintConfig` 读**（逐个传 bool 会在约束变多时漏参数）。
+    开关关闭时**不得消耗随机数**——否则故障流被移位，"该约束从未存在"的语义就不成立。
+    """
 
     def __init__(self, env, pad: MachinePad, rng, cfg: SimConfig, stats: dict, completes: dict,
-                 events_q: simpy.Store, finite_buffer: bool = True, machine_failure: bool = True):
+                 events_q: simpy.Store, constraints):
         self.env, self.pad, self.rng, self.cfg, self.stats = env, pad, rng, cfg, stats
         self.completes = completes
         self.events_q = events_q
-        self.finite_buffer = finite_buffer      # ② 关 → 无界缓冲
-        self.machine_failure = machine_failure  # ③ 关 → 不抛故障
+        self.con = constraints
         # SimPy 的 Store 不接受 capacity=None；无界用 inf（且下游的"缓冲满"检查须能识别 inf）
-        cap_in = pad.in_cap if finite_buffer else float("inf")
-        cap_out = pad.out_cap if finite_buffer else float("inf")
+        cap_in = pad.in_cap if constraints.finite_buffer else float("inf")
+        cap_out = pad.out_cap if constraints.finite_buffer else float("inf")
         self.in_q = simpy.Store(env, capacity=cap_in)
         self.out_q = simpy.Store(env, capacity=cap_out)
-        self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障期间占用）
+        self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障/保养期间占用）
+        self.prev_job: int | None = None     # ⑤ 换型：本机上一件加工的作业
+        self.pm_clock = 0.0                  # ⑫ 距上次保养累计的主轴工时 [min]
+
+    def _process(self, job: int, op):
+        """⑤ 换型 → 加工（含故障中断-恢复）→ ⑫ 保养。**不含返工判定**（见 `run`）。"""
+        with self.slot.request() as req:
+            yield req
+            # ⑤ 换型：与上一件**不同作业**才需换型（同作业连做 = 0；序列相关的最简形）
+            if self.con.setup_time and self.prev_job is not None and self.prev_job != job:
+                yield self.env.timeout(self.cfg.setup_min_default)
+                self.stats["setup_min"][self.pad.id] += self.cfg.setup_min_default
+            self.prev_job = job
+            t = self.env.now
+            finish = t + op.time
+            if not self.con.machine_failure:
+                yield self.env.timeout(op.time)            # ③ 关：无故障，一次跑完
+            else:
+                while t < finish:
+                    nxt_fail = t + self.rng.exponential(1.0 / max(self.pad.fail_rate, 1e-9))
+                    seg = min(nxt_fail, finish) - t
+                    yield self.env.timeout(seg)
+                    if nxt_fail < finish:
+                        self.stats["fail_events"] += 1
+                        yield self.env.timeout(self.cfg.repair_time)   # 中断-恢复
+                    t += seg
+            self.stats["process_time"] += op.time
+            self.stats["proc_min"][self.pad.id] += op.time   # M2 能耗：按机位计的切削时长
+            # ⑫ 预防性维护：主轴工时到点 → 计划停机（占机台槽，工件在外面等着）
+            if self.con.maintenance:
+                self.pm_clock += op.time
+                if self.pm_clock >= self.cfg.pm_interval:
+                    yield self.env.timeout(self.cfg.pm_duration)
+                    self.stats["pm_events"] += 1
+                    self.pm_clock = 0.0
 
     def run(self):
         while True:
             job, oi, op, is_last = yield self.in_q.get()
             self.stats["in_q_gets"] = self.stats.get("in_q_gets", 0) + 1
-            with self.slot.request() as req:
-                yield req
-                t = self.env.now
-                finish = t + op.time
-                if not self.machine_failure:
-                    yield self.env.timeout(op.time)        # ③ 关：无故障，一次跑完
-                else:
-                    while t < finish:
-                        nxt_fail = t + self.rng.exponential(1.0 / max(self.pad.fail_rate, 1e-9))
-                        seg = min(nxt_fail, finish) - t
-                        yield self.env.timeout(seg)
-                        if nxt_fail < finish:
-                            self.stats["fail_events"] += 1
-                            yield self.env.timeout(self.cfg.repair_time)   # 中断-恢复
-                        t += seg
-                self.stats["process_time"] += op.time
-                self.stats["proc_min"][self.pad.id] += op.time   # M2 能耗：按机位计的切削时长
-                # 换型时长（⑤ setup_time）在 Task 4 接入；此处仅占位，保持三态口径统一
+            # ④ 返工：同件在本机**原地**重做（工件不离开机台，故不走运输）。
+            # ⚠️ 必须原地——早期版本走 `in_q.put` 会**自锁**：本机是该缓冲的唯一消费者，
+            # 缓冲满时 put 永久阻塞，而此时还占着加工槽 ⇒ 该机位连同工件一起卡死
+            # （实测 MK07/MK10 5/5 掐表，关掉返工即 0/5）。
+            while True:
+                yield from self._process(job, op)
+                if self.con.rework and self.rng.random() < self.cfg.p_rework:
+                    self.stats["rework_events"] += 1
+                    continue
+                break
             self.stats["ops_done"] = self.stats.get("ops_done", 0) + 1
             if is_last:
                 self.completes[job] = self.env.now      # 末工序完成即出库（不进输出缓冲/无搬运）
@@ -241,12 +275,13 @@ class AgvSim:
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
-                 tasks_in, machines: list, graph, zm, bound: bool = False,
-                 congestion: bool = True):
+                 tasks_in, machines: list, graph, zm, constraints,
+                 bound: bool = False):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
         self.g, self.zm = graph, zm
-        self.congestion = congestion        # ① 关 → 无区段管制
+        self.con = constraints              # ① congestion 等物流侧开关从这里读
+        self.congestion = constraints.congestion    # ① 关 → 无区段管制
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
         self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
 
@@ -403,7 +438,9 @@ class SimWorld:
                  # M2 能耗的三态时长（P1b Task 2）：机床按机位计，AGV 按车队合计
                  "proc_min": [0.0] * self.inst.n_machines,
                  "setup_min": [0.0] * self.inst.n_machines,
-                 "agv_empty_min": 0.0, "agv_loaded_min": 0.0}
+                 "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
+                 # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
+                 "rework_events": 0, "pm_events": 0}
         env = simpy.Environment()
         inst = self.inst
         # 计划表：job -> [(mach, time)]（按 op_choices 或贪婪最短选择）
@@ -417,9 +454,8 @@ class SimWorld:
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
-        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q,
-                           finite_buffer=self.constraints.finite_buffer,
-                           machine_failure=self.constraints.machine_failure)
+        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
+                               events_q, self.constraints)
                     for i in range(inst.n_machines)]
         bound = agv_phi is not None
         if bound:
@@ -430,8 +466,7 @@ class SimWorld:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in,
-                               machines, self.g, zm,
-                               congestion=self.constraints.congestion, bound=bound).run())
+                               machines, self.g, zm, self.constraints, bound=bound).run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
         inject_q: list = []
@@ -454,6 +489,9 @@ class SimWorld:
                 "completes": dict(completes),          # 每作业完工时刻（交期校准 / TWT 需要）
                 "energy": energy["total_kwh"],         # M2 引证模型（spec §3.4），单位 kWh
                 "energy_breakdown": energy,
+                "setup_minutes_total": float(sum(stats["setup_min"])),
+                "rework_events": stats["rework_events"],
+                "pm_events": stats["pm_events"],
                 "fail_events": stats["fail_events"], "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
                 "horizon_hit": stats.get("horizon_hit", False),
@@ -485,7 +523,9 @@ class SimWorld:
                  # M2 能耗的三态时长（P1b Task 2）：机床按机位计，AGV 按车队合计
                  "proc_min": [0.0] * self.inst.n_machines,
                  "setup_min": [0.0] * self.inst.n_machines,
-                 "agv_empty_min": 0.0, "agv_loaded_min": 0.0}
+                 "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
+                 # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
+                 "rework_events": 0, "pm_events": 0}
         env = simpy.Environment()
         inst = self.inst
         plans = {}
@@ -498,17 +538,15 @@ class SimWorld:
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
-        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q,
-                           finite_buffer=self.constraints.finite_buffer,
-                           machine_failure=self.constraints.machine_failure)
+        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
+                               events_q, self.constraints)
                     for i in range(inst.n_machines)]
         tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
         for m in machines:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                               self.g, zm,
-                               congestion=self.constraints.congestion, bound=True).run())
+                               self.g, zm, self.constraints, bound=True).run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
         for j in jkeys:
@@ -528,6 +566,9 @@ class SimWorld:
                 "completes": dict(completes),          # 每作业完工时刻（同 run()）
                 "energy": energy["total_kwh"],         # M2 引证模型（同 run()）
                 "energy_breakdown": energy,
+                "setup_minutes_total": float(sum(stats["setup_min"])),
+                "rework_events": stats["rework_events"],
+                "pm_events": stats["pm_events"],
                 "fail_events": stats["fail_events"],
                 "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
