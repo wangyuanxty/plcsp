@@ -1,13 +1,18 @@
-"""双轴解耦轴向注意力编码器（《方法设计文档》§2.3：128/4/8，轴解耦块稀疏）。
+"""四段 token 编码器（《方法设计文档》§2.3：128/4/8）——**统一宽度 + 类型嵌入**。
 
-设计：序列 = [M...M (机台) | B...B (工序) | V...V (车辆)]，三段规模 n_m/n_b/n_v。
-- **生产轴**：M↔M、M↔B、B↔B 块内注意力
-- **物流轴**：V↔V、V↔B、B↔B 块内注意力
-- 复杂度：每层两个带掩码注意力，块规模各自独立（∑O(块²) 替代 O(N²)——"双轴解耦"即该掩码结构）
+序列 = [M...M (机台) | B...B (作业) | V...V (车辆) | G (全局)]，四段行数 (n_m, n_jobs, n_agv, 1)。
+输入是**单张** `(N, F_MAX)` 张量（列定义见 `features.py`：各段补零到 `F_MAX=10`）：
+
+- **单个 `Linear(F_MAX → d_model)`**：四段共用同一套权重列（参数 1280，而非分段投影的 3584）；
+- **类型嵌入 `type_emb (4, d_model)`**：由 `seg` 给每个 token 定类型 id（0=M/1=B/2=V/3=G）。
+  ⚠️ 统一宽度方案下**必需**（spec §5.3.1）：四段列语义重叠（第 3 列在 M 段是"在加工"、
+  在 B 段是"已完成"），只有类型嵌入能把它们解耦开。**去掉类型嵌入，本方案即失效。**
+- **全连接注意力**（spec §5.1）：原双轴块稀疏掩码（`block_mask` / `DualAxisLayer`）整体删除。
 
 ⚠️ 2026-10-02：**几何偏置（GeomBias）已移除**——几何/度量感知路线整条砍除
 （见 `progress-log.md` §12.6）。本模块不再接收 dist/conf。
-编码器改为标准 Transformer 属 P2（骨架），此处只做删除，不做重设计。
+⚠️ 2026-10-03：**P2 Task 3 重写**——旧版三类 token 被迫同宽（单一 `Linear(6, ·)`）、无类型
+嵌入，`mask='full'` 下 `seg` 完全不被使用，网络分不出 M/B/V（spec §5.3.1 现状表 #3）。
 """
 from __future__ import annotations
 
@@ -16,25 +21,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_SEG_INDEX = {"M": 0, "B": 1, "V": 2}
+from .features import F_MAX, SEG_SLICE
+
+_SEG_KEYS = ("M", "B", "V", "G")          # 与 seg 元组的段序一一对应（不可改动）
 
 
-def block_mask(seq_len: int, seg: tuple[int, int, int], axis: str, device=None) -> torch.Tensor:
-    """轴掩码（True=允许注意力）。seg=(n_m, n_b, n_v)；axis='prod'|'logi'。"""
-    nm, nb, nv = seg
-    starts = {"M": 0, "B": nm, "V": nm + nb}
-    allowed = (("M", "M"), ("M", "B"), ("B", "M"), ("B", "B")) if axis == "prod" else \
-              (("V", "V"), ("V", "B"), ("B", "V"), ("B", "B"))
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
-    for (a, b) in allowed:
-        ia0, ja0 = starts[a], starts[b]
-        sa, sb = seg[_SEG_INDEX[a]], seg[_SEG_INDEX[b]]
-        mask[ia0:ia0 + sa, ja0:ja0 + sb] = True
-    return mask
-
-
-class DualAxisLayer(nn.Module):
-    """一层双轴注意力（生产轴→物流轴→FFN）。"""
+class AttnLayer(nn.Module):
+    """一层标准全连接注意力（原 `DualAxisLayer`——轴掩码与其形参一并删除）。"""
 
     def __init__(self, d: int = 128, h: int = 4):
         super().__init__()
@@ -44,50 +37,72 @@ class DualAxisLayer(nn.Module):
         self.ffn = nn.Sequential(nn.Linear(d, 2 * d), nn.GELU(), nn.Linear(2 * d, d))
         self.ln1, self.ln2 = nn.LayerNorm(d), nn.LayerNorm(d)
 
-    def _axis_attn(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def _attn(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = q.view(B, N, self.h, self.dh).transpose(1, 2)
         k = k.view(B, N, self.h, self.dh).transpose(1, 2)
         v = v.view(B, N, self.h, self.dh).transpose(1, 2)
-        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.dh)
-        scores = scores.masked_fill(~mask.unsqueeze(1), -1e9)     # 轴掩码（不可见块 -inf）
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.dh)   # 全连接：无掩码
         w = F.softmax(scores, dim=-1)
         out = (w @ v).transpose(1, 2).reshape(B, N, self.d)
         return self.oproj(out)
 
-    def forward(self, x: torch.Tensor, prod_m: torch.Tensor, logi_m: torch.Tensor) -> torch.Tensor:
-        x = x + self.ln1(self._axis_attn(x, prod_m))
-        x = x + self.ln2(self._axis_attn(x, logi_m))
-        return x + self.ffn(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.ln1(self._attn(x))
+        return x + self.ln2(self.ffn(x))
 
 
 class LayoutEncoder(nn.Module):
-    """双轴轴向注意力编码器（128/4/8）。输入 token 特征 → 每 token 嵌入 + 全局上下文。"""
+    """统一宽度编码器（128/4/8）。`(N, F_MAX)` token 特征 → 每 token 嵌入 + 全局上下文。
+
+    ⚠️ `feat_dim` 必须等于 `F_MAX`（`SEG_SLICE` 的列布局按 `F_MAX` 定死）。
+    """
+
+    N_SEG_TYPES = 4                                # M / B / V / G
 
     def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = 8,
-                 feat_dim: int = 6, mask: str = "axial"):
+                 feat_dim: int = F_MAX):
         super().__init__()
         self.d_model, self.n_heads, self.n_layers = d_model, n_heads, n_layers
-        self.mask = mask                              # 'axial'=双轴解耦（默认）| 'full'=全注意力
-        self.embed = nn.Linear(feat_dim, d_model)
-        self.layers = nn.ModuleList([DualAxisLayer(d_model, n_heads) for _ in range(n_layers)])
+        self.feat_dim = feat_dim
+        self.embed = nn.Linear(feat_dim, d_model)          # **单个** Linear（统一宽度）
+        # 类型嵌入**必需**（spec §5.3.1）：解耦四段重叠的列语义。小随机初值（BERT 式 0.02）——
+        # 若零初值，特征全同的 token 会退化成完全相同的嵌入，网络分不出类型。
+        self.type_emb = nn.Parameter(torch.randn(self.N_SEG_TYPES, d_model) * 0.02)
+        self.layers = nn.ModuleList([AttnLayer(d_model, n_heads) for _ in range(n_layers)])
         self.ln = nn.LayerNorm(d_model)
 
-    def forward(self, tok_feat: torch.Tensor, seg: tuple[int, int, int]) -> tuple[torch.Tensor, torch.Tensor]:
-        """tok_feat: (B,N,F)；seg=(nm,nb,nv)。
+    def forward(self, tok_feat: torch.Tensor, seg: tuple[int, int, int, int]
+                ) -> tuple[torch.Tensor, torch.Tensor]:
+        """tok_feat: **单张** (1, N, F_MAX)；seg=(n_m, n_jobs, n_agv, n_g=1)。
 
-        返回 (token 嵌入 (B,N,d), 全局上下文 (B,d)=均值池化)。
+        返回 (token 嵌入 (1, N, d), 全局上下文 (1, d)=均值池化)。
+        `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
+        按 `SEG_SLICE` 清补零列，并核对总长。
         """
-        B, N, _ = tok_feat.shape
-        x = self.embed(tok_feat)
-        if self.mask == "full":
-            pm = torch.ones(N, N, dtype=torch.bool, device=x.device).unsqueeze(0).expand(B, -1, -1)
-            lm = pm.clone()
-        else:
-            pm = block_mask(N, seg, "prod", x.device).unsqueeze(0).expand(B, -1, -1)
-            lm = block_mask(N, seg, "logi", x.device).unsqueeze(0).expand(B, -1, -1)
+        n_m, n_b, n_v, n_g = seg
+        N = n_m + n_b + n_v + n_g
+        assert tok_feat.shape[1] == N, f"tok_feat 行数 {tok_feat.shape[1]} != sum(seg)={N}"
+        tid = torch.cat([torch.full((n,), i, dtype=torch.long)
+                         for i, n in enumerate(seg)])          # 每个 token 的类型 id
+        cols = self._col_mask(seg, tok_feat.dtype)
+        x = (self.embed(tok_feat[0] * cols) + self.type_emb[tid]).unsqueeze(0)
         for layer in self.layers:
-            x = layer(x, pm, lm)
+            x = layer(x)
         x = self.ln(x)
         return x, x.mean(dim=1)
+
+    def _col_mask(self, seg: tuple[int, int, int, int], dtype: torch.dtype) -> torch.Tensor:
+        """(N, F_MAX) 0/1 列掩码：各段只放行 `SEG_SLICE` 内的有效列，补零列置 0。
+
+        ⚠️ 补零列在 `build_tok` 里恒为 0，但单 Linear 会照吃 `W[:, 7:]` 这类补零列权重——
+        上游一旦列偏移写错（数据落进补零列），编码器就会把它当真值。此处按列真相
+        `SEG_SLICE` 显式清零，把"补零列不影响嵌入"钉成编码器自己的不变量。
+        """
+        cols = torch.zeros(sum(seg), self.feat_dim, dtype=dtype)
+        r = 0
+        for key, n in zip(_SEG_KEYS, seg):
+            cols[r:r + n, SEG_SLICE[key]] = 1.0
+            r += n
+        return cols
