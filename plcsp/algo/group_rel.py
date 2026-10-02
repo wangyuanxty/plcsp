@@ -3,7 +3,9 @@
     链 = (机台计划序列 a_S[1..n_ops]) ⊕ (派车序列 a_L[1..n_tasks])
     logp(链) = Σ_t log π_S(a_S[t]) + Σ_t log π_L(a_L[t])        ← 两条都取【求和】
 
-后接标准 GRPO：**一个**终端奖励 r → 组内 z 化（`_z`）→ 纯组内 REINFORCE 或 PPO 式裁剪。
+后接标准 GRPO：**一个**终端奖励 r → 组内 z 化（`_z`）→ 纯组内 REINFORCE（默认：
+`epochs=1, clip_eps=None`）或 PPO 式裁剪（**只在 `epochs>1` 时才有意义**——`epochs=1` 时
+`ratio ≡ 1`，裁剪项恒等、纯空转；见 `joint_chain_step` 的守卫）。
 
 spec §5.3.4 五条硬性约定在本模块的落点：
 1. **联合链、单一优势** —— `roll_chain` 把两头的决策记在**同一条**链上（同一 episode），
@@ -125,6 +127,10 @@ class Decision:
     cand_feat: np.ndarray            # 逐候选特征 (n_cand, F_cand)
     cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号）
     action: int                      # 所取的动作（∈ cand）
+    # 采样那一刻策略在 `action` 上的 log 概率（无梯度标量）。它是 `chain_logp` 带梯度重算值的
+    # **同源对照**：裁剪路径的 `logp_old` 直接由它求和（省掉一整遍"重算 old"的链前向），
+    # 一致性由测试钉死。既然取自采样那一刻，它天然不受"采样之后再算 old"这类重排的影响。
+    logp: float
 
 
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
@@ -159,12 +165,16 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                           torch.as_tensor(feat, dtype=torch.float32).reshape(1, 1, -1),
                           torch.as_tensor(cand_feat, dtype=torch.float32),
                           torch.tensor(cand, dtype=torch.long))
-            p = torch.softmax(logits.flatten(), -1)
-            k = int(torch.multinomial(p, 1).item()) if sample else int(p.argmax())
+            # 用 log_softmax（而非 softmax）取样：同一遍里就拿到所取动作的 log 概率
+            # （`Decision.logp`）——裁剪路径据此省掉一整遍"重算 logp_old"的链前向。
+            lp_all = torch.log_softmax(logits.flatten(), -1)
+            k = (int(torch.multinomial(lp_all.exp(), 1).item()) if sample
+                 else int(lp_all.argmax()))
+            lp_k = float(lp_all[k])
         decisions.append(Decision(kind=kind, tok=tok_feat, seg=seg,
                                   feat=np.asarray(feat, dtype=np.float32),
                                   cand_feat=np.asarray(cand_feat, dtype=np.float32),
-                                  cand=cand, action=int(cand[k])))
+                                  cand=cand, action=int(cand[k]), logp=lp_k))
         return int(cand[k])
 
     def policy_s(snap, job, oi, cand):
@@ -202,19 +212,67 @@ def chain_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
     return total
 
 
+def sampled_logp(decisions: list[Decision]) -> torch.Tensor:
+    """Σ `Decision.logp`——采样那一刻 logp 的**无梯度回放**（裁剪路径的 `logp_old`）。
+
+    ⚠️ 与 `chain_logp` **同序、同 dtype** 累加（float32 逐步相加），故"参数未变"时两者
+    **逐位相同**——`ratio = exp(new − old) ≡ 1` 才是严格成立（而非近似）。
+    别图省事改用 float64 求和：那会引入 ~1e-5 的假 delta，把 ratio 推离 1（实测 1.0000114），
+    在裁剪边界上给出无意义的翻转。本函数没有可省的前向：值在 `roll_chain` 采样时就已算好。
+    """
+    total = torch.zeros(())
+    for d in decisions:
+        total = total + torch.tensor(d.logp, dtype=torch.float32)
+    return total
+
+
 def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.ndarray,
                      cfg: SimConfig, ctx: NormContext, w: tuple[float, float, float],
                      seed: int, G: int = 8, lr: float = 1e-3,
-                     clip_eps: float | None = 0.2,
+                     clip_eps: float | None = None,
                      epochs: int = 1) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
-    `reward.scalar_reward`）→ **组内 z 化**（`_z`，一个优势，不按头分层）→ PPO 式裁剪更新。
+    `reward.scalar_reward`）→ **组内 z 化**（`_z`，一个优势，不按头分层）→ 组内更新。
     优化器 = Adam（`policy.optim` 惰性创建：约定 4；不再手写 SGD + 逐元素 clamp）。
-    `clip_eps=None` ⇒ 纯组内 REINFORCE（不裁剪、不算 ratio）；`epochs` = 同批链的重用轮数。
-    返回 (组内 r 均值, 诊断 dict：loss / ratio / r 均值与 std / 优势 std)。
+
+    ⚠️ **裁剪只在 `epochs > 1` 时才有意义**（默认 `epochs=1, clip_eps=None` = 纯组内 REINFORCE，
+    即 spec §5.3.4/理论骨架的「纯版本」）：`epochs=1` 时 `new` 与 `logp_old` 都在**同一组参数**
+    上算出 ⇒ `ratio ≡ 1` ⇒ `clamp(1, 1±ε) ≡ 1`，裁剪项**恒等**、纯空转（`test_ratio_is_one_
+    for_unchanged_policy` 测的就是这个事实）。故此处显式**拒收**"epochs=1 + clip_eps"这个组合，
+    并在 `epochs=1` 时**连 `logp_old` 都不算**——省掉一整遍链前向；`epochs>1` 时 `logp_old`
+    直接取 `Decision.logp`（采样那一刻已存），**不额外重算**。
+
+    ⚠️ **链级 ratio 的尺度**（本任务实测，务必知情）：`logp` 是**求和**（约定 2，链长 100–460），
+    故 `ratio = exp(Δ链logp)` 对单决策变化极敏感——**一次** Adam 更新（lr=1e-3）就把链 logp 推过
+    `log(1.2)`，于是 `epochs≥2` 时全部链的 ratio 出界、裁剪项恒定、**梯度恒 0**（实测 MK01、
+    G=2/G=4：epoch≥1 的 `grad_norm` 全是 0.0000）⇒ 多出来的那些 epoch 是**纯浪费**。
+    链级 `clip_eps=0.2` 等价于"每决策 ≈ log(1.2)/n ≈ 0.002 nats（n=100）"。要真信任域，
+    `clip_eps` 得按链长放大（或改成分决策裁剪——那要动约定 2，属研究口径决策）。
+    `clipped_frac` 就是这条的读数（1.0 = 全裁、该轮无梯度信号）。
+
+    ⚠️ **`layout.layout_seed` 必须为 0**（守卫在入口）：奖励权重 `w` 的既定来源
+    `ReferenceObjectives.of` 固定用 seed_layout=0 的参考运行，而 `SimWorld._due_map` 用**该
+    布局**的 seed 取 M_ref（连交期本身都随之变）——两者不同源则目标口径与权重口径**静默错位**
+    （Fact F）。如需非 0 布局种子，须先让 `ReferenceObjectives` 记录其种子再放宽此守卫。
+
+    返回 (组内 r 均值, 诊断 dict：loss / ratio / clipped_frac / grad_norm / r 均值与 std / 优势 std)。
+    `ratio` / `clipped_frac` 只在裁剪路径被真算（无裁剪时报 1.0 / 0.0，= 不适用）。`loss` 在裁剪
+    路径的首轮**结构性为 0**（`ratio=1` ⇒ `obj=A` ⇒ `-mean(A)=0`，A 是 z 化量），故诊断另给
+    **非零**的 `grad_norm`（= 裁剪前的 `‖∂L/∂θ‖`）作为"训练在不在动"的读数。
     """
+    if layout.layout_seed != 0:
+        raise ValueError(
+            f"layout_seed={layout.layout_seed} ≠ 0：奖励权重（ReferenceObjectives.of 固定 "
+            "seed_layout=0）与交期 M_ref（_due_map 用布局种子）会不同源，目标口径静默错位。"
+            "请传 seed=0 的布局；确需非 0 种子，先扩展 ReferenceObjectives 记录它。")
+    if epochs > 1 and clip_eps is None:
+        raise ValueError("epochs>1 必须配 clip_eps：无裁剪时同一批数据重复计算，"
+                         "结果与 epochs=1 相同（纯浪费）。")
+    if clip_eps is not None and epochs <= 1:
+        raise ValueError("epochs=1 配 clip_eps 是空转：new 与 logp_old 同参数算出 ⇒ ratio≡1 "
+                         "⇒ clamp 恒等。请用 epochs>1，或 clip_eps=None（纯组内 REINFORCE）。")
     if policy.optim is None:
         policy.optim = torch.optim.Adam(policy.parameters(), lr=lr)
 
@@ -227,10 +285,11 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
 
     A = torch.tensor(_z(np.asarray(rewards, dtype=np.float64), "z"), dtype=torch.float32)
 
-    with torch.no_grad():                    # 冻结旧 logp（裁剪代理的 ratio 基准）
-        old = torch.stack([chain_logp(d, policy) for d in chains]).detach()
+    # 裁剪路径的 ratio 基准 = 采样那一刻的 logp（`Decision.logp`，无梯度）——不重算，
+    # 且与 `chain_logp` 逐位同源（见 `sampled_logp`），故首轮 ratio 严格 = 1。
+    old = torch.stack([sampled_logp(ch) for ch in chains]) if clip_eps is not None else None
 
-    loss_val, ratio_mean = 0.0, 1.0
+    loss_val, ratio_mean, clipped_frac, grad_norm = 0.0, 1.0, 0.0, 0.0
     for _ in range(max(epochs, 1)):
         new = torch.stack([chain_logp(d, policy) for d in chains])
         if clip_eps is None:
@@ -240,14 +299,19 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             obj = torch.min(ratio * A.detach(),
                             torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * A.detach())
             ratio_mean = float(ratio.mean().item())
+            # 出界比例 = 该轮 surrogate **失去梯度**的链占比（1.0 = 全裁 ⇒ 这一轮纯浪费）
+            clipped_frac = float(((ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps))
+                                 .float().mean().item())
         loss = -obj.mean()
         policy.optim.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)   # 范数裁剪（不是逐元素）
+        # 范数裁剪（不是逐元素）；返回值 = 裁剪前的梯度范数，作为**非零**学习信号入诊断
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0))
         policy.optim.step()
         loss_val = float(loss.item())
 
-    diag = {"loss": loss_val, "ratio": ratio_mean,
+    diag = {"loss": loss_val, "ratio": ratio_mean, "clipped_frac": clipped_frac,
+            "grad_norm": grad_norm,
             "r_mean": float(np.mean(rewards)), "r_std": float(np.std(rewards)),
             "A_std": float(A.std())}
     for d in chains:                         # ⚠️ 决策日志**用完即弃**——不得跨 step 累积
