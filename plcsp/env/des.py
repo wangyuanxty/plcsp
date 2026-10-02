@@ -336,7 +336,14 @@ class SimWorld:
                  cfg: SimConfig | None = None, graph=None, constraints=None):
         self.inst, self.layout, self.m_dm = inst, layout, m_dm
         self.cfg = cfg or SimConfig()
-        self.g = graph      # 格点走廊图（AGV 逐段路径的来源）
+        # 格点走廊图（AGV 空载段/区段路径的来源）。`graph=None` 时**自建**——
+        # 此前 6 处调用点（训练环 group_rel ×3、m11、m6_*  ×2）都省略了它，
+        # 在旧代码里恰好无害（AGV 用的是任务里带好的 path），一旦 AGV 需要自己算路径
+        # 就会在运行期炸成 `dijkstra_path(None, …)`。自建彻底消除这个坑。
+        if graph is None:
+            from .corridors import build_corridor_graph
+            graph = build_corridor_graph(layout)
+        self.g = graph
         if constraints is None:
             from .constraints import ConstraintConfig
             constraints = ConstraintConfig()
