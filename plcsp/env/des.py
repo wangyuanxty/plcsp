@@ -58,7 +58,10 @@ def rollout_evaluate(inst: Instance, plan: list[int] | None, seed: int = 0,
 @dataclass
 class SimConfig:
     n_agv: int = 3          # spec §6.3 主实验值（网格上按边际收益拐点重标）
-    agv_speed_mps: float = 1.0    # AGV 车速 [m/s]（布局坐标为米）
+    # AGV 车速 [m/s]。**2026-10-02 由 1.0 改为 0.5**：0.5 取自我们**已引证的** GFJSPT-MMRS
+    # （spec §3.4 表："AGV 3 台，0.5 m/s"）；1.0 是无出处的拍脑袋值，且使运输被低估一倍。
+    # 文献区间：0.3–0.6（IEJ 随机批量运输 FJSP）、1.2（FlexSim 车间级案例）。车速是扫描轴之一。
+    agv_speed_mps: float = 0.5
     zone_hold: float = 1.0        # 缓冲满退避时长 [min]
     zone_granularity: str = "node"   # 区段粒度：node|row|col|all（越粗→区段越少→争用越强）
     zone_wait_limit: float = 8.0     # 区段申请等待上限 [min]（超时→退避重试）
