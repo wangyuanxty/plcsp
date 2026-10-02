@@ -907,7 +907,7 @@ class SimWorld:
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
         活状态快照交给它（无并发 → 无需事件/Gate）。L 与 S 的回调契约对称：
-        `policy_l(snap, frm, to, oi+1, cand_v) -> 车号`（候选 = 全车队）；`des.py` 只给原始
+        `policy_l(snap, job, frm, to, oi+1, cand_v) -> 车号`（候选 = 全车队）；`des.py` 只给原始
         材料、**不构造任何特征**（层次纪律：`env/` 不得依赖 `nn/`）。
 
         `online_s=False`（默认）：S 层读**预计算**的 `plans`（`op_choices` 或贪婪最短）——
@@ -918,7 +918,7 @@ class SimWorld:
         （`plans[job][oi]` 在决策后写入），故**决策前不得读它**。
 
         决策日志回传：`dict["decision_log"]`，条目按首元素 kind 分派——
-        `("S", snap, job, oi, cand, choice)` / `("L", snap, (frm, to, oi+1), cand_v, agv)`
+        `("S", snap, job, oi, cand, choice)` / `("L", snap, job, (frm, to, oi+1), cand_v, agv)`
         （`oi+1` = 目标工序序号；`cand_v` = 全车队）。
         ⚠️ 只记**原始快照**（不构造特征：`env/` 不得依赖 `nn/`）——快照→特征在 `algo/` 层做。
         """
@@ -1047,9 +1047,10 @@ class SimWorld:
 
         输出缓冲满=阻塞源：out_q.put 在机台侧阻塞；此处 get 保证消费（阻塞语义=M1.1 消磨）。
         末工序 + 在途注入队列非空 → 注入下一作业（分批门控波次语义）。
-        L 层（`policy_l` 非空）：`policy_l(snap, frm, to, oi+1, cand_v) -> 车号`——`snap` = 此刻
-        的活状态，任务身份 = (起送机台, 目标机台, 目标工序序号)，候选 = 全车队；此处**不构造
-        任何特征**（F1，P2 Task 5）。
+        L 层（`policy_l` 非空）：`policy_l(snap, job, frm, to, oi+1, cand_v) -> 车号`——`snap` = 此刻
+        的活状态，任务身份 = (作业号, 起送机台, 目标机台, 目标工序序号)，候选 = 全车队；此处
+        **不构造任何特征**（F1，P2 Task 5；作业号由 P2 Task 7 补入——L 头的任务特征含"该机
+        是否需换型"，需要作业号，且用 (frm, to, oi) 反查作业多义）。
         L 层（bound，`policy_l` 为空）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；
         超出补轮询。
         """
@@ -1085,14 +1086,17 @@ class SimWorld:
                 # 此前这里现搓 11 维扁平特征（含魔数 (oi+1)/8、task_i/50，MK10 上溢出到
                 # 1.75/4.40），其唯一消费者 `PolicyNet.agv_logits` 已随 Task 4 删除——
                 # 即那段是**死代码**，故整体删除：特征一律由调用方从快照自造。
+                # T7（P2 Task 7）：任务身份再补**作业号**——L 头的任务特征含"该机是否需换型"
+                # （需作业号），而 (frm, to, oi) 反查作业**多义**（实测 MK01 51/112、
+                # MK10 538/985 个键有歧义），静默取错作业 = 换型特征错，故走显式参数。
                 snap = self.snapshot()                  # 派车决策时点的活状态（只读）
                 cand_v = list(range(len(tasks_in)))     # 候选 = 全车队（每车一队列，都可选）
-                agv = int(policy_l(snap, frm_idx, nxt_m, oi + 1, cand_v))
+                agv = int(policy_l(snap, job, frm_idx, nxt_m, oi + 1, cand_v))
                 if agv not in cand_v:
                     # 同 policy_s：非候选**显式报错**——负索引会静默回绕到别的车
                     raise ValueError(f"policy_l 派了不存在的车 {agv}；候选={cand_v}")
                 # 决策日志（P2 Task 5）：只记**原始快照**——不构造特征（env/ 不得依赖 nn/）
-                dec_log.append(("L", snap, (frm_idx, nxt_m, oi + 1), tuple(cand_v), agv))
+                dec_log.append(("L", snap, job, (frm_idx, nxt_m, oi + 1), tuple(cand_v), agv))
                 yield tasks_in[agv].put(task)
             elif bound:
                 n_agv = len(tasks_in)

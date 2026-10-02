@@ -47,7 +47,7 @@ def _rr_policy_l(n_agv: int):
     每条链各自一个计数器 ⇒ 两条链的派车序列逐位相同（不依赖任何入参）。
     """
     it = itertools.count()
-    return lambda snap, frm, to, oi, cand: next(it) % n_agv
+    return lambda snap, job, frm, to, oi, cand: next(it) % n_agv
 
 
 @pytest.mark.unit
@@ -106,17 +106,21 @@ def test_online_s_sees_live_machine_state():
 @pytest.mark.unit
 def test_policy_l_sees_live_snapshot_and_task_identity():
     """F1（Task 5 裁定）：L 派工点的契约与 `policy_s` 对称——
-    `policy_l(snap, frm, to, oi, cand) -> 车号`，其中 `snap` 必须是**当时的**活状态。
+    `policy_l(snap, job, frm, to, oi, cand) -> 车号`，其中 `snap` 必须是**当时的**活状态。
 
     断言两件事：①快照是活的（若干次决策看到"已有作业完成"的世界——传缓存/初始快照的
     实现下该数恒为 0）；②回调拿到的**任务身份**与仿真记录的 `task_flow` 逐条一致
-    （`(frm, to, oi)` 三项，防参数错位）。
+    （`(job, frm, to, oi)` 四项，防参数错位）。
+
+    ⚠️ `job` 由 P2 Task 7 补入：L 头的任务特征含"该机是否需换型"，需要作业号；
+    `(frm, to, oi)` 反查作业多义（MK01 51/112、MK10 538/985 键有歧义）。断言随之**加强**
+    （原来只核三项，现在连作业号一并核对）。
     """
     n_agv = SimConfig().n_agv
     rec = []
 
-    def policy_l(snap, frm, to, oi, cand):
-        rec.append((snap.now, snap.n_done, frm, to, oi, tuple(cand)))
+    def policy_l(snap, job, frm, to, oi, cand):
+        rec.append((snap.now, snap.n_done, job, frm, to, oi, tuple(cand)))
         return cand[0]
 
     r = _world().run_gated(seed_chain=1, policy_l=policy_l)
@@ -128,6 +132,7 @@ def test_policy_l_sees_live_snapshot_and_task_identity():
     assert done_seen >= 5, (f"只有 {done_seen}/{len(rec)} 次 L 决策看到已完成作业——"
                             "疑似看的是初始快照")
     assert len(rec) == len(flow)
-    for e, (_j, oi_f, frm_f, to_f) in zip(rec, flow):
-        assert (e[2], e[3], e[4]) == (frm_f, to_f, oi_f), "回调拿到的任务身份与 task_flow 不符"
-        assert e[5] == tuple(range(n_agv)), f"L 候选应为全车队，实得 {e[5]}"
+    for e, (j_f, oi_f, frm_f, to_f) in zip(rec, flow):
+        assert (e[2], e[3], e[4], e[5]) == (j_f, frm_f, to_f, oi_f), \
+            "回调拿到的任务身份与 task_flow 不符"
+        assert e[6] == tuple(range(n_agv)), f"L 候选应为全车队，实得 {e[6]}"

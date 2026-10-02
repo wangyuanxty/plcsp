@@ -4,17 +4,23 @@
 中断必须可续（教训：fjsp-gnnrl MK01 训练首次中断于 Episode 2399/10k，无 ckpt → 只能重跑）。
 
 设计（KISS/工程层，不混淆理论）：
-- 每步仍调用纯函数（train_step），runner 只负责循环/保存/恢复；
+- 每步仍调用纯函数（`joint_chain_step`，P2 Task 7 起），runner 只负责循环/保存/恢复；
 - ckpt = {"step": int, "model": state_dict, "best": float, "seed0": int}
   每 save_every 步写 checkpoints/<run_id>/ckpt.pt；metrics.ndjson 每步追加一行（增量，可断外部分析）；
 - 恢复：resume_training(run_dir) → (policy, ckpt, step)；step 序列续跑（不追求逐位复现：
   采样依赖全局 np RNG，ckpt 语义 = 续训而非确定性重放——论文口径已声明）。
 
 用法：
-    run_id = f"{algo}-G{G}J{J}-s{seed}"
-    run_training(policy, inst, steps=200, step_fn=train_step, seed0=0,
-                 step_kwargs=dict(G=8, J=1), run_id=run_id)
+    run_id = f"{algo}-G{G}-s{seed}"
+    run_training(policy, inst, steps=200, step_fn=joint_chain_step, seed0=0,
+                 step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=8),
+                 run_dir="checkpoints/" + run_id)
     policy, ck, _ = resume_training("checkpoints/" + run_id)
+
+⚠️ `step_fn` 默认已是联合链（`joint_chain_step`）——它的**环境参数**（布局 / 距离矩阵 /
+`SimConfig` / `NormContext` / 奖励权重 `w`）一律经 `step_kwargs` 传入（runner 不自己造环境）。
+⚠️ 训练用的 `PolicyNet` **必须带编码器**（`enc=LayoutEncoder()`）：两个打分头只在
+`enc is not None` 时存在，无编码器的 policy 调 `joint_chain_step` 会 AttributeError。
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ from pathlib import Path
 
 import torch
 
-from .group_rel import train_step
+from .group_rel import joint_chain_step
 from .policy import PolicyNet
 from ..nn.encoder import LayoutEncoder
 from ..env.instances import Instance
@@ -34,7 +40,7 @@ METRICS_NAME = "metrics.ndjson"
 
 
 def run_training(policy: PolicyNet, inst: Instance, steps: int,
-                 step_fn=train_step, step_kwargs: dict | None = None,
+                 step_fn=joint_chain_step, step_kwargs: dict | None = None,
                  seed0: int = 0, run_dir: str = "checkpoints/run_0",
                  save_every: int = 10, resume: bool = False,
                  eval_fn=None, eval_every: int | None = None) -> dict:
@@ -84,6 +90,10 @@ def resume_training(run_dir: str) -> tuple[PolicyNet, dict, int]:
 
     ckpt 键含 enc.* → 自动构造 PolicyNet(enc=LayoutEncoder()) 恢复。
 
+    ⚠️ **前缀检查的语义（Task 7 同步）**：`enc.*` 是"这个 ckpt 能不能继续**训练**"的判据——
+    P2 起两个打分头只在 `enc is not None` 时存在，无 `enc.*` 的 ckpt 只能当推理用的裸
+    policy（`joint_chain_step` 会用 AttributeError 拒收，不会静默退化）。
+
     ⚠️ 2026-10-02：**P0 前的旧 checkpoint 全部作废**——`checkpoints/` 下 19 个 `.pt` 均含已删除的
     `b_head.*`（分批头）键，且训练于 bug#12 的错误实例（非官方 Brandimarte）。加载会明确报错。
     """
@@ -105,15 +115,26 @@ if __name__ == "__main__":
     # 自检：跑 5 步 → ckpt；模拟恢复进程 → 续 3 步（验证保存/恢复管线）
     import shutil
     import tempfile
+    from ..env.corridors import build_corridor_graph, dock_distance_matrix
+    from ..env.des import SimConfig
     from ..env.instances import gen_random
+    from ..env.layout import sample_layout
+    from ..env.reward import ReferenceObjectives, reward_weights
+    from ..nn.state_emb import norm_context
     inst = gen_random(4, 3, seed=0)
-    pol = PolicyNet()
+    cfg = SimConfig()
+    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)   # ⚠️ 车队数须与 cfg 一致
+    dm = dock_distance_matrix(build_corridor_graph(lay))
+    ctx = norm_context(inst, lay, m_ref=100.0)
+    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    pol = PolicyNet(enc=LayoutEncoder(), n_agv=cfg.n_agv)          # 训练必须带编码器
+    kw = dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=4)
     d = Path(tempfile.mkdtemp()) / "run_selfcheck"
-    run_training(pol, inst, steps=5, step_fn=train_step, step_kwargs={"G": 4, "J": 1},
+    run_training(pol, inst, steps=5, step_fn=joint_chain_step, step_kwargs=kw,
                  seed0=0, run_dir=str(d), save_every=2)
     assert (d / CKPT_NAME).exists(), "ckpt 未写出"
     pol2, ck2, s2 = resume_training(str(d))
-    r2 = run_training(pol2, inst, steps=3, step_fn=train_step, step_kwargs={"G": 4, "J": 1},
+    r2 = run_training(pol2, inst, steps=3, step_fn=joint_chain_step, step_kwargs=kw,
                       seed0=0, run_dir=str(d), save_every=2, resume=True)
     print(f"[runner-selfcheck] resumed step={s2} → final={r2['step']} r_last={r2['r_last']:.2f}")
     shutil.rmtree(Path(d).parent, ignore_errors=True)

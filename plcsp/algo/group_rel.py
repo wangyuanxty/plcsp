@@ -1,24 +1,39 @@
-"""SA-GRPO 组训练器 —— M3a 版（《方法设计文档》§3.3/§3.4 的落地子集）。
+"""联合链 GRPO（spec §5.3.4，P2 Task 7）——一条链 = 一个完整 episode 的**全部**决策。
 
-范围（诚实声明，与设计文档的差异显式化）：
-- 本版树 = **G 个机台计划（S 层采样）× J 个扰动实现**：叶子=(plan, seed_chain) 一次完整 episode。
-  J=1 ⇒ 纯组内相对 GRPO（G 条链，组内 z 化）——退化验证口径。
-  B 层（分批门控）+ L 层（AGV 选择）+ 每决策时刻树 = M3b。
-- 层内归一化（BranchGRPO Eq.4 同构、跨父级聚合）：Ã = (r−μ)/σ；
-  mode='z'（std 化=GRPO 式）/ 'mean' / 'loo'（留一法=RLOO 式）——消融⑧ 的三种基线。
-- 更新：组内相对梯度（A 用 detach）；M3b-③ = 批量重用（K-epoch）+ PPO 式裁剪代理（clip/KL 为实践变体；
-  理论骨架 §3.3 的「纯版本」= epochs=1, clip_eps=None，不含 KL/IS）。
-- 声明纪律（§3.3）：只有组内方差/尺度比较，不断言"更优"。
+    链 = (机台计划序列 a_S[1..n_ops]) ⊕ (派车序列 a_L[1..n_tasks])
+    logp(链) = Σ_t log π_S(a_S[t]) + Σ_t log π_L(a_L[t])        ← 两条都取【求和】
+
+后接标准 GRPO：**一个**终端奖励 r → 组内 z 化（`_z`）→ 纯组内 REINFORCE 或 PPO 式裁剪。
+
+spec §5.3.4 五条硬性约定在本模块的落点：
+1. **联合链、单一优势** —— `roll_chain` 把两头的决策记在**同一条**链上（同一 episode），
+   `joint_chain_step` 只算**一个** A（不按头分组、不按层归一化）；
+2. **logp 一律取求和** —— `chain_logp` = `Σ logπ_S + Σ logπ_L`（**不除决策数**：旧实现 S 取
+   平均、L 取求和，同一个 `ratio=exp(Δ)` 在两边含义不同，clip 对单决策的约束强度差 n 倍）；
+3. **J=1，预算全给 G** —— `joint_chain_step` 只有 G（J 个扰动取均值留给**评估**，不混进训练）；
+4. **优化器 Adam** —— `policy.optim` 惰性创建为 `torch.optim.Adam`（旧的"手写 SGD + 逐元素
+   clamp ±1.0"无动量无自适应，已随旧训练器删除）；
+5. **L 头接编码器** —— 两头都经 `forward_enc` 拿**同一份** token 嵌入（Task 4 已改）。
+
+⚠️ **梯度口径**（本模块最容易写错的一处）：`roll_chain` 全程 `torch.no_grad()` 采样——决策只记
+**上下文**（当时的 token 特征 / 决策特征 / 逐候选特征 / 候选 / 动作），logp 事后由 `chain_logp`
+用**当前**策略**带梯度重算**。仿真栈（SimPy）不参与反向传播，这是必须的。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from .policy import PolicyNet
-from ..env.des import rollout_evaluate
+from ..env.corridors import build_corridor_graph
+from ..env.des import SimConfig, SimWorld
 from ..env.instances import Instance
+from ..env.layout import Layout
+from ..env.reward import objective_vector, scalar_reward
+from ..nn.features import NormContext
+from ..nn.state_emb import build_tok
 
 
 def _z(vals: np.ndarray, mode: str) -> np.ndarray:
@@ -32,327 +47,209 @@ def _z(vals: np.ndarray, mode: str) -> np.ndarray:
     return (vals - vals.mean()) / (vals.std() + 1e-9)
 
 
-def _op_feat(oi: int, n_ref: int = 8) -> torch.Tensor:
-    return torch.tensor([[[float(oi) / n_ref, 0.0, 0.0]]], dtype=torch.float32)  # (1,1,F)
+def op_feat(inst: Instance, job: int, oi: int, layout: Layout | None = None) -> list[float]:
+    """S 头的**决策特征**（**3 维**，Ruling T4-4）：`[oi/n_ref, 1−oi/n_ref, (len−oi)/n_ref]`。
 
-
-def _cand_feat(alts, t_max: float) -> torch.Tensor:
-    return torch.tensor([[[t / t_max, 0.0, 0.0] for _, t in alts]], dtype=torch.float32)  # (1,Ncand,F)
-
-
-def _op_logits(policy: PolicyNet, oi: int, alts, t_max: float, tok_emb=None) -> torch.Tensor:
-    """候选机台分数统一入口（M3c）：MLP 特征路径 vs 编码器 token 路径。返回 (1,1,Ncand)。
-
-    tok_emb = policy.encode_state(...) 结果 (1,N,d)（M 段在序列前部：机台编号即序列位置）。
+    前两维是同一进度的正/负极坐标，第三维是剩余工序占比（`n_ref` = 全实例最长作业的工序数）。
+    ⚠️ 换型信号**不在这里**——spec §5.3.1② 定死：换型是 `(机台, 作业)` 的**交互量**，
+    走 S 头的**候选特征**（`mach_logits_emb` 的 `feat_cand`，见 `_mach_cand_feat`），
+    不占决策特征位。brief 旧写的第 4 维 `0.0` 是恒零死维，已按 T4-4 删除。
+    ⚠️ `layout` 保留在签名里（计划既定接口）——3 维语义不含布局量。
     """
-    if tok_emb is not None:
-        cand = torch.tensor([m for m, _ in alts])
-        return policy.mach_logits_emb(tok_emb, _op_feat(oi), cand)
-    return policy.mach_logits(_op_feat(oi), _cand_feat(alts, t_max))
+    n_ref = max(max(len(j) for j in inst.jobs), 1)
+    return [oi / n_ref, 1.0 - oi / n_ref, (len(inst.jobs[job]) - oi) / n_ref]
 
 
-def sample_plan(inst: Instance, policy: PolicyNet, t_max: float, tok_emb=None) -> list[int]:
-    plan = []
-    for alts_list in inst.jobs:
-        ops = []
-        for oi, alts in enumerate(alts_list):
-            logits = _op_logits(policy, oi, alts, t_max, tok_emb)                # (1,1,Ncand)
+def setup_flag(snap, machine: int, job: int) -> float:
+    """该机台为该作业加工**是否需换型**（1.0 = 需要）——⑤ 进网的取值。
+
+    判据同 `des.MachineSim._process`：与本机**上一件**加工的作业不同才换型（`prev_job`
+    为 -1 = 该机还没加工过，同样不换）。这是 S 头候选特征的语义（spec §5.3.1②）。
+    """
+    return 0.0 if snap.machines[machine].prev_job in (-1, job) else 1.0
+
+
+def task_feat(inst: Instance, snap, frm: int, to: int, oi: int, job: int) -> list[float]:
+    """L 头的**任务特征**（4 维）：起送机台 / 目标机台 / 目标工序序号(归一) / 该机是否需换型。
+
+    ⚠️ 第 4 维需要**作业号**（`setup_flag(snap, to, job)`）——故 `des.run_gated` 的
+    `policy_l` 回调契约在 Task 7 扩了 `job` 参数（原 `(snap, frm, to, oi, cand)` 表达不了
+    本维；用 `(frm, to, oi)` 反查作业**多义**：实测 MK01 51/112、MK10 538/985 个键歧义）。
+    """
+    n_ref = max(max(len(j) for j in inst.jobs), 1)
+    n_m = max(inst.n_machines, 1)
+    return [frm / n_m, to / n_m, oi / n_ref, setup_flag(snap, to, job)]
+
+
+def _mach_cand_feat(snap, cand: tuple[int, ...], job: int) -> np.ndarray:
+    """S 头**逐候选**特征 `(n_cand, 1)`：该机台为本作业加工是否需换型（⑤ / spec §5.3.1②）。"""
+    return np.array([[setup_flag(snap, m, job)] for m in cand], dtype=np.float32)
+
+
+def _agv_cand_feat(snap, layout: Layout, dm: np.ndarray, ctx: NormContext,
+                   cand: tuple[int, ...], frm: int) -> np.ndarray:
+    """L 头**逐候选**特征 `(n_cand, 1)`：该车到取货点的**预计行驶时长**（归一化）。
+
+    值 = 最短路距离 ÷（车间包围盒对角 × 该车**有效**速度倍率）——倍率取
+    `VehicleState.speed_factor`（= 仿真里 `agv.speed / cfg.agv_speed_mps`），⑩ 关闭时恒 1，
+    故该维与**动力学一致**（不是只看几何）。格点最短路是曼哈顿式的，比值可略超 1（~1.3）。
+    哨兵 `-1.0` = 该车尚未出车（`node == -1`，位置未知）—— 按 0 号节点换算会伪造
+    "已在取货点"（同 `state_emb` V 段坐标维的哨兵约定：真值域外、天然可区分）。
+    """
+    vs = snap.vehicles
+    out = np.empty((len(cand), 1), dtype=np.float32)
+    for i, a in enumerate(cand):
+        node = int(vs[a].node)
+        if node < 0:
+            out[i, 0] = -1.0
+            continue
+        dist = float(dm[node, layout.machines[frm].dock_node])
+        sp = max(float(vs[a].speed_factor), 1e-9)
+        out[i, 0] = dist / max(ctx.bbox_diag * sp, 1e-9)
+    return out
+
+
+@dataclass
+class Decision:
+    """一个决策点的**全部打分输入**（采样时冻结）——`chain_logp` 据此带梯度重算 logp。
+
+    存的是**当时的**上下文，不是事后重建的：仿真状态在变，用最新快照重算等于把策略输入
+    换成另一个状态（决策与 logp 不再对应）。
+    ⚠️ `cand_feat` 是**逐候选**特征（T4-3）：S 头放换型标志、L 头放"该车到取货点的预计行驶
+    时长"。少了它，`chain_logp` 重算的分布与采样时的分布**不是同一个**（ratio≠1 的假象）。
+    """
+    kind: str                        # "S"（选机台）| "L"（派车）
+    tok: np.ndarray                  # 当时的四段 token 特征 (N, F_MAX)
+    seg: tuple[int, int, int, int]   # 当时的段长 (n_m, n_jobs, n_agv, 1)
+    feat: np.ndarray                 # 决策特征 (F_dec,)：S=`op_feat` / L=`task_feat`
+    cand_feat: np.ndarray            # 逐候选特征 (n_cand, F_cand)
+    cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号）
+    action: int                      # 所取的动作（∈ cand）
+
+
+def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
+               policy: PolicyNet, seed: int, ctx: NormContext,
+               sample: bool = True) -> tuple[list[Decision], dict]:
+    """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
+
+    ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
+       **带梯度重算**（SimPy 栈不参与反向传播，见模块头）。
+    ⚠️ 每个决策存**当时的** token/决策/候选特征——仿真状态在变，用事后最新快照重建等于把
+       策略输入换成另一个状态（决策与 logp 不再对应）。
+    ⚠️ 布局由调用方给（本函数**不采样布局**）：`layout.layout_seed` 必须与奖励侧参考运行同源
+       ——`ReferenceObjectives.of` 固定 seed_layout=0，而 `SimWorld._due_map` 用**该布局**的
+       seed 取 M_ref。用默认奖励口径时请传 seed=0 的布局（本任务不扩这条口径）。
+    ⚠️ L 回调需要**作业号**（任务特征第 4 维 = 该机是否需换型）：`des.run_gated` 的
+       `policy_l` 契约在 Task 7 由 `(snap, frm, to, oi, cand)` 扩为 `(snap, job, frm, to, oi, cand)`
+       ——用 `(frm, to, oi)` 反查作业**多义**（实测 MK01 51/112、MK10 538/985 个键歧义），
+       静默取错作业 = 换型特征错，故走显式契约。
+    返回 (决策序列, `run_gated` 的 metrics)。
+    """
+    decisions: list[Decision] = []
+    world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout))
+
+    def _act(kind: str, snap, feat: list[float], cand_feat: np.ndarray,
+             cand: tuple[int, ...]) -> int:
+        tok_feat, seg = build_tok(snap, inst, layout, ctx)
+        tok_feat = np.asarray(tok_feat, dtype=np.float32)
+        with torch.no_grad():
+            tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg)
+            head = policy.mach_logits_emb if kind == "S" else policy.agv_logits_emb
+            logits = head(tok,
+                          torch.as_tensor(feat, dtype=torch.float32).reshape(1, 1, -1),
+                          torch.as_tensor(cand_feat, dtype=torch.float32),
+                          torch.tensor(cand, dtype=torch.long))
             p = torch.softmax(logits.flatten(), -1)
-            ops.append(int(torch.multinomial(p, 1).item()))    # torch（np.multinomial 精度
-        plan.append(ops)                                            # sum≤1 崩溃=bug#6 收尾）
-    return plan
+            k = int(torch.multinomial(p, 1).item()) if sample else int(p.argmax())
+        decisions.append(Decision(kind=kind, tok=tok_feat, seg=seg,
+                                  feat=np.asarray(feat, dtype=np.float32),
+                                  cand_feat=np.asarray(cand_feat, dtype=np.float32),
+                                  cand=cand, action=int(cand[k])))
+        return int(cand[k])
+
+    def policy_s(snap, job, oi, cand):
+        cand = tuple(int(c) for c in cand)
+        return _act("S", snap, op_feat(inst, job, oi, layout),
+                    _mach_cand_feat(snap, cand, job), cand)
+
+    def policy_l(snap, job, frm, to, oi, cand):
+        cand = tuple(int(c) for c in cand)
+        return _act("L", snap, task_feat(inst, snap, frm, to, oi, job),
+                    _agv_cand_feat(snap, layout, dm, ctx, cand, frm), cand)
+
+    metrics = world.run_gated(seed_chain=seed, online_s=True,
+                              policy_s=policy_s, policy_l=policy_l)
+    return decisions, metrics
 
 
-def _l_feat(frm: int, to: int, oi: int, n_m: int, n_ref: int = 8,
-            load_d: float | None = None, pos0: int = -1, pos1: int = -1) -> torch.Tensor:
-    """L 层任务特征：任务 3 维 + 车状态 3 维（预演流时点：负载差/两车最近位置）。
+def chain_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
+    """Σ_t logπ_S(a_t) + Σ_t logπ_L(a_t)——**求和**（spec §5.3.4 约定 2），**带梯度**。
 
-    load_d=None → 回退纯任务特征（向后兼容旧调用方）。
+    每个决策用**当时记录的** token/决策/候选特征重建打分（状态已变，不能用最新快照）。
+    梯度经 `forward_enc` 同时回到两个头与编码器——这是"联合链"的实质（约定 1/5）。
     """
-    if load_d is None:
-        return torch.tensor([[[float(frm) / n_m, float(to) / n_m, float(oi) / n_ref]]],
-                            dtype=torch.float32)
-    return torch.tensor([[[float(frm) / n_m, float(to) / n_m, float(oi) / n_ref,
-                           float(load_d) / 10.0, float(pos0) / n_m, float(pos1) / n_m]]],
-                        dtype=torch.float32)
+    total = torch.zeros(())
+    for d in decisions:
+        tok, _ = policy.forward_enc(
+            torch.as_tensor(d.tok, dtype=torch.float32).unsqueeze(0), d.seg)
+        head = policy.mach_logits_emb if d.kind == "S" else policy.agv_logits_emb
+        logits = head(tok,
+                      torch.as_tensor(d.feat, dtype=torch.float32).reshape(1, 1, -1),
+                      torch.as_tensor(d.cand_feat, dtype=torch.float32),
+                      torch.tensor(d.cand, dtype=torch.long))
+        lp = torch.log_softmax(logits.flatten(), -1)
+        total = total + lp[d.cand.index(d.action)]
+    return total
 
 
-def local_l_step(policy: PolicyNet, inst: Instance, seed: int, J: int = 1,
-                 mode: str = "z", lr: float = 1e-3, layout_type: str = "line",
-                 seed_layout: int = 1, t_max: float = 10.0, n_agv: int = 2,
-                 dec_idx: int | None = None, enc_state=None) -> tuple[float, dict]:
-    """M3b-②-L：L 层（AGV 分派）决策点局部树 —— SA-GRPO 的物流轴（层级因果隔离）。
+def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.ndarray,
+                     cfg: SimConfig, ctx: NormContext, w: tuple[float, float, float],
+                     seed: int, G: int = 8, lr: float = 1e-3,
+                     clip_eps: float | None = 0.2,
+                     epochs: int = 1) -> tuple[float, dict]:
+    """一步联合链组训练（spec §5.3.4）。
 
-    结构（与 local_tree_step 同构，决策轴 = 运输任务→AGV 选择）：
-      1) 计划语境 pl ~ π_S（每步重采）；预演流：轮询 agv_phi 一次 rollout → stats.task_flow
-         [(job, oi_next, frm, to), ...]（des.py 新导出；任务流形状与基流紧邻）
-      2) 基序列 agv_seq：π_L 按流逐任务采样（长度=|flow|；超出补轮询）
-      3) 基 rollout（agv_phi=agv_seq）→ 基 makespan + 实任务流（用于决策点特征）
-      4) 决策点 t（随机或指定）：候选 = n_agv 台车（枚举/A≤2 精确）；局部树 =
-         仅替换 agv_seq[t] → 每候选 J 独立扰动流（A1）→ 确定性 rollout
-      5) 组 = 候选节点（J 均值）；A = 组内 z 化（BranchGRPO Eq.4 同构，归一化域=同一任务点）；
-         更新仅该任务 π_L logp（L 层因果隔离 → 组内优势 ≈ LoTV 物流层分量 Δ_L 的估计）。
-
-    诚实注记（v0）：任务流以基序列为准（变体流因时序微差可能移位，视为紧邻近似）；与
-      local_tree_step（S 轴）同接口、可交替训练（= 三轴 SA-GRPO 分层归因的组合实施）。
-
-    消融⑥ 映射：本函数 = "每任务点物流树"；轮询/贪婪 = 频率下限。
+    G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
+    `reward.scalar_reward`）→ **组内 z 化**（`_z`，一个优势，不按头分层）→ PPO 式裁剪更新。
+    优化器 = Adam（`policy.optim` 惰性创建：约定 4；不再手写 SGD + 逐元素 clamp）。
+    `clip_eps=None` ⇒ 纯组内 REINFORCE（不裁剪、不算 ratio）；`epochs` = 同批链的重用轮数。
+    返回 (组内 r 均值, 诊断 dict：loss / ratio / r 均值与 std / 优势 std)。
     """
-    from ..env.des import rollout
-    n_m = inst.n_machines
-    pl = sample_plan(inst, policy, t_max, enc_state)
-    ph = [i % n_agv for i in range(64)]
-    prev = rollout(inst, layout_type=layout_type, seed_layout=seed_layout, seed_chain=seed,
-                   op_choices=pl, agv_phi=ph)
-    flow = prev.get("task_flow", [])
-    if not flow:
-        return float(-prev["makespan"]), {"loss": 0.0, "r_mean": float(-prev["makespan"]),
-                                          "dec": None, "cands": list(range(n_agv)),
-                                          "p": [0.0] * n_agv, "A_std": 0.0}
-    rng = np.random.default_rng(seed)
-    logits_list = [policy.agv_logits(_l_feat(frm, to, oi, n_m)).flatten().detach()
-                   for (_, oi, frm, to) in flow]
-    agv_seq = [int(torch.multinomial(torch.softmax(lg, -1), 1).item())
-               for lg in logits_list]
-    base = rollout(inst, layout_type=layout_type, seed_layout=seed_layout, seed_chain=seed * 1000,
-                   op_choices=pl, agv_phi=agv_seq)
-    flow = base.get("task_flow", flow)
-    t = int(rng.integers(0, len(flow))) if dec_idx is None else dec_idx
-    job, oi, frm, to = flow[t]
-    leaves: list[tuple[int, int, float]] = []
-    logp_b: list[torch.Tensor] = []
-    for b in range(n_agv):
-        seq2 = agv_seq[:]
-        seq2[t] = b
-        for jj in range(J):
-            r = -rollout(inst, layout_type=layout_type, seed_layout=seed_layout,
-                         seed_chain=seed * 1000 + b * 100 + jj, op_choices=pl,
-                         agv_phi=seq2)["makespan"]
-            leaves.append((b, jj, r))
-        logits = policy.agv_logits(_l_feat(frm, to, oi, n_m))[0, 0]          # (n_agv,) 带图
-        logp_b.append(F.log_softmax(logits, -1)[b])
-    vB = np.array([np.mean([r for (bb, _, r) in leaves if bb == b]) for b in range(n_agv)])
-    A = _z(vB, mode)
-    if A.std() < 1e-12:
-        A = np.zeros_like(A)
-    loss = -(torch.tensor(A, dtype=torch.float32) * torch.stack(logp_b)).mean()
-    loss.backward()
-    with torch.no_grad():
-        for p in policy.parameters():
-            if p.grad is not None:
-                p.grad.clamp_(-1.0, 1.0)
-                p.add_(-lr * p.grad)
-        policy.zero_grad()
-    p_c = F.softmax(policy.agv_logits(_l_feat(frm, to, oi, n_m)).detach()[0, 0], -1)
-    diag = {"loss": float(loss.item()), "r_mean": float(np.mean([r for (_, _, r) in leaves])),
-            "A_std": float(A.std()), "dec": t, "cands": list(range(n_agv)),
-            "job_oi": (job, oi), "vB": [float(x) for x in vB],
-            "p": [round(float(x), 3) for x in p_c]}
-    return float(np.mean([r for (_, _, r) in leaves])), diag
+    if policy.optim is None:
+        policy.optim = torch.optim.Adam(policy.parameters(), lr=lr)
 
-
-def l_seq_step_gated(policy: PolicyNet, inst: Instance, seed: int, J: int = 4,
-                     mode: str = "z", lr: float = 1e-3, layout_type: str = "line",
-                     seed_layout: int = 1, t_max: float = 10.0, n_agv: int = 2,
-                     enc_state=None, adv_mode: str = "z", ent_beta: float = 0.0) -> tuple[float, dict]:
-    """L 层完整版：真·门控事件驱动 + 序列级组内相对（闭环决策，运行流内实时状态）。
-
-    与 l_seq_step（预演态，已证伪）的机制区别：policy_l 由 transporter 在 SimPy
-    运行流内【同步】调用 —— 特征 = 决策时刻的实时 stats（无预演、无分布漂移、
-    无自指）；决策日志随 run_gated 回传。
-    每叶 = 一次 run_gated（同扰动种子 seed*1000+7 对照 → 组内差=纯序列差）；
-    更新 = π_L 在当前策略上对决策日志重算 logp（feat 存于日志）→ 序列级组内 REINFORCE。
-    """
-    from ..env.des import SimWorld, SimConfig
-    from ..env.corridors import build_corridor_graph, dock_distance_matrix
-    from ..env.layout import sample_layout
-    n_m = inst.n_machines
-    layout = sample_layout(n_m, seed=seed_layout, n_agv=n_agv)
-    dm = dock_distance_matrix(build_corridor_graph(layout))
-    world = SimWorld(inst, layout, dm, SimConfig(n_agv=n_agv))
-    pl = sample_plan(inst, policy, t_max, enc_state)
-
-    def make_sampler(sample: bool):
-        def f(feat_np):
-            lg = policy.agv_logits(torch.tensor(feat_np[None, None, :]))[0, 0].detach()
-            return int(torch.multinomial(F.softmax(lg, -1), 1).item()) if sample \
-                else int(torch.argmax(lg).item())
-        return f
-
-    outs = []
-    for _j in range(J):
-        out = world.run_gated(seed_chain=seed * 1000 + 7, op_choices=pl,
-                              policy_l=make_sampler(sample=True))
-        outs.append(out)
-    rvals = [-o["makespan"] for o in outs]
-    if adv_mode == "median":                       # MC-GRPO（Kim 2026）：r - median(r)，对
-        A = np.array(rvals) - np.median(rvals)     # 长尾离群免疫（小 rollout 均值基线退化修复）
-    else:
-        A = _z(np.array(rvals), mode)
-    if A.std() < 1e-12:
-        A = np.zeros_like(A)
-    logp_js = []
-    for out in outs:
-        dl = out.get("decision_log", [])
-        lp = 0.0
-        for (_info, feat, agv) in dl:
-            logits = policy.agv_logits(torch.tensor(feat[None, None, :]))[0, 0]     # 带图
-            lp = lp + F.log_softmax(logits, -1)[agv]
-        logp_js.append(lp / max(len(dl), 1))
-    loss = -(torch.tensor(A, dtype=torch.float32) * torch.stack(logp_js)).mean()
-    if ent_beta:                              # 熵正则：防策略塌缩/退化（玩具验证：稳定修件）
-        ent = 0.0
-        n_dec = 0
-        for out in outs:
-            for (_info, feat, _agv) in out.get("decision_log", []):
-                ft = torch.tensor(feat[None, None, :])
-                p = F.softmax(policy.agv_logits(ft).detach()[0, 0], -1)
-                ent = ent - (p * torch.log(p + 1e-9)).sum()
-                n_dec += 1
-        loss = loss - ent_beta * (ent / max(n_dec, 1))
-    opt = torch.optim.AdamW(policy.parameters(), lr=lr)      # 标准口径（LLM GRPO 用 AdamW，
-    loss.backward()                                          # 手写 SGD+clamp 在噪声下振荡=弃用）
-    opt.step()
-    opt.zero_grad()
-    diag = {"loss": float(loss.item()), "r_mean": float(np.mean(rvals)),
-            "r_std": float(np.std(rvals)), "A_std": float(A.std()),
-            "J_leaves": J, "dec_len": len(outs[0].get("decision_log", []))}
-    return float(np.mean(rvals)), diag
-
-
-def l_seq_step(policy: PolicyNet, inst: Instance, seed: int, J: int = 4,
-               mode: str = "z", lr: float = 1e-3, layout_type: str = "line",
-               seed_layout: int = 1, t_max: float = 10.0, n_agv: int = 2,
-               enc_state=None) -> tuple[float, dict]:
-    """L 层序列级组内相对（**L 层的正确归一化域**）：J 个完整 AGV 分派序列为一组。
-
-    为什么不是任务点级（local_l_step 教训，如实存档）：
-      物流层是**非分量可加地形**（任务分配互为替代品，全局最优=平衡；单任务点边缘值
-      会把所有任务推向同一辆车 = 拥塞灾难，200 步实验 makespan 582-650 vs 轮询 347.9）。
-      → L 层的组 = **整个序列**（J 个平行分配方案比较），正对应树的 L 层分支。
-
-    结构：
-      1) 预演流（轮询 1 次 rollout → stats.task_flow；形状近似即可）
-      2) J 个 agv_seq ~ π_L（逐任务采样）；**同扰动种子**比较（seed_chain 固定 → 组内差=
-        纯序列差，与"扰动独立流 A1"的口径差异在 docstring 注明：序列级对照用同流，更纯净）
-      3) r_j = rollout(pl, seq_j, seed_chain=SEED_FIXED)；A = z(r)（组内归一化域=序列集）
-      4) 更新：logp_seq_j = Σ_t log π_L(seq_j[t]|task_t)（带图）；loss = -(A_j·logp_j).mean()
-    """
-    from ..env.des import rollout
-    n_m = inst.n_machines
-    pl = sample_plan(inst, policy, t_max, enc_state)
-    prev = rollout(inst, layout_type=layout_type, seed_layout=seed_layout, seed_chain=seed,
-                   op_choices=pl, agv_phi=[i % n_agv for i in range(64)])
-    flow = prev.get("task_flow", [])
-    loads = prev.get("agv_load", [])
-    if not flow:
-        return float(-prev["makespan"]), {"loss": 0.0, "r_mean": float(-prev["makespan"]),
-                                          "A_std": 0.0, "J_leaves": 0}
-
-    def task_feat(i: int, frm, to, oi):
-        if i < len(loads):
-            (d0, d1), (p0, p1) = loads[i]
-            return _l_feat(frm, to, oi, n_m, load_d=float(d0 - d1), pos0=int(p0), pos1=int(p1))
-        return _l_feat(frm, to, oi, n_m)
-
-    logits_all = [policy.agv_logits(task_feat(i, frm, to, oi)).flatten().detach()
-                  for i, (_, oi, frm, to) in enumerate(flow)]
-    seqs, rvals, logp_seqs = [], [], []
-    for _j in range(J):
-        seq = [int(torch.multinomial(torch.softmax(lg, -1), 1).item()) for lg in logits_all]
-        seqs.append(seq)
-        r = -rollout(inst, layout_type=layout_type, seed_layout=seed_layout,
-                     seed_chain=seed * 1000 + 7,            # 同扰动种子（组内纯序列差）
-                     op_choices=pl, agv_phi=seq)["makespan"]
-        rvals.append(r)
-        lp = 0.0
-        for i, ((_, oi, frm, to), a) in enumerate(zip(flow, seq)):
-            logits = policy.agv_logits(task_feat(i, frm, to, oi))[0, 0]            # 带图
-            lp = lp + F.log_softmax(logits, -1)[a]
-        logp_seqs.append(lp / max(len(flow), 1))
-    A = _z(np.array(rvals), mode)
-    if A.std() < 1e-12:
-        A = np.zeros_like(A)
-    loss = -(torch.tensor(A, dtype=torch.float32) * torch.stack(logp_seqs)).mean()
-    loss.backward()
-    with torch.no_grad():
-        for p in policy.parameters():
-            if p.grad is not None:
-                p.grad.clamp_(-1.0, 1.0)
-                p.add_(-lr * p.grad)
-        policy.zero_grad()
-    diag = {"loss": float(loss.item()), "r_mean": float(np.mean(rvals)),
-            "r_std": float(np.std(rvals)), "A_std": float(A.std()), "J_leaves": J,
-            "flow_len": len(flow)}
-    return float(np.mean(rvals)), diag
-
-
-def train_step(policy: PolicyNet, inst: Instance, seed: int, G: int = 8, J: int = 1,
-               mode: str = "z", lr: float = 1e-3, layout_type: str = "line",
-               seed_layout: int = 1, t_max: float = 10.0, epochs: int = 1,
-               clip_eps: float | None = None, kl_beta: float = 0.0,
-               enc_state=None) -> tuple[float, dict]:
-    """一步组训练。叶子=(plan_g, seed_chain_j)→r；节点组=G 计划（J 个扰动取均值）。
-
-    M3b-③（批量重用裁剪版）：同批 K-epoch 更新，PPO 式裁剪代理（GRPO 实践）——
-      epochs=1 且 clip_eps=None ⇒ 纯组内 REINFORCE（M3a 精确行为；理论骨架 §3.3「纯版本」）。
-      epochs>1 且 clip_eps=0.2 ⇒ K-epoch 裁剪（A 与 logp_old 冻结；理论不含 KL/IS——简化假设）。
-    返回 (组均值 r, 诊断 dict：loss / ratio / Ã std / r 均值与 std)。
-    """
-    tok_emb = policy.encode_state(enc_state) if enc_state is not None else None  # (1,N,d) 带图
-    leaves: list[tuple[int, int, float]] = []      # (g, j, r)
-    logp_old: list[float] = []
-    plans: list[list[int]] = []
+    chains: list[list[Decision]] = []
+    rewards: list[float] = []
     for g in range(G):
-        pl = sample_plan(inst, policy, t_max, tok_emb)
-        plans.append(pl)
-        for j in range(J):
-            r = rollout_evaluate(inst, pl, seed=seed * 1000 + g * 100 + j,
-                                 layout_type=layout_type, seed_layout=seed_layout)
-            leaves.append((g, j, r))
-        with torch.no_grad():
-            logp_old.append(float(_plan_logp(inst, pl, policy, t_max, tok_emb)))
-    vG = np.array([np.mean([r for (gg, _, r) in leaves if gg == g]) for g in range(G)])
-    vL = np.array([r for (_, _, r) in leaves])
-    A_G = _z(vG, mode)                       # 层内（G 计划）归一化
-    A_t = torch.tensor(A_G, dtype=torch.float32)
-    old_t = torch.tensor(logp_old, dtype=torch.float32)
-    ratio_mean = 1.0
-    loss = 0.0
-    for _ in range(max(epochs, 1)):          # 批量重用：同批 K-epoch（GRPO 标准做法）
-        new_t = torch.stack([_plan_logp(inst, pl, policy, t_max, tok_emb) for pl in plans])
-        if clip_eps is not None:
-            ratio = torch.exp(new_t - old_t)
-            obj = torch.min(ratio * A_t,
-                            torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * A_t)
-            ratio_mean = float(ratio.mean().item())
+        dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * 1000 + g, ctx, sample=True)
+        chains.append(dec)
+        rewards.append(scalar_reward(objective_vector(met), w))
+
+    A = torch.tensor(_z(np.asarray(rewards, dtype=np.float64), "z"), dtype=torch.float32)
+
+    with torch.no_grad():                    # 冻结旧 logp（裁剪代理的 ratio 基准）
+        old = torch.stack([chain_logp(d, policy) for d in chains]).detach()
+
+    loss_val, ratio_mean = 0.0, 1.0
+    for _ in range(max(epochs, 1)):
+        new = torch.stack([chain_logp(d, policy) for d in chains])
+        if clip_eps is None:
+            obj = A.detach() * new           # 纯组内 REINFORCE（理论骨架的「纯版本」）
         else:
-            obj = A_t * new_t                # 纯组内 REINFORCE
+            ratio = torch.exp(new - old)     # 链概率比（求和口径才成立，约定 2）
+            obj = torch.min(ratio * A.detach(),
+                            torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * A.detach())
+            ratio_mean = float(ratio.mean().item())
         loss = -obj.mean()
-        if kl_beta:
-            d = new_t - old_t
-            loss = loss + kl_beta * (torch.exp(-d) - 1.0 + d).mean()   # KL(π‖π_old) 非负路径估计
+        policy.optim.zero_grad()
         loss.backward()
-        with torch.no_grad():
-            for p in policy.parameters():
-                if p.grad is not None:
-                    p.grad.clamp_(-1.0, 1.0)
-                    p.add_(-lr * p.grad)
-            policy.zero_grad()
-    diag = {"loss": float(loss.item()), "ratio": ratio_mean,
-            "r_mean": float(vL.mean()), "r_std": float(vL.std()),
-            "A_std_G": float(A_G.std()), "logp_min": float(min(old_t))}
-    return float(vL.mean()), diag
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)   # 范数裁剪（不是逐元素）
+        policy.optim.step()
+        loss_val = float(loss.item())
 
-
-def _plan_logp(inst: Instance, plan: list[int], policy: PolicyNet, t_max: float,
-               tok_emb=None) -> torch.Tensor:
-    """整计划 log 概率（**带梯度**——用当前网络重算采样的 log 概率，供 REINFORCE 更新）。"""
-    total, n = None, 0
-    for j, alts_list in enumerate(inst.jobs):
-        for oi, alts in enumerate(alts_list):
-            logits = _op_logits(policy, oi, alts, t_max, tok_emb)                # (1,1,Ncand)
-            lp = torch.log_softmax(logits, -1)[0, 0, plan[j][oi]]
-            total = lp if total is None else total + lp
-            n += 1
-    return total / max(n, 1)
+    diag = {"loss": loss_val, "ratio": ratio_mean,
+            "r_mean": float(np.mean(rewards)), "r_std": float(np.std(rewards)),
+            "A_std": float(A.std())}
+    for d in chains:                         # ⚠️ 决策日志**用完即弃**——不得跨 step 累积
+        d.clear()
+    return diag["r_mean"], diag
