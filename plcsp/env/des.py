@@ -38,7 +38,7 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     # ⚠️ aisle_width 必须同时进 SimConfig——eff_speed 读的是 cfg.aisle_width（窄道降速）。
     # 否则 `rollout(aisle_width=1.0)` 只改几何、不改速度，窄道敏感性实验**静默失效**。
     eff_cfg = cfg if cfg is not None else SimConfig(aisle_width=aisle_width)
-    return SimWorld(inst, layout, dm, eff_cfg).run(
+    return SimWorld(inst, layout, dm, eff_cfg, graph=g).run(
         seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
 
 
@@ -57,7 +57,9 @@ def rollout_evaluate(inst: Instance, plan: list[int] | None, seed: int = 0,
 class SimConfig:
     n_agv: int = 3          # spec §6.3 主实验值（网格上按边际收益拐点重标）
     agv_speed_mps: float = 1.0    # AGV 车速 [m/s]（布局坐标为米）
-    zone_hold: float = 1.0        # 每区段名义通行时长 [min]（退避时长）
+    zone_hold: float = 1.0        # 缓冲满退避时长 [min]
+    zone_granularity: str = "node"   # 区段粒度：node|row|col|all（越粗→区段越少→争用越强）
+    zone_wait_limit: float = 8.0     # 区段申请等待上限 [min]（超时→退避重试）
     zone_hold_limit: float = 8.0  # 区段申请等待上限（超时→释放重试）[min]
     repair_time: float = 5.0      # [min]
     due_factor: float = 1.8       # ⚠️ 已废弃（见 §3.5，改用 τ·M_ref）
@@ -125,6 +127,93 @@ class MachineSim:
             yield self.out_q.put((job, oi, op, is_last))            # 等待者立即放行 put（防 put→事件 顺序死锁）
 
 
+def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
+    """按粒度构造「节点 → 区段」映射。**粒度越粗 → 区段越少 → 争用越强。**
+
+    - `node`：每个通道节点一个区段（最细；MK10 的 5×4 网格 → 30 个）
+    - `row` / `col`：整行 / 整列算一个区段（像"一条长廊一个区段"）
+    - `all`：全图一个区段（极端档，用于下界）
+    """
+    spec = layout.grid
+    n = spec.n_nodes
+    if granularity == "node":
+        return {i: i for i in range(n)}, n
+    if granularity == "row":
+        return {i: spec.node_rc(i)[0] for i in range(n)}, spec.n_rows + 1
+    if granularity == "col":
+        return {i: spec.rc if False else spec.node_rc(i)[1] for i in range(n)}, spec.n_cols + 1
+    if granularity == "all":
+        return {i: 0 for i in range(n)}, 1
+    raise ValueError(f"未知区段粒度：{granularity}")
+
+
+class ZoneManager:
+    """区段管制：**一区段一车互斥** + 等待环检测（经典 AGV 死锁的防法）。
+
+    ⚠️ **区段粒度是参数**（`SimConfig.zone_granularity`）：粒度越粗 → 区段数越少 → 争用越强。
+    真实 AGV 系统两种都有（长廊算一个区段 vs 每个路口一个），故做成可扫描的参数。
+
+    `zone_of`: 节点号 → 区段号 的映射（由 `SimWorld` 按粒度构造）。
+    """
+
+    def __init__(self, env: simpy.Environment, zone_of: dict[int, int], n_zones: int,
+                 wait_limit: float):
+        self.env, self.wait_limit, self.zone_of, self.n = env, wait_limit, zone_of, n_zones
+        self.holder: dict[int, int | None] = {z: None for z in range(n_zones)}
+        self.pending: dict[int, int] = {}
+        self._ev: dict[int, simpy.Event] = {}
+        self.waits: list[float] = []      # 区段等待时长 [min]——拥堵的唯一度量
+
+    # ── 等待环检测（不变）──
+    def _wait_path_to(self, start: int, target: int) -> bool:
+        node, seen = start, set()
+        while node is not None and node != target:
+            if node in seen:
+                return False
+            seen.add(node)
+            z = self.pending.get(node)
+            if z is None:
+                return False
+            node = self.holder.get(z)
+        return node == target
+
+    def would_cycle(self, agv: int, z: int) -> bool:
+        return self.holder.get(z) not in (None, agv) and self._wait_path_to(self.holder[z], agv)
+
+    # ── 申请 / 释放 ──
+    def try_grant(self, agv: int, z: int) -> bool:
+        if self.holder[z] == agv:
+            return True
+        if self.holder[z] is not None:
+            return False
+        self.holder[z] = agv
+        return True
+
+    def wait_zone(self, agv: int, z: int, limit: float | None = None):
+        if self.try_grant(agv, z):
+            return True, False
+        if self.would_cycle(agv, z):
+            return False, True
+        self.pending[agv] = z
+        t0 = self.env.now
+        ev = self._ev.setdefault(z, simpy.Event(self.env))
+        yield ev | self.env.timeout(limit or self.wait_limit)
+        self.waits.append(self.env.now - t0)
+        self.pending.pop(agv, None)
+        if self.try_grant(agv, z):
+            return True, False
+        return False, False
+
+    def release(self, agv: int, z: int) -> None:
+        if self.holder.get(z) == agv:
+            self.holder[z] = None
+            ev = self._ev.get(z)
+            if ev is not None and not ev.triggered:
+                ev.succeed()
+            self._ev[z] = simpy.Event(self.env)
+        self.pending.pop(agv, None)
+
+
 class AgvSim:
     """AGV：取任务 → 按格点距离行驶 → 投递。
 
@@ -135,23 +224,51 @@ class AgvSim:
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
-                 tasks_in, machines: list, bound: bool = False):
+                 tasks_in, machines: list, graph, zm, bound: bool = False):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
+        self.g, self.zm = graph, zm
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
 
     def run(self):
         q = self.tasks_in[self.aid] if self.bound else self.tasks_in
         while True:
-            frm, to, item = yield q.get()
+            frm, to, item, path = yield q.get()
             self.stats["tasks_get"] = self.stats.get("tasks_get", 0) + 1
-            a = self.machines[frm].pad.dock_node      # 距离矩阵按**通道节点**索引（非机台号）
-            b = self.machines[to].pad.dock_node
-            travel = (float(self.m_dm[a, b])
-                      / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
-            yield self.env.timeout(travel)
+            # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
+            zseq = [self.zm.zone_of[p] for p in path]
+            zseq = [z for i, z in enumerate(zseq) if i == 0 or z != zseq[i - 1]]   # 合并同一区段的连续段
+            granted, cycle = yield from self.zm.wait_zone(self.aid, zseq[0],
+                                                          self.cfg.zone_wait_limit)
+            if cycle or not granted:
+                self.stats["requeue"] = self.stats.get("requeue", 0) + 1
+                q.put((frm, to, item, path))
+                continue
+            travel = 0.0
+            prev_z = zseq[0]
+            ok = True
+            for pi in range(len(path) - 1):
+                z = self.zm.zone_of[path[pi + 1]]
+                if z != prev_z:
+                    granted, cycle = yield from self.zm.wait_zone(self.aid, z,
+                                                                  self.cfg.zone_wait_limit)
+                    if cycle or not granted:
+                        ok = False
+                        break
+                    self.zm.release(self.aid, prev_z)
+                    prev_z = z
+                seg = (float(self.m_dm[path[pi], path[pi + 1]])
+                       / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
+                yield self.env.timeout(seg)
+                travel += seg
+                self.stats["moves"] += 1
+            self.zm.release(self.aid, prev_z)
+            if not ok:
+                yield self.env.timeout(self.cfg.zone_hold)
+                self.stats["requeue"] = self.stats.get("requeue", 0) + 1
+                q.put((frm, to, item, path))
+                continue
             self.stats["travel_time"] += travel
-            self.stats["moves"] += 1
             self.stats["agv_del"][self.aid] += 1      # L 层状态轨迹（负载差/最后位置）
             self.stats["agv_pos"][self.aid] = to
             # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
@@ -164,9 +281,10 @@ class SimWorld:
     """一次 episode：1 布局 + 1 实例 + 1 条独立扰动流 → 指标 dict。"""
 
     def __init__(self, inst: Instance, layout: Layout, m_dm: np.ndarray,
-                 cfg: SimConfig | None = None):
+                 cfg: SimConfig | None = None, graph=None):
         self.inst, self.layout, self.m_dm = inst, layout, m_dm
         self.cfg = cfg or SimConfig()
+        self.g = graph      # 格点走廊图（AGV 逐段路径的来源）
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         return {j: self.cfg.due_factor * sum(t for _, t in ops) for j, ops in plans.items()}
@@ -195,6 +313,8 @@ class SimWorld:
             plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
+        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
+        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q)
                     for i in range(inst.n_machines)]
@@ -207,7 +327,7 @@ class SimWorld:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in,
-                               machines, bound=bound).run())
+                               machines, self.g, zm, bound=bound).run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
         inject_q: list = []
@@ -236,7 +356,13 @@ class SimWorld:
                 "agv_load": stats.get("agv_load", []),
                 "dbg": {k: v for k, v in stats.items()
                         if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue")},
-                "travel_time_total": float(stats["travel_time"])}
+                "travel_time_total": float(stats["travel_time"]),
+                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
+                              "max": float(max(zm.waits)) if zm.waits else 0.0},
+                "n_zones": zm.n,
+                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
+                              "max": float(max(zm.waits)) if zm.waits else 0.0},
+                "n_zones": zm.n}
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None) -> dict:
@@ -262,6 +388,8 @@ class SimWorld:
             plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
+        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
+        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q)
                     for i in range(inst.n_machines)]
@@ -270,7 +398,7 @@ class SimWorld:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                               bound=True).run())
+                               self.g, zm, bound=True).run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
         for j in jkeys:
@@ -328,7 +456,11 @@ class SimWorld:
             yield machines[frm_idx].out_q.get()
             ops = plans[job]
             nxt_m, nxt_t = ops[oi + 1]
-            task = (frm_idx, nxt_m, (job, oi + 1, OpLite(nxt_t), oi + 1 == len(ops) - 1))
+            from .corridors import shortest_node_path
+            _path = shortest_node_path(self.g, machines[frm_idx].pad.dock_node,
+                                       machines[nxt_m].pad.dock_node)   # AGV 实际经过的节点序列
+            task = (frm_idx, nxt_m,
+                    (job, oi + 1, OpLite(nxt_t), oi + 1 == len(ops) - 1), _path)
             stats.setdefault("task_flow", []).append((job, oi + 1, frm_idx, nxt_m))  # L 层流导出
             stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
                                                      tuple(stats["agv_pos"])))       # 任务时点车状态

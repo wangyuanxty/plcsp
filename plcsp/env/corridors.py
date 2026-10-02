@@ -6,8 +6,8 @@
 与上一代的区别：旧版是"相邻 dock + 首尾闭环"的**单环**，且连线可能穿过机台；
 新版通道在格子**之间**、机台在格子**之内**，两问题同时消失（无需栅格 A*）。
 
-⚠️ 2026-10-02：**路径查询函数已移除**——区段管制与路线决策整条砍除（progress-log §十五）。
-本模块只提供**格点图 + 距离矩阵**；AGV 按距离矩阵一次行驶到底，不逐段申请、不选路。
+2026-10-02：区段管制**已按参数化粒度恢复**（见 `des.SimConfig.zone_granularity`）——
+`shortest_node_path` 用于取 AGV 实际经过的节点序列。路线决策（选哪条路）仍未恢复。
 """
 from __future__ import annotations
 
@@ -47,3 +47,8 @@ def dock_distance_matrix(g: nx.Graph) -> np.ndarray:
         for dst, dist in lengths.items():
             dm[idx[src], idx[dst]] = float(dist)
     return dm
+
+
+def shortest_node_path(g: nx.Graph, src: int, dst: int) -> list[int]:
+    """两节点间最短路的节点序列（含首尾）——AGV 逐段申请区段的依据。"""
+    return list(nx.dijkstra_path(g, src, dst, weight="weight"))
