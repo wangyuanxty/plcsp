@@ -116,7 +116,7 @@ class SimTrack:
     `MachineSim` / `AgvSim` 只拿这个袋子（不持 `SimWorld` 引用，避免环）；
     `SimWorld` 把五个列表同时挂成 `_job_progress` 等属性，快照代码直接读属性。
     """
-    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded")
+    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded", "agv_load_n")
 
     def __init__(self, n_jobs: int, n_machines: int, n_agv: int) -> None:
         self.job_progress = [0] * n_jobs                      # 已完成工序数
@@ -125,6 +125,16 @@ class SimTrack:
         # (工件, 加工时长, 上机时刻)：快照按 `t_start + 时长 − now` 算**标称**剩余（见 snapshot）
         self.cur_op: list[tuple[int, float, float] | None] = [None] * n_machines
         self.agv_loaded = [False] * n_agv                     # 车上是否载货（状态 2 的判据）
+        self.agv_load_n = [0] * n_agv                         # 车上**在运件数**（in_flight 的"车上"部分）
+
+    def set_load(self, aid: int, n: int) -> None:
+        """一趟批次的**装上**（`n = len(batch)`）或**卸下**（`n = 0`）。
+
+        ⚠️ 两个量**同处写**：`agv_loaded`（状态 2 的判据）由 `n > 0` 推出、`agv_load_n`
+        是同一个数——不给"标志说满载、计数说空车"留下失同步的口子。
+        """
+        self.agv_loaded[aid] = n > 0
+        self.agv_load_n[aid] = n
 
 
 # ══ 信息侧约束的纯函数（⑧ 交期），放在模块级以便单测直接调用 ══
@@ -531,7 +541,7 @@ class AgvSim:
                     q.put((frm, to, item, path))
                     # 快照跟踪（P2 Task 1）：退回队列 = 这批活不在这台车上（车还是空的）
                     self.track.job_agv[item[0]] = -1
-                    self.track.agv_loaded[self.aid] = False
+                    self.track.set_load(self.aid, 0)
                     continue
             # ⑩ 同向拼车：把队首连续的同 (取货点, 卸货点) 任务一并装走
             batch = yield from self._collect(q, frm, to, (frm, to, item, path))
@@ -540,12 +550,13 @@ class AgvSim:
             for (_f0, _t0, _it0, _p0) in batch:
                 self.track.job_agv[_it0[0]] = self.aid
             # ── 负载段：取货点 → 卸货点（整批一趟）──
-            self.track.agv_loaded[self.aid] = True   # 快照跟踪（P2 Task 1）：取货后负载行驶
+            # 快照跟踪（P2 Task 1）：取货后负载行驶，本趟在运件数 = 批次大小（F5：in_flight 的"车上"部分）
+            self.track.set_load(self.aid, len(batch))
             ok, self.pos_node = yield from self._drive(a, b, "loaded")
             if not ok:
                 # 快照跟踪（P2 Task 1）：退回队列 = **当场**卸空——车要带着"空车"的状态在
                 # 取货点干等 zone_hold，不能挂着"负载行驶"（否则状态 2 / 在途会滞留到重试）
-                self.track.agv_loaded[self.aid] = False
+                self.track.set_load(self.aid, 0)
                 for t in batch:
                     self.track.job_agv[t[2][0]] = -1
                 yield self.env.timeout(self.cfg.zone_hold)
@@ -563,7 +574,7 @@ class AgvSim:
                 yield self.machines[t2].in_q.put(_item2)
                 self.track.job_agv[_item2[0]] = -1       # 快照跟踪（P2 Task 1）：投递完成，工件离车
                 self.stats["deliveries"] += 1
-            self.track.agv_loaded[self.aid] = False      # 快照跟踪（P2 Task 1）：整批卸空
+            self.track.set_load(self.aid, 0)             # 快照跟踪（P2 Task 1）：整批卸空
 
     def _drain_idle(self, minutes: float, idle_kw: float) -> None:
         """⑪ 待命耗电（与 `_drain` 同一口径，只是功率取待机值）。"""
@@ -604,8 +615,8 @@ class SimWorld:
         return fleet
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
-                        seed_chain: int = 0,
-                        charger_res=()) -> tuple[list, object, ZoneManager, simpy.Store]:
+                        seed_chain: int = 0, charger_res=()) -> tuple[
+                            list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
         `run()` / `run_gated()` / `_cold_start()` **共用同一份**构造（逐字重复是本仓评审会判
@@ -642,6 +653,7 @@ class SimWorld:
         self._job_agv = track.job_agv
         self._cur_op = track.cur_op
         self._agv_loaded = track.agv_loaded
+        self._agv_load_n = track.agv_load_n
         self.agvs = agvs
         return machines, tasks_in, zm, events_q
 
@@ -714,7 +726,8 @@ class SimWorld:
         **口径**：`MachineState.remaining_min` 是**标称**剩余——`上机时刻 + 工序时长 − now`，
         即只算工序本身的时长，**不把换型、故障修复这些墙钟延长算进去**（故异常长的停机可能
         让它触底为 0，而工件实际还在机台上）。`JobState.remaining_min` 同理，是剩余各工序的
-        **标称**最短候选工时之和。
+        **标称**最短候选工时之和。`in_flight` = **队列里待取** + **车上在运**（两种队列形状
+        都算，见下）。
         """
         from .snapshot import JobState, MachineState, Snapshot, VehicleState
         ms = []
@@ -746,9 +759,14 @@ class SimWorld:
                 queued=len(self.tasks_in[a].items) if agv.bound else 0,
                 battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9)),
                 capacity=int(agv.capacity), speed_factor=float(agv.speed / self.cfg.agv_speed_mps)))
+        # 在途 = **队列里待取** + **车上在运**。队列有两种形状（绑定=每车一 Store，
+        # FIFO=单个共享 Store）——只看 `agv.bound` 那种形状会让 FIFO 路径恒为 0（F5）；
+        # 车上那部分必须单独数，因为已装车的批次**已经离开队列**。
+        queued = (sum(len(s.items) for s in self.tasks_in) if isinstance(self.tasks_in, list)
+                  else len(self.tasks_in.items))
         return Snapshot(now=float(self.env.now), machines=tuple(ms), jobs=tuple(js),
                         vehicles=tuple(vs), n_done=len(self.completes),
-                        in_flight=sum(v.queued for v in vs))
+                        in_flight=queued + sum(self._agv_load_n))
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None) -> dict:

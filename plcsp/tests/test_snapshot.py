@@ -17,19 +17,23 @@ def _world(name: str = "mk01", cfg: SimConfig | None = None):
     return inst, SimWorld(inst, lay, dm, cfg or SimConfig(), graph=build_corridor_graph(lay))
 
 
-def _spy_agv(monkeypatch, rec: dict) -> None:
+def _spy_agv(monkeypatch, rec: dict, w) -> None:
     """观察 AGV 派车环（测试专用）。**不新增任何仿真事件 ⇒ 对轨迹零扰动**。
 
     - `rec["entries"]`：每次行驶开始前 `(now, aid, leg, 本车在手的工件)`；
     - `rec["requeues"]`：每次**退回队列** `(now, aid, leg, 本车在手的工件)`；
     - `rec["after_requeue"]`：每次退回之后**本车的第一个采样**
-      `(now, aid, leg, 退回时在手的工件, 本车负载标志, job_agv)`。
+      `(now, aid, leg, 退回时在手的工件, 本车负载标志, job_agv)`；
+    - `rec["inflight"]`：每次让出控制权时 `(now, Snapshot.in_flight, Σ 车上在运件数)`。
 
     ⚠️ 复位效果只看"退回后的第一个采样"——退回与复位之间没有让出点，故这一采样必是复位后
     的状态；改看"同一时刻的最后一个采样"会把"同一时刻又重新装上货"的合法状态误判成滞留。
+
+    ⚠️ 只记**本 episode**（`w.track is self.track`）：`run()` 末尾算交期时会跑一次
+    `reference_makespan` **嵌套 episode**，那也是 AgvSim，不滤掉会混进别的 world 的样本。
     """
     orig_run, orig_drive = des_mod.AgvSim.run, des_mod.AgvSim._drive
-    for k in ("entries", "requeues", "after_requeue"):
+    for k in ("entries", "requeues", "after_requeue", "inflight"):
         rec.setdefault(k, [])
     pending: dict[int, tuple] = {}
 
@@ -42,11 +46,14 @@ def _spy_agv(monkeypatch, rec: dict) -> None:
                 ev = gen.send(sent)
             except StopIteration:
                 return
-            if self.aid in pending:
-                _t, _aid, leg, held = pending.pop(self.aid)
-                rec["after_requeue"].append((self.env.now, self.aid, leg, held,
-                                             bool(self.track.agv_loaded[self.aid]),
-                                             tuple(self.track.job_agv)))
+            if w.track is self.track:
+                if self.aid in pending:
+                    _t, _aid, leg, held = pending.pop(self.aid)
+                    rec["after_requeue"].append((self.env.now, self.aid, leg, held,
+                                                 bool(self.track.agv_loaded[self.aid]),
+                                                 tuple(self.track.job_agv)))
+                rec["inflight"].append((self.env.now, w.snapshot().in_flight,
+                                        sum(self.track.agv_load_n)))
             sent = yield ev
 
     def in_hand(car) -> tuple:
@@ -61,9 +68,10 @@ def _spy_agv(monkeypatch, rec: dict) -> None:
 
     def spy_drive(self, src, dst, leg):
         held = in_hand(self)
-        rec["entries"].append((self.env.now, self.aid, leg, held))
+        if w.track is self.track:
+            rec["entries"].append((self.env.now, self.aid, leg, held))
         ok, end = yield from orig_drive(self, src, dst, leg)
-        if not ok:
+        if not ok and w.track is self.track:
             rec["requeues"].append((self.env.now, self.aid, leg, held))
             pending[self.aid] = (self.env.now, self.aid, leg, held)
         return ok, end
@@ -127,8 +135,8 @@ def test_vehicle_status_is_one_of_four_values():
     assert all(v.capacity >= 1 for v in snap.vehicles)
 
 
-# ══ 以下三项是评审后补的**回归钉**（F1/F2/F3）：每条都对准一个具体缺陷，
-#    去掉对应修复即变红（已做变异验证）。══════════════════════════════════
+# ══ 以下五项是评审后补的**回归钉**（F1/F2/F3/F5）：每条都对准一个具体缺陷，
+#    去掉对应修复即变红（已逐条做变异验证）。══════════════════════════════
 
 
 @pytest.mark.unit
@@ -173,7 +181,7 @@ def test_fifo_path_marks_jobs_in_transit(monkeypatch):
     """
     rec: dict = {}
     inst, w = _world()
-    _spy_agv(monkeypatch, rec)
+    _spy_agv(monkeypatch, rec, w)
     r = w.run(seed_chain=1)                             # FIFO：不传 agv_phi
     assert r["deliveries"] > 0 and not r["horizon_hit"]
     marks = [held for (_t, _a, leg, held) in rec["entries"] if leg == "loaded" and held]
@@ -191,7 +199,7 @@ def test_requeue_resets_loaded_flag_and_transit(monkeypatch):
     """
     rec: dict = {}
     inst, w = _world(cfg=SimConfig(zone_granularity="row", zone_wait_limit=0.01))
-    _spy_agv(monkeypatch, rec)
+    _spy_agv(monkeypatch, rec, w)
     r = w.run(seed_chain=0, agv_phi=[0, 1, 2] * 200)
     assert not r["horizon_hit"] and r["jobs_done"] == inst.n_jobs
     assert r["dbg"]["requeue"] > 0, "该配置没逼出 requeue，目标分支没被验到"
@@ -206,3 +214,41 @@ def test_requeue_resets_loaded_flag_and_transit(monkeypatch):
     assert not any(v >= 0 for v in w._job_agv), "收尾后仍有工件被记为在途"
     assert not any(w._agv_loaded)
     assert all(not js.in_transit for js in w.snapshot().jobs)
+
+
+@pytest.mark.unit
+def test_in_flight_positive_in_fifo_path(monkeypatch):
+    """F5：FIFO 路径（无每车队列）下 `in_flight` 必须**出现过 > 0**。
+
+    只数每车队列会让这条路径恒为 0（`rollout()` 走的正是这条），标定脚本拿到的这一维
+    永远是 0——正是 P2 要消灭的"恒零特征维"。MK01 种子 1 实测 371 个采样里 358 个 > 0。
+    """
+    rec: dict = {}
+    inst, w = _world()
+    _spy_agv(monkeypatch, rec, w)
+    r = w.run(seed_chain=1)                             # FIFO：不传 agv_phi
+    assert not r["horizon_hit"] and r["deliveries"] > 0
+    rows = rec["inflight"]
+    assert rows, "探针没夹到采样（观察失效）"
+    assert max(f for (_t, f, _n) in rows) > 0, "FIFO 路径上 in_flight 恒为 0"
+    # 车全空之外的差值只能来自**共享队列里的待取任务**（FIFO 形状没被吃就会全为相等）
+    assert any(f > n for (_t, f, n) in rows), \
+        "FIFO 的共享队列没被计入 in_flight（in_flight 只跟着车上的件数走）"
+
+
+@pytest.mark.unit
+def test_in_flight_counts_onboard_batch_in_bound_path(monkeypatch):
+    """F5：`in_flight` 必须**含车上在运的批次**——`in_flight ≥ Σ 车上在运件数` 恒成立。
+
+    已装车的批次**已离开队列**，漏掉"车上"那部分时，车满载而队列空的一刻 `in_flight`
+    会掉到 0（MK01 种子 1 绑定路径实测 163 个采样会出现这种倒挂）。
+    """
+    rec: dict = {}
+    inst, w = _world()
+    _spy_agv(monkeypatch, rec, w)
+    r = w.run(seed_chain=1, agv_phi=[0, 1, 2] * 200)    # 绑定/派车路径
+    assert not r["horizon_hit"]
+    rows = rec["inflight"]
+    assert any(n > 0 for (_t, _f, n) in rows), "车上从没装过货，断言没被真正验证"
+    bad = [(t, f, n) for (t, f, n) in rows if f < n]
+    assert not bad, f"in_flight 漏计车上批次（in_flight < 在运件数）：{bad[:3]}"
