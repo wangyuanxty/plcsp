@@ -8,8 +8,8 @@ B（A + GRPO-λ）：L 段 logp 按时效折扣 w_t = λ^(T-1-t)（近期决策�
 其余机制与 m6_flat 完全一致（G=4,J=2,J_L=8=64叶/步、编码器、pert_shared、ent=0.03、
 norm="flat" 仅 A 构造差异——本实验"无树"=没争议的基线域）。
 评估：同协议（sample_plan + L=argmax；每 100 步 3 种子 + 终局 30 种子）。
-输出：geosched/m6_opt_a.jsonl / m6_opt_b.jsonl；ckpt: checkpoints/m6_opt_a.pt / m6_opt_b.pt。
-运行：python -m geosched.m6_opt（~3h，A 在前 B 在后）。
+输出：plcsp/m6_opt_a.jsonl / m6_opt_b.jsonl；ckpt: checkpoints/m6_opt_a.pt / m6_opt_b.pt。
+运行：python -m plcsp.m6_opt（~3h，A 在前 B 在后）。
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def run_variant(tag: str, reward_mode: str, lam: float | None) -> None:
         print(f"[m6opt-{tag}] resume from step {start}", flush=True)
     else:
         torch.manual_seed(0)
-    out = f"geosched/m6_opt_{tag}.jsonl"
+    out = f"plcsp/m6_opt_{tag}.jsonl"
     t0 = time.time()
     with open(out, "a", encoding="utf-8") as f:
         for s in range(start, 800):

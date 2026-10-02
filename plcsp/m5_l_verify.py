@@ -3,7 +3,7 @@
 方法：200 步 L 层局部树训练（J=2，MK01×line）；每 20 步评估：
   greedy_agv_seq = 按预演流逐任务 argmax(π_L) → rollout ×3 扰动种子 → makespan 均值。
 对照锚（同期固定规则）：轮询 ~347.9 / 全 AGV0 ~481.2 / FIFO ~357.3（本数据同实例同计划）。
-输出：geosched/m5_l_verify.jsonl + 终端行。运行：python -m geosched.m5_l_verify（后台 ~10min）
+输出：plcsp/m5_l_verify.jsonl + 终端行。运行：python -m plcsp.m5_l_verify（后台 ~10min）
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .algo.group_rel import l_seq_step, _l_feat, sample_plan
 STEPS, EVAL_EVERY, N_AGV, J = 800, 100, 2, 4
 SEEDS_EVAL = (1, 11, 21)
 SEEDS_TRAIN = (0, 1, 2)
-OUT = "geosched/m5_l_verify.jsonl"
+OUT = "plcsp/m5_l_verify.jsonl"
 
 
 def greedy_agv_seq(policy, flow, loads, n_m: int, n_agv: int) -> list[int]:

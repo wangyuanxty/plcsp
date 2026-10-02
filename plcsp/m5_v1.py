@@ -7,7 +7,7 @@
 两方法共用特征系统，仅训练器不同（SA-GRPO vs GRPO 的干净对照）；
 runner：checkpoints/m5v1/{method}/ckpt.pt（每 50 步）→ 中断可续（resume=True）；
 每 100 步贪心评估 × 3 扰动种子 → {"mean","min"}（写入 metrics.jsonl 的 eval 行）。
-运行：python -m geosched.m5_v1（后台；~2h，可中断续）
+运行：python -m plcsp.m5_v1（后台；~2h，可中断续）
 """
 from __future__ import annotations
 

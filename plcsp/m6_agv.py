@@ -7,8 +7,8 @@
   基线（轮询 / 随机 L 30 种子）→ L-组内-GRPO 训练 300 步（J=16, z, lr=1e-4）→
   终值（学习后 argmax L / 采样 L 30 种子）。
 判定：学习后 argmax < 轮询（同计划同种子）→ 该规模 L 层可学（正例：规模-可学性曲线）。
-输出：geosched/m6_agv.jsonl + ckpt checkpoints/m6_agv_{M,L}.pt。
-运行：python -m geosched.m6_agv（后台 ~1.5-2h）。小规模（MK01 6机×2-4车）已有数据作 S 档。
+输出：plcsp/m6_agv.jsonl + ckpt checkpoints/m6_agv_{M,L}.pt。
+运行：python -m plcsp.m6_agv（后台 ~1.5-2h）。小规模（MK01 6机×2-4车）已有数据作 S 档。
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ CONFIGS = [
     ("L30x18", gen_random(30, 18, seed=1), 12),
 ]
 TRAIN_STEPS = 300
-OUT = "geosched/m6_agv.jsonl"
+OUT = "plcsp/m6_agv.jsonl"
 
 
 def main() -> None:

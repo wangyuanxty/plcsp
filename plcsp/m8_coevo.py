@@ -16,7 +16,7 @@
   现实下界 → 设计最优解回到内部（不再退化到角点）。
 - 终评：三臂策略 × {默认, 8 个固定均匀随机配置, CO 终态推荐} × 30 种子
   （greedy 计划 + L=argmax，与主实验同协议）。
-输出：geosched/m8_coevo.jsonl。运行：python -m geosched.m8_coevo --rounds 6 --steps 60
+输出：plcsp/m8_coevo.jsonl。运行：python -m plcsp.m8_coevo --rounds 6 --steps 60
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ X0 = np.array([0.0, 1.5, 1.0, 3.0])         # 默认设计：line / aisle1.5 / g
 LAYOUT_TYPES = ("line", "U", "island")
 SEED_LAYOUT = 1
 EVAL_SEEDS = tuple(range(1, 31))
-OUT = "geosched/m8_coevo.jsonl"
+OUT = "plcsp/m8_coevo.jsonl"
 
 
 # ---------------- 参数空间 ----------------

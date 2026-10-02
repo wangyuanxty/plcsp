@@ -7,7 +7,7 @@
       × 30 种子（greedy 计划 + L=argmax 同 M6 协议）。
 分水岭 = 岛式列：A1 > A4 → 机制创新成立；A4 ≥ A1 → 降级"机制+DR 组合"。
 DR 训练 = 每步布局轮换 (line/U/island, seed) → 每步重建 enc_state。
-输出：geosched/m7_mechanism.jsonl。运行：python -m geosched.m7_mechanism（后台 ~80min）。
+输出：plcsp/m7_mechanism.jsonl。运行：python -m plcsp.m7_mechanism（后台 ~80min）。
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .algo.group_rel import greedy_plan
 from .algo.standard_tree import standard_tree_step
 
 SEEDS_EVAL = range(1, 31)
-OUT = "geosched/m7_mechanism.jsonl"
+OUT = "plcsp/m7_mechanism.jsonl"
 CFGS = [("bias", dict(mask="axial")), ("noBias", dict(mask="axial", w_d=0.0, w_c=0.0))]
 G, J, JL, LR, ENT = 4, 2, 8, 1e-4, 0.03
 

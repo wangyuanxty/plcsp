@@ -7,9 +7,9 @@
 - 均 MLP 特征路径（编码器路径 = 另一消融维度 ②，论文实验再做）
 - 每 10 步贪心评估：greedy_plan（argmax，确定性）× 扰动种子 [1,11,21] → 均值 makespan
 - 步数 40/方法（预热带；论文 = 200+ 步 × 多种子 × G/J 扫描）
-输出：geosched/m5_warmup.jsonl（{step, method, eval_mean} 逐评估点一行）。
+输出：plcsp/m5_warmup.jsonl（{step, method, eval_mean} 逐评估点一行）。
 
-运行：python -m geosched.m5_warmup（后台推荐——含 SimPy rollout，约 30-45 分钟）
+运行：python -m plcsp.m5_warmup（后台推荐——含 SimPy rollout，约 30-45 分钟）
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def evaluate(policy: PolicyNet, inst, t_max: float = 10.0) -> float:
     return float(np.mean(ms))
 
 
-def main(out: str = "geosched/m5_warmup_500.jsonl") -> None:
+def main(out: str = "plcsp/m5_warmup_500.jsonl") -> None:
     inst = load_mk("mk01")
     t0 = time.time()
     rows = []

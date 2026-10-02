@@ -7,7 +7,7 @@
 - 评估（每 100 步 3 种子 + 终局 30 种子）：与 m6_std_tree.eval_fn 同协议（sample_plan + L=argmax）
 - 判定：标准树 372.5 vs 本锚 M → 若 M ≈ 372.5 → "SA-GRPO ≈ 单轴 GRPO"（如实写）；
   若 M > 372.5 → 标准树有真增益；若 M < 372.5 → 树反而劣化（诚实记录）。
-输出：geosched/m6_anchor.jsonl。运行：python -m geosched.m6_anchor ~1.5h。
+输出：plcsp/m6_anchor.jsonl。运行：python -m plcsp.m6_anchor ~1.5h。
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from .algo.group_rel import sample_plan, l_seq_step_gated
 
 N_AGV, J, LR = 2, 16, 1e-4
 STEPS = 800
-OUT = "geosched/m6_anchor.jsonl"
+OUT = "plcsp/m6_anchor.jsonl"
 
 
 def make_world(inst):

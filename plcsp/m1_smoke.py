@@ -1,6 +1,6 @@
 """M1 冒烟测试：MK01 + 三种布局拓扑 → 一次 episode 指标（rollout API 与拓扑轴对比）。
 
-运行：python -m geosched.m1_smoke
+运行：python -m plcsp.m1_smoke
 """
 from .env.instances import load_mk, MK_OPTIMAL, load_kacem_8x8
 from .env.des import rollout, SimConfig

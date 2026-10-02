@@ -5,7 +5,7 @@
 实验 B（跨布局先验）：训练 200 步（line1）→ 评估 {line2, U1, island1}（几何偏置=不变
                       先验 → 泛化更稳；noBias 对照）。
 评估 = greedy_plan(argmax, 编码器路径) × 3 扰动种子均值；两配置共用几何特征（仅偏置开关差）。
-运行：python -m geosched.m5_bias_verify（后台 ~15-20min）
+运行：python -m plcsp.m5_bias_verify（后台 ~15-20min）
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from .algo.policy import PolicyNet
 from .algo.group_rel import train_step, greedy_plan
 
 SEEDS_EVAL = (1, 11, 21)
-OUT = "geosched/m5_bias.jsonl"
+OUT = "plcsp/m5_bias.jsonl"
 CFGS = [("bias", dict(mask="axial")), ("noBias", dict(mask="axial", w_d=0.0, w_c=0.0))]
 
 

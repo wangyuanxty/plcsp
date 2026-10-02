@@ -1,6 +1,6 @@
 """M3a 冒烟：S 层组训练器（三种层内基线 × J=1 退化验证 + J=2 分支）。
 
-运行：python -m geosched.m3_smoke
+运行：python -m plcsp.m3_smoke
 """
 import numpy as np
 import torch

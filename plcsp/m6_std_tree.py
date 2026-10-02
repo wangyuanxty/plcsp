@@ -8,8 +8,8 @@
 - 判定（记录 §四）：<372.7（超 L 组内 GRPO）且 <457.1（超规则 load_min）= 成功。
 - 玩具 sanity：gen_random(2,2,seed=0)（2job×2m 表行同款）——纯机器/梯度覆盖检查（不评判定）。
 
-用法： python -m geosched.m6_std_tree sanity | big
-输出： sanity: 每步一行 diag（40 步）；big: geosched/m6_std_tree.jsonl（200 步 + eval 行）。
+用法： python -m plcsp.m6_std_tree sanity | big
+输出： sanity: 每步一行 diag（40 步）；big: plcsp/m6_std_tree.jsonl（200 步 + eval 行）。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from .algo.standard_tree import standard_tree_step
 
 G, J, J_L, N_AGV, LR, ENT = 4, 2, 8, 2, 1e-4, 0.03
 FEAT_L = 6 + N_AGV + 2                      # run_gated 任务特征：6 任务+车状态 + n_agv 队列 + 2 序号
-BIG_OUT = "geosched/m6_std_tree.jsonl"
+BIG_OUT = "plcsp/m6_std_tree.jsonl"
 
 
 def make_world(inst):

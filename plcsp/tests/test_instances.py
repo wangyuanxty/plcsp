@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from geosched.env.instances import load_mk, parse_fjs_text
+from plcsp.env.instances import load_mk, parse_fjs_text
 
 # 官方规格：(n_jobs, n_machines, 总工序数)
 OFFICIAL: dict[str, tuple[int, int, int]] = {

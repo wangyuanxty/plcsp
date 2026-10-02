@@ -2,9 +2,9 @@
 """布局可视化：Layout → PNG（机台 / 装卸点 / 缓冲 / 充电位 / 走廊图）——论文配图 + 共演化设计检查。
 
 用法：
-  python -m geosched.viz_layout                                    # 三类型对照图（line/U/island）
-  python -m geosched.viz_layout --type U --aisle 1.2 --gap 0.7     # 单张（如共演化推荐设计）
-输出：geosched/figs/*.png
+  python -m plcsp.viz_layout                                    # 三类型对照图（line/U/island）
+  python -m plcsp.viz_layout --type U --aisle 1.2 --gap 0.7     # 单张（如共演化推荐设计）
+输出：plcsp/figs/*.png
 """
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def main() -> None:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    out_dir = Path("geosched/figs")
+    out_dir = Path("plcsp/figs")
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.type:                                  # 单张（如共演化推荐设计）
         lay = sample_layout(args.n_machines, args.type, args.seed,

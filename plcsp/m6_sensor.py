@@ -7,7 +7,7 @@
   c1_single        : 现状单目标（对照，预期≈1）
   c2_axis_weighted : 层级-目标对齐多目标（w=(mks1,tardy2,moves1,energy0.5)；轴控目标→层级有可归因方差）
   c3_congestion1   : 强拥塞单车（n_agv=1；L 轴信号增强+依赖 S）
-输出：geosched/m6_sensor.jsonl。运行：python -m geosched.m6_sensor（~3min）。
+输出：plcsp/m6_sensor.jsonl。运行：python -m plcsp.m6_sensor（~3min）。
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .algo.policy import PolicyNet
 from .algo.standard_tree import standard_tree_step
 
 STEPS_PER_CFG = 5
-OUT = "geosched/m6_sensor.jsonl"
+OUT = "plcsp/m6_sensor.jsonl"
 
 CONFIGS = [
     ("c1_single", dict(reward_mode="mks", n_agv=2)),

@@ -8,7 +8,7 @@
 - mlp    ：无编码器（时长特征下界；MLP 平台 373.5 先验）
 每结构 × 3 种子 × 800 步（覆盖 310→292 翻盘区间），每 100 步双口径评估（greedy + 32 采样
 mean/min）。输出：checkpoints/abl2/{tag}-s{seed}/metrics.ndjson（runner 格式：r 行 + eval 行）。
-运行：python -m geosched.m5_abl2（后台 ~2h）
+运行：python -m plcsp.m5_abl2（后台 ~2h）
 """
 from __future__ import annotations
 

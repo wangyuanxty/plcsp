@@ -1,7 +1,7 @@
 """L 层完整版验证：真·门控事件驱动（l_seq_step_gated）800 步 × 3 种子。
 
 评估 = run_gated(argmax π_L)（闭环部署口径）；对照锚：轮询 347.9 / 全0 481.2 / FIFO 357.3。
-输出：geosched/m5_l_gated.jsonl。运行：python -m geosched.m5_l_gated_verify（后台 ~1.5h）
+输出：plcsp/m5_l_gated.jsonl。运行：python -m plcsp.m5_l_gated_verify（后台 ~1.5h）
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .algo.group_rel import l_seq_step_gated, sample_plan
 STEPS, EVAL_EVERY, N_AGV, J = 800, 100, 4, 16
 LR = 1e-4
 SEEDS_TRAIN = (0, 1, 2)
-OUT = "geosched/m5_l_gated.jsonl"
+OUT = "plcsp/m5_l_gated.jsonl"
 
 
 def make_world(inst):

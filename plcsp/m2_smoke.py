@@ -1,6 +1,6 @@
 """M2 冒烟：几何特征 + 双轴编码器（形状/反向/参数/CUDA）。失败时打印全链形状。
 
-运行：python -m geosched.m2_smoke
+运行：python -m plcsp.m2_smoke
 """
 import traceback
 

@@ -11,8 +11,8 @@ k 由"参考调度下目标误期率"反解。本脚本扫描 k，报告误期�
 参考调度 = DES 默认口径：每工序取最短候选机台 + AGV 轮询派车（`rollout(op_choices=None)`）。
 
 用法：
-    python -m geosched.m9_due_calib                 # 三实例 × 多 k
-    python -m geosched.m9_due_calib --seeds 20
+    python -m plcsp.m9_due_calib                 # 三实例 × 多 k
+    python -m plcsp.m9_due_calib --seeds 20
 输出：stdout 表格（不写文件）
 """
 from __future__ import annotations

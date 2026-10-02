@@ -7,7 +7,7 @@
 - 树与 flat 的差异 = 唯一机制变量；判定：flat vs 372.5 → <372.5 树劣化 / ≈372.5 无增益 /
   >372.5 树有真增益（理想）。
 评估：同 m6_std_tree.eval_fn（sample_plan + L=argmax；终局 30 种子）。
-输出：geosched/m6_flat.jsonl。运行：python -m geosched.m6_flat（后台 ~85min）。
+输出：plcsp/m6_flat.jsonl。运行：python -m plcsp.m6_flat（后台 ~85min）。
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from .algo.standard_tree import standard_tree_step
 
 G, J, J_L, N_AGV, LR, ENT = 4, 2, 8, 2, 1e-4, 0.03
 FEAT_L = 6 + N_AGV + 2
-OUT = "geosched/m6_flat.jsonl"
+OUT = "plcsp/m6_flat.jsonl"
 
 
 def make_world(inst):

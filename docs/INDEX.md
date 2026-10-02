@@ -14,7 +14,7 @@
 **生产-物流协同调度（PLCSP）的深度强化学习研究**：两环节联动 = 排产（FJSP）→ 物流（真 AGV 派车）；自建 SimPy 测试台 + Transformer 编码器 + 组内相对 RL（GRPO）；目标顶刊。
 （2026-10-02 两处删减：① 原"**三环节** = 分批 → 排产 → 物流"——分批已砍，见 `progress-log.md` §12.5；② 原"**几何/度量感知注意力**编码器"——几何线已砍，见 §12.6。）
 
-代码：`geosched/`（Python 包）｜数据：`geosched/*.jsonl`｜文献 PDF：`references/`（63 篇）｜模型：`checkpoints/`
+代码：`plcsp/`（Python 包）｜数据：`plcsp/*.jsonl`｜文献 PDF：`references/`（63 篇）｜模型：`checkpoints/`
 
 ## 2. 文档地图
 

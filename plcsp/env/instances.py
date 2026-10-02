@@ -96,7 +96,7 @@ def load_mk(name: str = "mk01", base: Path | None = None) -> Instance:
     的 shape 与官方不符（Mk03: 10 vs 8 机、Mk05: 9 vs 4、Mk08/09: 14 vs 10），
     内容亦被错位——MK01 逐工序对比 **54/55 不符**。**npy 路径已废弃**。
     官方 `.fjs` 经回归测试核对：10/10 实例的维度与总工序数全部正确。
-    见 `geosched/tests/test_instances.py`。
+    见 `plcsp/tests/test_instances.py`。
     """
     if base is None:
         base = Path(__file__).resolve().parents[2] / "third_party" / "fjsp-gnnrl" / \

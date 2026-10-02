@@ -28,8 +28,8 @@
   (b) 均匀随机布局集（与 m8_coevo 用同一 rng(7) 序列 → 跨文件可比）——
   三臂策略 × 两集 × 30 种子，指标 = makespan 均值。另附规则基线在两集上的均值
   （非退化证据：难例集若规则也崩 = 退化难例，regret 口径本应已排除）。
-输出：geosched/m8_adv.jsonl（每轮一行 + 终评行）。
-运行：python -m geosched.m8_adv --rounds 6 --steps 45 --pop 16 --arms adv,dr,fixed
+输出：plcsp/m8_adv.jsonl（每轮一行 + 终评行）。
+运行：python -m plcsp.m8_adv --rounds 6 --steps 45 --pop 16 --arms adv,dr,fixed
 
 参考基线的口径说明（诚实注记）：仓库历史锚 "load_min 457.1"（docs/progress-log.md §一）
 产生于旧仿真修订（bug#8b horizon 修复前），当前仿真下任何 load_min 变体都不复现该绝对值
@@ -54,7 +54,7 @@ from .algo.policy import PolicyNet
 from .m8_coevo import (NAGV, BOUNDS, X0, EVAL_SEEDS, SepCMA,
                        decode, build, train_on, eval_on, run_arm)
 
-OUT = "geosched/m8_adv.jsonl"
+OUT = "plcsp/m8_adv.jsonl"
 MIX_P = 0.5          # ③ 混合采样：生成器当前分布占比（其余=均匀域采样）
 HARD_TOP = 8         # 难例集大小（= m8_coevo 均匀集大小，两集可比）
 UNI_N = 8            # 均匀随机布局集大小（同 m8_coevo）
