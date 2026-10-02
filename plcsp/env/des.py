@@ -795,13 +795,17 @@ class SimWorld:
                  "trans_evt": 0, "tasks_put": 0}
         env = simpy.Environment()
         inst = self.inst
-        # 计划表：job -> [(mach, time)]（按 op_choices 或贪婪最短选择）
+        # 计划表：job -> [机台号]（按 op_choices 或贪婪最短选择）。⚠️ 与 run_gated 同形状：
+        # 选机一律走 `_pick_machine`（离线=查表），时长在那里就地查 alts。所选时长另收一份
+        # 供 horizon 用（求和顺序与旧式 `sum(t for ops in plans.values() for _, t in ops)`
+        # 逐位相同，见 P2 Task 5 的 A/B 对拍）。
         plans = {}
+        chosen_times: list[float] = []
         for j, job_ops in enumerate(inst.jobs):
             plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
                 int(np.argmin([t for _, t in alts])) for alts in job_ops]
-            plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
-                        for oi in range(len(job_ops))]
+            plans[j] = [job_ops[oi][plan[oi]][0] for oi in range(len(job_ops))]
+            chosen_times.extend(job_ops[oi][plan[oi]][1] for oi in range(len(job_ops)))
         completes: dict[int, float] = {}
         bound = agv_phi is not None
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
@@ -816,11 +820,12 @@ class SimWorld:
         jkeys = list(plans.keys())
         inject_q: list = []
         for j in jkeys:
-            m0, t0 = plans[j][0]
-            env.process(self._release(env, machines[m0].in_q, (j, 0, OpLite(t0), len(plans[j]) == 1)))
+            m0, t0 = self._pick_machine(j, 0, None, False, plans, None)   # 离线：策略/日志不用
+            env.process(self._release(env, machines[m0].in_q,
+                                      (j, 0, OpLite(t0), len(inst.jobs[j]) == 1)))
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
                                       bound=bound, agv_phi=agv_phi))
-        total_work = sum(t for ops in plans.values() for _, t in ops)
+        total_work = sum(chosen_times)          # = 所选候选的时长之和（口径与旧式逐位相同）
         horizon = float(total_work * 6 + 500)   # v0 护栏升格：B 层门控（cap=2）下运行可远长于
                                                 # 无门控（波形化串行）；3× 护栏曾把门控运行掐
                                                 # 表截断（实测 9/10 假死——horizon 不足非死锁）
@@ -858,16 +863,31 @@ class SimWorld:
                 "n_zones": zm.n}
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-                  policy_l=None) -> dict:
-        """L 层门控式运行（真·事件驱动决策的同步实现）。
+                  policy_l=None, policy_s=None, online_s: bool = False) -> dict:
+        """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** policy_l(feat)，
         此刻 stats 中的车状态（agv_del/agv_pos）即**实时值**（无并发 → 无需事件/Gate）。
-        决策日志回传：返回 dict["decision_log"] = [(info, feat, agv), ...]（训练/评估用）。
-        policy_l=None → 等价 run 的轮询 bound 行为（agv_phi=None 时轮询兜底）。
+
+        `online_s=False`（默认）：S 层读**预计算**的 `plans`（`op_choices` 或贪婪最短）——
+        **逐位复现 P2 之前的静态行为**。
+        `online_s=True`：每道工序在**前驱完成后、即将入机台时**调
+        `policy_s(snap, job, oi, cand) -> 机台号` 决策（首工序无前驱 ⇒ 在 t=0 投放点决策，
+        此刻各队列皆空；同刻投放的作业共享同一初始视界）。`plans` 随之退化为**决策日志**
+        （`plans[job][oi]` 在决策后写入），故**决策前不得读它**。
+
+        决策日志回传：`dict["decision_log"]`，条目按首元素 kind 分派——
+        `("S", snap, job, oi, cand, choice)` / `("L", snap, (frm, to, oi+1), cand_v, agv)`
+        （`oi+1` = 目标工序序号；`cand_v` = 全车队）。
+        ⚠️ 只记**原始快照**（不构造特征：`env/` 不得依赖 `nn/`）——快照→特征在 `algo/` 层做。
         """
-        if policy_l is None:
+        if policy_l is None and not online_s:
             return self.run(seed_chain=seed_chain, op_choices=op_choices)
+        if online_s and policy_s is None:
+            raise ValueError("online_s=True 需要 policy_s 回调（S 层决策入口）")
+        if online_s and op_choices is not None:
+            raise ValueError("online_s=True 时计划由 policy_s 在线产生，op_choices 不生效——"
+                             "两者同传会静默忽略计划，故直接报错")
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -885,12 +905,16 @@ class SimWorld:
                  "trans_evt": 0, "tasks_put": 0}
         env = simpy.Environment()
         inst = self.inst
-        plans = {}
+        # 计划表：job -> [机台号]。离线 = 预填（同 run()）；在线 = 空 **决策日志**，
+        # 由 `_pick_machine` 决策后写入（`None` = 尚未决策，决策前读它即 bug）。
+        plans: dict[int, list] = {}
         for j, job_ops in enumerate(inst.jobs):
-            plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
-                int(np.argmin([t for _, t in alts])) for alts in job_ops]
-            plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
-                        for oi in range(len(job_ops))]
+            if online_s:
+                plans[j] = [None] * len(job_ops)
+            else:
+                plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
+                    int(np.argmin([t for _, t in alts])) for alts in job_ops]
+                plans[j] = [job_ops[oi][plan[oi]][0] for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
         (machines, tasks_in, zm,
@@ -902,13 +926,18 @@ class SimWorld:
             env.process(agv.run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
+        dec_log: list[tuple] = []               # ⚠️ 必须在投放点决策**之前**建好（S 层留痕）
         for j in jkeys:
-            m0, t0 = plans[j][0]
-            env.process(self._release(env, machines[m0].in_q, (j, 0, OpLite(t0), len(plans[j]) == 1)))
-        dec_log: list[tuple] = []
+            m0, t0 = self._pick_machine(j, 0, policy_s, online_s, plans, dec_log)
+            env.process(self._release(env, machines[m0].in_q,
+                                      (j, 0, OpLite(t0), len(inst.jobs[j]) == 1)))
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
-                                      bound=True, policy_l=policy_l, dec_log=dec_log))
-        total_work = sum(t for ops in plans.values() for _, t in ops)
+                                      bound=True, policy_l=policy_l, dec_log=dec_log,
+                                      policy_s=policy_s, online_s=online_s))
+        # horizon 的工时上界：**按最短候选**估（在线时 `plans` 是决策日志、读不到时长；
+        # 离线且用默认贪婪计划时该式 = 各工序所选时长之和，与旧式逐位相同）。
+        # 实际选择可能更长，靠下面的 6× 余量兜底——掐表时 horizon_hit 如实置位。
+        total_work = sum(min(t for _m, t in op) for job in inst.jobs for op in job)
         horizon = float(total_work * 6 + 500)   # 同 run()：门控掐表护栏（原 3× 截断 9/10 假死）
         env.run(until=horizon)
         stats["horizon_hit"] = len(completes) < inst.n_jobs   # 同 run()（原：run_gated 漏设旗标）
@@ -932,14 +961,48 @@ class SimWorld:
                 "travel_time_total": float(stats["travel_time"]),
                 "decision_log": dec_log}
 
+    def _pick_machine(self, job: int, oi: int, policy_s, online_s: bool, plans,
+                      dec_log: list | None) -> tuple[int, float]:
+        """**派工点**（P2 Task 5，spec §5.3.2）：选机台 + 取该候选上的加工时长。
+
+        两个派工点（投放点的首工序、transporter 的下一工序）**共用此一处**，故"在线/离线"
+        只有这一个分支——不存在"改了一处漏了另一处"的形状。
+
+        在线（`online_s=True`）：把**此刻的活状态**快照交给 `policy_s(snap, job, oi, cand)`，
+        并把 `("S", snap, job, oi, cand, choice)` 追加进 `dec_log`；`plans[job][oi]` 是决策
+        日志（决策后写入）。离线（`online_s=False`）：读预计算的 `plans`——不调策略、不取
+        快照、不写日志，**逐位复现旧行为**。
+
+        ⚠️ `policy_s` 返回非候选机台 → **显式报错**（静默回退会掩盖策略/候选集不一致，
+        让整条链的 logp 与动作错位而无人察觉）。
+        """
+        alts = self.inst.jobs[job][oi]
+        cand = [m for m, _t in alts]
+        if online_s:
+            snap = self.snapshot()                        # 活状态（只读，见 snapshot 的契约）
+            choice = int(policy_s(snap, job, oi, cand))
+            if choice not in cand:
+                raise ValueError(f"policy_s 选了非候选机台 {choice}；"
+                                 f"job={job} oi={oi} 候选={cand}")
+            dec_log.append(("S", snap, job, oi, tuple(cand), choice))
+            plans[job][oi] = choice                       # 决策日志：决策后写入
+        else:
+            choice = plans[job][oi]
+        t = next(t for m, t in alts if m == choice)
+        return choice, float(t)
+
     @staticmethod
     def _release(env, store, item):
         yield store.put(item)
 
     def _transporter(self, env, events_q, tasks_in, plans, machines, stats, inject_q,
                      bound: bool = False, agv_phi: list[int] | None = None,
-                     policy_l=None, dec_log: list | None = None):
+                     policy_l=None, dec_log: list | None = None,
+                     policy_s=None, online_s: bool = False):
         """机台完成事件：非末工序 → 从其输出缓冲取出 → 生成下一工序搬运任务（目标=下一工序机台）。
+
+        **这里的取事件处即"下一工序的派工点"**（P2 Task 5）：目标机台由 `_pick_machine` 决定
+        （在线 = 此刻调 `policy_s` 看活状态；离线 = 查 `plans`）。
 
         输出缓冲满=阻塞源：out_q.put 在机台侧阻塞；此处 get 保证消费（阻塞语义=M1.1 消磨）。
         末工序 + 在途注入队列非空 → 注入下一作业（分批门控波次语义）。
@@ -953,21 +1016,22 @@ class SimWorld:
             if is_last:
                 if inject_q:
                     j2 = inject_q.pop(0)
-                    m0, t0 = plans[j2][0]
+                    m0, t0 = self._pick_machine(j2, 0, policy_s, online_s, plans, dec_log)
                     # 注入用独立进程（非 yield 阻塞）：transporter 若在 in_q 满机上阻塞 put，
                     # 事件队列头被卡死 → 输出缓冲无人取 → 机器永不释放空间 → 永久死锁
                     # （jobs=9/10 quiescence 实测）。env.process 与首批注入同模式（_release）。
                     env.process(self._release(env, machines[m0].in_q,
-                                              (j2, 0, OpLite(t0), len(plans[j2]) == 1)))
+                                              (j2, 0, OpLite(t0), len(self.inst.jobs[j2]) == 1)))
                 continue
             yield machines[frm_idx].out_q.get()
-            ops = plans[job]
-            nxt_m, nxt_t = ops[oi + 1]
+            # 下一工序的机台在此刻决策（工件已离开机台、即将入下一机台的输入缓冲）
+            n_ops = len(self.inst.jobs[job])
+            nxt_m, nxt_t = self._pick_machine(job, oi + 1, policy_s, online_s, plans, dec_log)
             from .corridors import shortest_node_path
             _path = shortest_node_path(self.g, machines[frm_idx].pad.dock_node,
                                        machines[nxt_m].pad.dock_node)   # AGV 实际经过的节点序列
             task = (frm_idx, nxt_m,
-                    (job, oi + 1, OpLite(nxt_t), oi + 1 == len(ops) - 1), _path)
+                    (job, oi + 1, OpLite(nxt_t), oi + 1 == n_ops - 1), _path)
             stats.setdefault("task_flow", []).append((job, oi + 1, frm_idx, nxt_m))  # L 层流导出
             stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
                                                      tuple(stats["agv_pos"])))       # 任务时点车状态
@@ -986,8 +1050,12 @@ class SimWorld:
                                                                                 # 任务序号+相位（表
                                                                                 # 示缺口：轮换须可表达）
                 feat = np.array(feat, dtype=np.float32)
+                snap = self.snapshot()                  # 派车决策时点的活状态（只读）
                 agv = int(policy_l(feat))
-                dec_log.append(((job, oi + 1, frm_idx, nxt_m), feat, agv))
+                # 决策日志（P2 Task 5）：只记**原始快照**——不构造特征（env/ 不得依赖 nn/）；
+                # 候选 = 全车队（绑定路径下每车一队列，都是可选项）。
+                dec_log.append(("L", snap, (frm_idx, nxt_m, oi + 1),
+                                tuple(range(len(tasks_in))), agv))
                 yield tasks_in[agv].put(task)
             elif bound:
                 n_agv = len(tasks_in)
