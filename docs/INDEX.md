@@ -111,6 +111,32 @@
   τ 由 0.85 → **0.90**（P1b 模型变更后重标，误期率 26/44/65% → 20/28/48%）。
 - **回归门禁**：`plcsp/tests/` **110 项全绿**。测试**110 项**（P1b 前 69）。
 
+## 5.8 P2+P3 表征与联合训练（2026-10-03 完成）
+
+**P2 = 表征与训练骨架重写**（spec §5.3 的全部"现状"条目已逐条勾掉）；**P3 = A 端到端跑通**。
+
+- **编码器不再是零输入**（P0 遗留的头号问题）：`tok_feat` 由 `Snapshot` **实时构造**
+  （`env/snapshot.py` → `nn/state_emb.py::build_tok`），单张 `(N, F_MAX=10)` + **单个 Linear** +
+  **必需的类型嵌入**（`nn/encoder.py`；四段列语义重叠，去掉类型嵌入即失效）。
+- **两头读同一份 token 嵌入**：旧的手搓扁平路径（`l_head`/`agv_logits`/`s_head`/`mach_logits`）
+  **整支删除**，S/L 两头一律 `*_head_tok`；梯度到编码器的两条通路都有测试钉
+  （`test_joint_chain.py`）。
+- **S 层在线**（`run_gated(online_s=True)`）：每道工序在前驱完成后、即将入机台时决策，看得见
+  当时的机台积压/缓冲/保养余量；`op_choices` 静态口径保留（逐位复现旧行为）。
+- **奖励三目标**（`env/reward.py`）：`r = Σ wᵢ(−fᵢ)`，`wᵢ = (1/fᵢ^ref)/Σ(1/fⱼ^ref)`，
+  `f^ref` 与 `M_ref` 取自**同一次**参考运行（MK01 实测 `f^ref=(103.42, 7.73, 19.51)`）。
+- **训练是一个 GRPO**：一条链 = 一次 episode 的全部 S+L 决策，**一个** logp（**求和**）、
+  **一个**优势（组内 z）、Adam、J=1（`algo/group_rel.py`）。
+- **端到端验收（P3）**：`plcsp/tests/test_end_to_end_a.py` 三条断言（编码器输入非零且是活的 /
+  30 步内奖励改善 / 训练后 argmax **优于规则基线**）+ 一条**变异守卫**——小预算 30 步 × G=4
+  （整文件墙钟 ≈ 4.2–4.8 min），实测 **86.8 vs 规则 103.4（−16.1%）**；未训练对照 **238.0
+  （规则的 2.30×）**。**A 的关键数字见 `progress-log.md` §十八。**
+- **长训练走脚本**：`plcsp/m13_train_a.py`（CLI 可配、metrics 落 `checkpoints/a_<inst>`、
+  `--resume` 续跑）。⚠️ MK01 上 `G=8` 实测 **18 s/步** ⇒ 300 步 ≈ 1.5 h，**故不进单元测试**。
+- **回归门禁**：`plcsp/tests/` **160 项全绿**（P2 前 156）。
+- ⚠️ **可复现性**（Task 7 实测）：动作采样走**全局 torch RNG**（非种子流）⇒ **同 seed 跨进程
+  不可逐位复现**；论文的种子对照必须在**同一进程同一调用序列**下做。
+
 ## 6. 环境
 
 Windows 11｜Anaconda base（`D:\anaconda\python.exe`）｜Python 3.12.4｜**torch 2.14.0+cpu**（无 CUDA）｜simpy 4.1.2｜numpy 1.26.4｜matplotlib 3.11.0｜networkx 3.6.1
