@@ -58,6 +58,27 @@ def test_m_ref_is_plan_independent():
 
 
 @pytest.mark.unit
+def test_reference_cache_key_covers_dynamics_cfg():
+    """⚠️ 缓存键必须含**影响参考运行的 cfg 字段**：同实例换车队规模不得命中同一份 M_ref。
+
+    `_instance_key` 只看实例内容，而 `n_agv` 等 cfg 一变参考调度结果就变（实测 mk01：
+    n_agv=3 → 103.42，n_agv=1 → 109.95）——漏进键会**静默**拿到错的 M_ref 与 f^ref，
+    奖励权重随之算错（错得很安静）。
+    `tau` 相反：只进 `compute_due_dates`（交期是 metric、参考运行内被短路），实测换 τ
+    参考 makespan **逐位不变**——故不进键，免得 τ 扫描反复重跑同一份参考运行。
+    """
+    from plcsp.env.des import reference_makespan
+
+    inst = load_mk("mk01")
+    m3 = reference_makespan(inst, SimConfig(n_agv=3))
+    m1 = reference_makespan(inst, SimConfig(n_agv=1))
+    assert m1 != m3, "换 cfg 命中了同一份 M_ref——缓存键漏了 cfg 字段"
+    assert reference_makespan(inst, SimConfig(n_agv=3)) == m3    # 同 cfg 仍命中缓存
+    assert reference_makespan(inst, SimConfig(n_agv=1)) == m1
+    assert reference_makespan(inst, SimConfig(tau=0.50)) == m3   # τ 与参考运行无关
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("name", ["mk01", "mk07", "mk10"])
 def test_due_dates_are_binding_not_degenerate(name):
     """⑧ 必须**有信号**：不能 0% 误期（目标恒零）也不能 100% 误期（无区分度）。

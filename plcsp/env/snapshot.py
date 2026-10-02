@@ -39,6 +39,12 @@ class JobState:
     total_ops: int
     remaining_min: float    # 剩余工序的**标称**加工时长之和
     finished: bool
+    # ⑧ 交期 `d_j`（`des.compute_due_dates`：`τ·M_ref`）——⚠️ **同一实例所有作业同值**
+    # （共同交期形）。由此 `job_features` 的 due_margin 维是**冗余维**：同一快照内对所有
+    # 作业 token 相同，且 ≡ τ − Global 的 time_progress（线性重编码、无新信息）；改用
+    # **逐作业**交期后才有区分度。0.0 = 该快照无交期（约束关闭，或参考运行内
+    # `_MREF_BUSY` 短路——两种情形都不该有值）。
+    due: float
     # 该作业当前**落在哪台机**（在制件优先）；-1 = 未开始或已派车离台。
     # ⚠️ **同一机台号可被多件命中**：在制那件 + 输出缓冲里等搬运的几件都记同一机台号。
     # ⚠️ **已完成的作业仍指向末道机台**（`job_loc` 只由 transporter 清，末工序完工后不再清）。

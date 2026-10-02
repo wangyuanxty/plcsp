@@ -44,10 +44,13 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
         out[j] = (
             js.done_ops / max(js.total_ops, 1),                     # 0 progress
             js.remaining_min / ctx.total_work_min,                  # 1 remaining_work
-            # TODO(P2-Task6)：`Snapshot` 无逐作业交期 → 此维为**占位**（now/M_ref − 1 近似）；
-            # Task 6 把 `due_j` 放进 `JobState` 后改为 (due_j − now)/M_ref。
-            (0.0 if js.finished else
-             _safe((snap.now - 0.0) / ctx.m_ref - 1.0, -2.0, 2.0)),  # 2 due_margin
+            # 2 due_margin = (due_j − now)/M_ref（spec §5.3.1，交期 `due` 见 `JobState`）。
+            # ⚠️ **冗余维**（Task 6 实测）：共同交期 `d_j = τ·M_ref` 使此维在同一快照内
+            # **对所有作业 token 相同**，且 ≡ τ − Global[0] 的 time_progress（线性重编码，
+            # 无新信息；旧占位 `now/M_ref − 1` 与它仿射等价 → "解占位"在信息量上是零变化）。
+            # 保留：spec §5.3.1 的字段表经用户复核，且它是**将来换逐作业交期**的天然插口
+            # （§3.5 的 TWK 系）——那时此维才有区分度。
+            _safe((js.due - snap.now) / ctx.m_ref, -2.0, 2.0),
             1.0 if js.finished else 0.0,                            # 3 finished
             _safe(js.at_machine / max(ctx.n_m, 1), -1.0, 1.0),      # 4 at_machine
             1.0 if js.in_transit else 0.0,                          # 5 in_transit

@@ -136,7 +136,7 @@ def test_feature_order_matches_feature_names():
     node = lay.grid.node_id(1, 1)                        # 非 0 号节点：x/y 都不为 0
     nx, ny = ctx.node_xy[node]
     snap = _snap(
-        now=1.5 * ctx.m_ref,                             # due_margin = 1.5 − 1 = 0.5
+        now=1.5 * ctx.m_ref,                             # due_margin = (2.0 − 1.5) = 0.5
         machines=(MachineState(backlog_min=0.30 * ctx.total_work_min, in_q_len=2, in_cap=4.0,
                                out_q_len=1, out_cap=4.0, busy=True,
                                remaining_min=0.40 * ctx.total_work_min,
@@ -144,7 +144,8 @@ def test_feature_order_matches_feature_names():
                                fail_rate=0.60 * ctx.max_fail_rate, prev_job=-1),
                   ) * ctx.n_m,
         jobs=(JobState(done_ops=1, total_ops=4, remaining_min=0.35 * ctx.total_work_min,
-                       finished=False, at_machine=1, in_transit=True, on_agv=2),
+                       finished=False, due=2.0 * ctx.m_ref,
+                       at_machine=1, in_transit=True, on_agv=2),
               ) * ctx.n_jobs,
         vehicles=(VehicleState(status=2, node=node, queued=1, battery_frac=0.7,
                                capacity=min(2, ctx.max_capacity), speed_factor=1.1),
@@ -176,3 +177,39 @@ def test_feature_order_matches_feature_names():
         for col, name in enumerate(names):
             assert row[col] == pytest.approx(expected[name], rel=1e-5, abs=1e-6), (
                 f"{key} 段第 {col} 列应是「{name}」={expected[name]}，实测 {row[col]}")
+
+
+@pytest.mark.unit
+def test_due_margin_is_redundant_with_global_time_progress():
+    """⚠️ **spec 级发现的特征化测试**（Task 6）：共同交期使 due_margin 维对作业间零区分度。
+
+    交期是 `d_j = τ·M_ref`（**同一实例所有作业同值**，`des.compute_due_dates`），故
+    `due_margin = (d_j − now)/M_ref = τ − time_progress`——同一快照内**所有**作业 token
+    取值相同，且只是 Global[0] 的线性重编码（无新信息）。旧占位 `now/M_ref − 1` 与它
+    仿射等价，故"解占位"在信息量上是零变化。
+    ⚠️ 若将来改用**逐作业**交期（§3.5 的 TWK 系），本测试会红——**红是信号**：那时该维
+    才有区分度，请连同 `state_emb.job_features` 的注释一并复核。
+    """
+    from plcsp.env.des import reference_makespan
+
+    inst, lay, _w, _ctx = _ctx_and_snap()
+    m_ref = reference_makespan(inst, SimConfig(), lay.layout_seed)   # 与交期同源
+    ctx = norm_context(inst, lay, m_ref)
+    due = SimConfig().tau * m_ref                                    # 共同交期：全作业同值
+    done_job = JobState(done_ops=4, total_ops=4, remaining_min=0.0, finished=True,
+                        due=due, at_machine=0, in_transit=False, on_agv=-1)
+    todo_job = JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
+                        due=due, at_machine=-1, in_transit=True, on_agv=0)
+    snap = _snap(now=1.2 * m_ref, jobs=(done_job, todo_job) * (inst.n_jobs // 2))
+    tok, seg = build_tok(snap, inst, lay, ctx)
+    n_m, n_b = seg[0], seg[1]
+    b, gl = tok[n_m:n_m + n_b], tok[-1]
+    assert n_b == inst.n_jobs
+    # 前提：完工与未完工作业**各半**——故下面"取值相同"不是平凡成立（特判 finished 会红）
+    assert set(np.unique(b[:, 3]).tolist()) == {0.0, 1.0}
+    # ① 同一快照内**所有作业**该维相同（含已完工者）→ 对"作业之间"零区分度
+    assert np.allclose(b[:, 2], b[0, 2]), "due_margin 出现逐作业差异——交期已改成逐作业？"
+    # ② 且 ≡ clip(τ − time_progress)（Global[0]）——线性重编码，不增信息
+    expected = float(np.clip(SimConfig().tau - gl[0], -2.0, 2.0))
+    assert b[0, 2] == pytest.approx(expected, abs=1e-6)
+    assert expected == pytest.approx(SimConfig().tau - 1.2, abs=1e-6)   # 取值未触边界

@@ -14,7 +14,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 import numpy as np
 import simpy
@@ -153,12 +153,29 @@ def weighted_tardiness(completes: dict[int, float], due: dict[int, float],
 
 _MREF_CACHE: dict = {}
 _MREF_BUSY = False
+# 参考运行**不依赖**的 cfg 字段：`tau` 只进 `compute_due_dates`（交期是 metric，且参考运行内
+# 被 `_MREF_BUSY` 短路）——实测 τ=0.9 与 0.5 的参考 makespan **逐位相同**。故不进键：
+# 否则 τ 扫描会把同一份参考运行反复重跑。
+_CFG_KEY_SKIP = ("tau",)
 
 
 def _instance_key(inst: Instance) -> tuple:
     """实例内容指纹——用于缓存 `M_ref`（比 id() 稳，比文件名稳）。"""
     return (inst.n_machines, inst.n_jobs,
             tuple(tuple(min(t for _, t in op) for op in job) for job in inst.jobs))
+
+
+def _cfg_key(cfg: SimConfig) -> tuple:
+    """cfg 中**影响参考运行结果**的字段指纹——缓存键的第二部分（`_instance_key` 只看实例）。
+
+    ⚠️ 漏 cfg 会静默出错：`n_agv` / `agv_speed_mps` / `aisle_width` … 一变，参考运行的整份
+    metrics 都变（实测 mk01 的 M_ref：n_agv=1/3/5 → 109.95/103.42/97.24；车速 0.5/1.0 →
+    103.42/106.38），于是 f^ref 错 → 奖励权重错 → 落在哪个 Pareto 点都错。
+    取**全部字段减去已知无关项**（而非白名单）：新增 cfg 字段默认进键——失效安全。
+    参考运行固定 `constraints=None`（十约束全开），与调用方的 `ConstraintConfig` 无关，故后者不进键。
+    """
+    return tuple((f.name, getattr(cfg, f.name)) for f in fields(cfg)
+                 if f.name not in _CFG_KEY_SKIP)
 
 
 def reference_run(inst: Instance, cfg: SimConfig | None = None,
@@ -171,8 +188,10 @@ def reference_run(inst: Instance, cfg: SimConfig | None = None,
     ⚠️ 由此，参考运行自身的 `tardy` / `tardy_twt` **恒为 0**——取 f^ref 者须事后按
     `d_j = τ·M_ref` 从同一次运行的 `completes` 重算 TWT（`reward.ReferenceObjectives.of`
     就是这么做的；交期只影响 metric、不影响动力学，故事后算 = 交期开启时的值）。
+    缓存键 = 实例指纹 + `seed_layout` + **影响结果的 cfg 字段**（`_cfg_key`；`tau` 除外）。
     """
-    key = _instance_key(inst) + (seed_layout,)
+    c = cfg or SimConfig()
+    key = _instance_key(inst) + (seed_layout,) + _cfg_key(c)
     if key in _MREF_CACHE:
         return _MREF_CACHE[key]
     global _MREF_BUSY
@@ -180,8 +199,7 @@ def reference_run(inst: Instance, cfg: SimConfig | None = None,
         raise RuntimeError("reference_run 重入")
     _MREF_BUSY = True
     try:
-        r = rollout(inst, seed_layout=seed_layout, seed_chain=0,
-                    cfg=cfg or SimConfig(), constraints=None)
+        r = rollout(inst, seed_layout=seed_layout, seed_chain=0, cfg=c, constraints=None)
     finally:
         _MREF_BUSY = False
     _MREF_CACHE[key] = r
@@ -680,10 +698,18 @@ class SimWorld:
         旧口径 `due_factor × Σ工时` **已废弃**（spec §3.5：完全没算排队/运输/争用，
         实测 tardy 恒为 100%）。旧字段 `due_factor` / `energy_power` 已随 P1b 清理删除。
         """
+        return self._due_map(len(plans))
+
+    def _due_map(self, n_jobs: int) -> dict[int, float]:
+        """交期表（只需作业数）——`_due` 与 `snapshot()` **共用此一处**，防两处口径漂。
+
+        ⚠️ `_MREF_BUSY` 短路必须留着：参考调度自身的运行里**不得**递归求 M_ref（那会
+        `RuntimeError`），故参考运行内本函数返回 `{}`（快照里对应 `JobState.due = 0.0`）。
+        """
         if not self.constraints.due_dates or _MREF_BUSY:
             return {}                    # 参考调度自身运行时不递归求 M_ref
         m_ref = reference_makespan(self.inst, self.cfg, self.layout.layout_seed)
-        return compute_due_dates(len(plans), self.cfg.tau, m_ref)
+        return compute_due_dates(n_jobs, self.cfg.tau, m_ref)
 
     def _tardy(self, plans, completes, due) -> tuple[int, float]:
         """(误期作业数, 加权总拖期 TWT)。无交期时两者恒为 0。"""
@@ -734,7 +760,8 @@ class SimWorld:
         **口径**：`MachineState.remaining_min` 是**标称**剩余——`上机时刻 + 工序时长 − now`，
         即只算工序本身的时长，**不把换型、故障修复这些墙钟延长算进去**（故异常长的停机可能
         让它触底为 0，而工件实际还在机台上）。`JobState.remaining_min` 同理，是剩余各工序的
-        **标称**最短候选工时之和。`in_flight` = **队列里待取** + **车上在运**（两种队列形状
+        **标称**最短候选工时之和。`JobState.due` = ⑧ 的交期（与 `run()` 同口径的 `_due_map`；
+        约束关闭或参考运行内为 0.0）。`in_flight` = **队列里待取** + **车上在运**（两种队列形状
         都算，见下）。
         """
         from .snapshot import JobState, MachineState, Snapshot, VehicleState
@@ -751,12 +778,16 @@ class SimWorld:
                 pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate),
                 prev_job=(-1 if m.prev_job is None else int(m.prev_job))))
         js = []
+        # ⑧ 交期与 run() **同口径**（`_due_map`）：未 run 的 t=0 快照也取（首次会触发一次
+        # 参考运行——有缓存，mk01 冷启 <0.02 s）；参考运行自身运行时返回 {}（0.0 哨兵）。
+        due = self._due_map(len(self.inst.jobs))
         for j, job_ops in enumerate(self.inst.jobs):
             done = self._job_progress[j]
             js.append(JobState(
                 done_ops=done, total_ops=len(job_ops),
                 remaining_min=float(sum(min(t for _m, t in op) for op in job_ops[done:])),
-                finished=done >= len(job_ops), at_machine=int(self._job_loc[j]),
+                finished=done >= len(job_ops), due=float(due.get(j, 0.0)),
+                at_machine=int(self._job_loc[j]),
                 in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j])))
         vs = []
         for a, agv in enumerate(self.agvs):
