@@ -22,7 +22,9 @@ class MachineState:
     out_q_len: int
     out_cap: float
     busy: bool              # 是否持有加工槽
-    remaining_min: float    # 当前工序剩余加工时长（未加工 = 0）
+    # 在制工序的**标称**剩余 [min]：上机时刻 + 工序时长 − now，随仿真时间递减、触底为 0。
+    # ⚠️ 不含换型/故障修复的墙钟延长（故长停机时可能已触底而工件仍在机台上）；无在制 = 0。
+    remaining_min: float
     pm_used_min: float      # 距上次保养已累计的主轴工时（⑫）
     fail_rate: float        # ③
     prev_job: int           # 本机上一件加工的作业号；-1 = 还没加工过（⑤ 换型的依据）
@@ -34,7 +36,9 @@ class JobState:
     total_ops: int
     remaining_min: float    # 剩余工序的**标称**加工时长之和
     finished: bool
-    at_machine: int         # 当前所在机台；-1 = 未开始
+    # 该作业当前**落在哪台机**（在制件优先）；-1 = 未开始或已派车离台。
+    # ⚠️ **同一机台号可被多件命中**：在制那件 + 输出缓冲里等搬运的几件都记同一机台号。
+    at_machine: int
     in_transit: bool
     on_agv: int             # 在途时所乘的车；-1 = 无
 

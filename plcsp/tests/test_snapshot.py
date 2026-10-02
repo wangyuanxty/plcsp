@@ -3,17 +3,73 @@ from __future__ import annotations
 
 import pytest
 
+import plcsp.env.des as des_mod
 from plcsp.env.des import SimWorld, SimConfig
 from plcsp.env.instances import load_mk
 from plcsp.env.layout import sample_layout
 from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
 
 
-def _world(name: str = "mk01"):
+def _world(name: str = "mk01", cfg: SimConfig | None = None):
     inst = load_mk(name)
     lay = sample_layout(inst.n_machines, seed=0, n_agv=3)
     dm = dock_distance_matrix(build_corridor_graph(lay))
-    return inst, SimWorld(inst, lay, dm, SimConfig(), graph=build_corridor_graph(lay))
+    return inst, SimWorld(inst, lay, dm, cfg or SimConfig(), graph=build_corridor_graph(lay))
+
+
+def _spy_agv(monkeypatch, rec: dict) -> None:
+    """观察 AGV 派车环（测试专用）。**不新增任何仿真事件 ⇒ 对轨迹零扰动**。
+
+    - `rec["entries"]`：每次行驶开始前 `(now, aid, leg, 本车在手的工件)`；
+    - `rec["requeues"]`：每次**退回队列** `(now, aid, leg, 本车在手的工件)`；
+    - `rec["after_requeue"]`：每次退回之后**本车的第一个采样**
+      `(now, aid, leg, 退回时在手的工件, 本车负载标志, job_agv)`。
+
+    ⚠️ 复位效果只看"退回后的第一个采样"——退回与复位之间没有让出点，故这一采样必是复位后
+    的状态；改看"同一时刻的最后一个采样"会把"同一时刻又重新装上货"的合法状态误判成滞留。
+    """
+    orig_run, orig_drive = des_mod.AgvSim.run, des_mod.AgvSim._drive
+    for k in ("entries", "requeues", "after_requeue"):
+        rec.setdefault(k, [])
+    pending: dict[int, tuple] = {}
+
+    def spy_run(self):
+        # ⚠️ 必须**透明转发 send**：SimPy 靠 `process.send(值)` 把事件值送回生成器；
+        # 用 `for ev in gen` 转发会把值吞成 None（`q.get()` 解包立刻 TypeError）。
+        gen, sent = orig_run(self), None
+        while True:
+            try:
+                ev = gen.send(sent)
+            except StopIteration:
+                return
+            if self.aid in pending:
+                _t, _aid, leg, held = pending.pop(self.aid)
+                rec["after_requeue"].append((self.env.now, self.aid, leg, held,
+                                             bool(self.track.agv_loaded[self.aid]),
+                                             tuple(self.track.job_agv)))
+            sent = yield ev
+
+    def in_hand(car) -> tuple:
+        """本车此刻**在手**的工件：登记在本车上、且不在本车队列里排队的那些。
+
+        ⚠️ 绑定模式下车队队列里可能还压着**别的**已派任务（transporter 派车即登记），
+        那些不算"在手"——否则会把"排队等车的合法在途"误判成"退回未复位"。
+        """
+        queued = {t[2][0] for t in (car.tasks_in[car.aid].items if car.bound else [])}
+        return tuple(j for j, v in enumerate(car.track.job_agv)
+                     if v == car.aid and j not in queued)
+
+    def spy_drive(self, src, dst, leg):
+        held = in_hand(self)
+        rec["entries"].append((self.env.now, self.aid, leg, held))
+        ok, end = yield from orig_drive(self, src, dst, leg)
+        if not ok:
+            rec["requeues"].append((self.env.now, self.aid, leg, held))
+            pending[self.aid] = (self.env.now, self.aid, leg, held)
+        return ok, end
+
+    monkeypatch.setattr(des_mod.AgvSim, "run", spy_run)
+    monkeypatch.setattr(des_mod.AgvSim, "_drive", spy_drive)
 
 
 @pytest.mark.unit
@@ -69,3 +125,84 @@ def test_vehicle_status_is_one_of_four_values():
     assert all(v.status in (0, 1, 2, 3) for v in snap.vehicles)
     assert all(0.0 <= v.battery_frac <= 1.0 for v in snap.vehicles)
     assert all(v.capacity >= 1 for v in snap.vehicles)
+
+
+# ══ 以下三项是评审后补的**回归钉**（F1/F2/F3）：每条都对准一个具体缺陷，
+#    去掉对应修复即变红（已做变异验证）。══════════════════════════════════
+
+
+@pytest.mark.unit
+def test_machine_remaining_min_decreases_while_processing():
+    """F1：同一道工序内 `remaining_min` 必须**递减**，不是恒等于工序时长的常数。
+
+    样本取自 `run_gated` 的决策回调（MK01 种子 1 有 50 对"同工件、时间已推进"的连续样本，
+    余量充足）；时间未推进的样本对不参与断言，触底为 0 的样本只要求保持 0。
+    """
+    inst, w = _world()
+    prev: dict[int, tuple[int, float, float]] = {}      # 机台 → (在制工件, now, 剩余)
+    stat = {"strict": 0, "flat": 0}
+
+    def policy_l(feat):
+        snap = w.snapshot()
+        for m, ms in enumerate(snap.machines):
+            cur = w._cur_op[m]                          # (工件, 工序时长, 上机时刻)
+            if cur is None:                             # 机台空 → 无在制
+                prev.pop(m, None)
+                continue
+            p = prev.get(m)
+            if p is not None and p[0] == cur[0] and snap.now > p[1]:
+                if p[2] > 0.0:
+                    if ms.remaining_min < p[2]:
+                        stat["strict"] += 1
+                    else:
+                        stat["flat"] += 1
+            prev[m] = (cur[0], snap.now, ms.remaining_min)
+        return 0
+
+    w.run_gated(seed_chain=1, policy_l=policy_l)
+    assert stat["flat"] == 0, "同工序内 remaining_min 没有随时间递减（仍是常数）"
+    assert stat["strict"] >= 5, f"同工序连续样本太少（{stat['strict']}），断言没被真正验证"
+
+
+@pytest.mark.unit
+def test_fifo_path_marks_jobs_in_transit(monkeypatch):
+    """F2：旧 FIFO 路径（`run()` 不传 `agv_phi`，无派车分支）也必须写 `_job_agv`。
+
+    否则 `JobState.in_transit` / `on_agv` 在这条路径上恒为 False / -1——车只有在
+    **取到任务之后**才知道是哪台，故写法在 `AgvSim` 而不是只在 transporter 的派车处。
+    """
+    rec: dict = {}
+    inst, w = _world()
+    _spy_agv(monkeypatch, rec)
+    r = w.run(seed_chain=1)                             # FIFO：不传 agv_phi
+    assert r["deliveries"] > 0 and not r["horizon_hit"]
+    marks = [held for (_t, _a, leg, held) in rec["entries"] if leg == "loaded" and held]
+    assert len(marks) >= 1, "FIFO 路径上从没有工件被登记到车上——in_transit 会恒为 False"
+
+
+@pytest.mark.unit
+def test_requeue_resets_loaded_flag_and_transit(monkeypatch):
+    """F3：区段争用**退回队列**时，车与工件必须当场复位（不是等下次投递洗掉）。
+
+    场景：极粗区段（`row`）+ 极短等待上限（0.01 min = 0.6 s）+ 派车绑定（`agv_phi`），
+    MK01 种子 0 实测 113 次退回，其中 5 次发生在**负载段**（目标分支）。
+    断言：每次退回后的 `zone_hold` 窗口内——① 本车负载标志已复位；② 本车在手的工件已离车；
+    ③ 收尾后全线无在途工件、无车带负载标志。
+    """
+    rec: dict = {}
+    inst, w = _world(cfg=SimConfig(zone_granularity="row", zone_wait_limit=0.01))
+    _spy_agv(monkeypatch, rec)
+    r = w.run(seed_chain=0, agv_phi=[0, 1, 2] * 200)
+    assert not r["horizon_hit"] and r["jobs_done"] == inst.n_jobs
+    assert r["dbg"]["requeue"] > 0, "该配置没逼出 requeue，目标分支没被验到"
+    rq = rec["requeues"]
+    assert any(leg == "loaded" for (_t, _a, leg, _held) in rq), \
+        "没有一次退回发生在负载段——目标分支没被验到"
+    obs = rec["after_requeue"]
+    assert len(obs) == len(rq), f"退回 {len(rq)} 次却只观察到 {len(obs)} 次复位结果"
+    for (ts, aid, _leg, held, loaded, marks) in obs:
+        assert not loaded, f"t={ts} 车 {aid} 退回后仍带负载标志（未复位）"
+        assert all(marks[j] == -1 for j in held), f"t={ts} 车 {aid} 退回后工件仍记在车上"
+    assert not any(v >= 0 for v in w._job_agv), "收尾后仍有工件被记为在途"
+    assert not any(w._agv_loaded)
+    assert all(not js.in_transit for js in w.snapshot().jobs)

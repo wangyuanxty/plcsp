@@ -122,7 +122,8 @@ class SimTrack:
         self.job_progress = [0] * n_jobs                      # 已完成工序数
         self.job_loc = [-1] * n_jobs                          # 当前所在机台；-1 = 不在机台上
         self.job_agv = [-1] * n_jobs                          # 在途时所乘的车；-1 = 无
-        self.cur_op: list[tuple[int, float] | None] = [None] * n_machines   # (工件, 加工时长)
+        # (工件, 加工时长, 上机时刻)：快照按 `t_start + 时长 − now` 算**标称**剩余（见 snapshot）
+        self.cur_op: list[tuple[int, float, float] | None] = [None] * n_machines
         self.agv_loaded = [False] * n_agv                     # 车上是否载货（状态 2 的判据）
 
 
@@ -234,8 +235,9 @@ class MachineSim:
         while True:
             job, oi, op, is_last = yield self.in_q.get()
             self.stats["in_q_gets"] = self.stats.get("in_q_gets", 0) + 1
-            # 快照跟踪（P2 Task 1）：工件上机 → 记在制工序与所在地
-            self.track.cur_op[self.pad.id] = (job, op.time)
+            # 快照跟踪（P2 Task 1）：工件上机 → 记在制工序、上机时刻与所在地
+            # ⚠️ 上机时刻 = 此刻（换型/故障修复的墙钟延长都不计入剩余——标称口径）
+            self.track.cur_op[self.pad.id] = (job, op.time, self.env.now)
             self.track.job_loc[job] = self.pad.id
             # ④ 返工：同件在本机**原地**重做（工件不离开机台，故不走运输）。
             # ⚠️ 必须原地——早期版本走 `in_q.put` 会**自锁**：本机是该缓冲的唯一消费者，
@@ -527,13 +529,25 @@ class AgvSim:
                 if not ok:
                     self.stats["requeue"] = self.stats.get("requeue", 0) + 1
                     q.put((frm, to, item, path))
+                    # 快照跟踪（P2 Task 1）：退回队列 = 这批活不在这台车上（车还是空的）
+                    self.track.job_agv[item[0]] = -1
+                    self.track.agv_loaded[self.aid] = False
                     continue
             # ⑩ 同向拼车：把队首连续的同 (取货点, 卸货点) 任务一并装走
             batch = yield from self._collect(q, frm, to, (frm, to, item, path))
+            # 快照跟踪（P2 Task 1）：取到任务即记车号——FIFO 路径没有派车分支，只靠这里，
+            # 否则 `JobState.in_transit` 在旧规则路径上恒为 False。
+            for (_f0, _t0, _it0, _p0) in batch:
+                self.track.job_agv[_it0[0]] = self.aid
             # ── 负载段：取货点 → 卸货点（整批一趟）──
             self.track.agv_loaded[self.aid] = True   # 快照跟踪（P2 Task 1）：取货后负载行驶
             ok, self.pos_node = yield from self._drive(a, b, "loaded")
             if not ok:
+                # 快照跟踪（P2 Task 1）：退回队列 = **当场**卸空——车要带着"空车"的状态在
+                # 取货点干等 zone_hold，不能挂着"负载行驶"（否则状态 2 / 在途会滞留到重试）
+                self.track.agv_loaded[self.aid] = False
+                for t in batch:
+                    self.track.job_agv[t[2][0]] = -1
                 yield self.env.timeout(self.cfg.zone_hold)
                 self.stats["requeue"] = self.stats.get("requeue", 0) + 1
                 for t in batch:                      # 整批退回队列
@@ -589,35 +603,56 @@ class SimWorld:
                 "直接构造 SimWorld 时须传 sample_layout(..., n_agv=cfg.n_agv)")
         return fleet
 
+    def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
+                        seed_chain: int = 0,
+                        charger_res=()) -> tuple[list, object, ZoneManager, simpy.Store]:
+        """建机台 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
+
+        `run()` / `run_gated()` / `_cold_start()` **共用同一份**构造（逐字重复是本仓评审会判
+        缺陷的形态）。⚠️ 只建对象、**不启进程**：`env.process` 的**注册顺序**决定同刻事件
+        次序，故启动由调用方按原顺序做（机台 → 车辆）。返回调用方后续还要用的实体
+        `(machines, tasks_in, zm, events_q)`（`self.*` 上的活引用已一并挂好）。
+        """
+        fleet = self._fleet()
+        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
+        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
+        events_q = simpy.Store(env)
+        track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
+        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
+                               events_q, self.constraints, track)
+                    for i in range(self.inst.n_machines)]
+        if bound:
+            tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]   # L 层绑定：每车一队列
+        else:
+            tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
+        agvs = [AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
+                       self.g, zm, self.constraints, fleet[a],
+                       np.random.default_rng([seed_chain, 1000 + a]),      # ⑨ 每车独立流
+                       track, chargers=self.layout.chargers, charger_res=charger_res,
+                       bound=bound)
+                for a in range(self.cfg.n_agv)]
+        # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
+        self.env = env
+        self.completes = completes
+        self.machines = machines
+        self.tasks_in = tasks_in
+        self.track = track
+        self._job_progress = track.job_progress
+        self._job_loc = track.job_loc
+        self._job_agv = track.job_agv
+        self._cur_op = track.cur_op
+        self._agv_loaded = track.agv_loaded
+        self.agvs = agvs
+        return machines, tasks_in, zm, events_q
+
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
 
         `snapshot()` 必须在 `run()` 之前也可用（决策日志与特征层都可能要"初始状态"，
         单测也直接取 t=0 快照），而 `w.machines[m].in_q` 这类活对象在 `run()` 前并不存在。
-        `run()` / `run_gated()` 用自己的 env/stats/车队整套重建，故此处只是"起点像"。
+        假 stats + 全新 env ⇒ 对随后 `run()` 的行为零影响（已用指标逐位对拍证明）。
         """
-        env = simpy.Environment()
-        fleet = self._fleet()
-        self.env = env
-        self.completes: dict[int, float] = {}
-        self.track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
-        self._job_progress = self.track.job_progress
-        self._job_loc = self.track.job_loc
-        self._job_agv = self.track.job_agv
-        self._cur_op = self.track.cur_op
-        self._agv_loaded = self.track.agv_loaded
-        self.machines = [MachineSim(env, self.layout.machines[i], np.random.default_rng(0),
-                                    self.cfg, {}, {}, simpy.Store(env), self.constraints,
-                                    self.track)
-                         for i in range(self.inst.n_machines)]
-        self.tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
-        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
-        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
-        self.agvs = [AgvSim(env, a, self.m_dm, self.cfg, {}, self.tasks_in, self.machines,
-                            self.g, zm, self.constraints, fleet[a],
-                            np.random.default_rng(0), self.track,
-                            chargers=self.layout.chargers, bound=True)
-                     for a in range(self.cfg.n_agv)]
+        self._build_entities(simpy.Environment(), {}, {}, np.random.default_rng(0), bound=True)
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         """⑧ 交期 `d_j = τ·M_ref`。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
@@ -675,6 +710,11 @@ class SimWorld:
 
         `_job_progress[j]` / `_job_loc[j]` / `_job_agv[j]` 由 `MachineSim` 与 `AgvSim` 维护
         （见 `run()` 里的初始化），是"作业进行到哪一步"的唯一真相。
+
+        **口径**：`MachineState.remaining_min` 是**标称**剩余——`上机时刻 + 工序时长 − now`，
+        即只算工序本身的时长，**不把换型、故障修复这些墙钟延长算进去**（故异常长的停机可能
+        让它触底为 0，而工件实际还在机台上）。`JobState.remaining_min` 同理，是剩余各工序的
+        **标称**最短候选工时之和。
         """
         from .snapshot import JobState, MachineState, Snapshot, VehicleState
         ms = []
@@ -686,7 +726,7 @@ class SimWorld:
                 in_q_len=len(q), in_cap=float(m.in_q.capacity),
                 out_q_len=len(m.out_q.items), out_cap=float(m.out_q.capacity),
                 busy=bool(m.slot.count),
-                remaining_min=float(cur[1]) if cur else 0.0,
+                remaining_min=(max(0.0, cur[2] + cur[1] - float(self.env.now)) if cur else 0.0),
                 pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate),
                 prev_job=(-1 if m.prev_job is None else int(m.prev_job))))
         js = []
@@ -745,39 +785,13 @@ class SimWorld:
             plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
-        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
-        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
-        events_q = simpy.Store(env)
-        track = SimTrack(inst.n_jobs, inst.n_machines, self.cfg.n_agv)   # 快照跟踪量（P2 Task 1）
-        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints, track)
-                    for i in range(inst.n_machines)]
         bound = agv_phi is not None
-        if bound:
-            tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]   # L 层绑定：每车一队列
-        else:
-            tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
-        for m in machines:
-            env.process(m.run())
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
-        fleet = self._fleet()
-        # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
-        self.env = env
-        self.completes = completes
-        self.machines = machines
-        self.tasks_in = tasks_in
-        self.track = track
-        self._job_progress = track.job_progress
-        self._job_loc = track.job_loc
-        self._job_agv = track.job_agv
-        self._cur_op = track.cur_op
-        self._agv_loaded = track.agv_loaded
-        self.agvs = [AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                            self.g, zm, self.constraints, fleet[a],
-                            np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
-                            track, chargers=self.layout.chargers, charger_res=charger_res,
-                            bound=bound)
-                     for a in range(self.cfg.n_agv)]          # 原来是直接 env.process(…)
+        (machines, tasks_in, zm,
+         events_q) = self._build_entities(env, stats, completes, rng, bound=bound,
+                                          seed_chain=seed_chain, charger_res=charger_res)
+        for m in machines:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
+            env.process(m.run())
         for agv in self.agvs:
             env.process(agv.run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
@@ -860,35 +874,12 @@ class SimWorld:
             plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
-        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
-        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
-        events_q = simpy.Store(env)
-        track = SimTrack(inst.n_jobs, inst.n_machines, self.cfg.n_agv)   # 快照跟踪量（P2 Task 1）
-        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints, track)
-                    for i in range(inst.n_machines)]
-        tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
-        for m in machines:
-            env.process(m.run())
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
-        fleet = self._fleet()
-        # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
-        self.env = env
-        self.completes = completes
-        self.machines = machines
-        self.tasks_in = tasks_in
-        self.track = track
-        self._job_progress = track.job_progress
-        self._job_loc = track.job_loc
-        self._job_agv = track.job_agv
-        self._cur_op = track.cur_op
-        self._agv_loaded = track.agv_loaded
-        self.agvs = [AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                            self.g, zm, self.constraints, fleet[a],
-                            np.random.default_rng([seed_chain, 1000 + a]),
-                            track, chargers=self.layout.chargers, charger_res=charger_res,
-                            bound=True)
-                     for a in range(self.cfg.n_agv)]          # 原来是直接 env.process(…)
+        (machines, tasks_in, zm,
+         events_q) = self._build_entities(env, stats, completes, rng, bound=True,
+                                          seed_chain=seed_chain, charger_res=charger_res)
+        for m in machines:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
+            env.process(m.run())
         for agv in self.agvs:
             env.process(agv.run())
         jkeys = list(plans.keys())
