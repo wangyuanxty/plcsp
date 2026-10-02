@@ -8,6 +8,8 @@
   ⚠️ 统一宽度方案下**必需**（spec §5.3.1）：四段列语义重叠（第 3 列在 M 段是"在加工"、
   在 B 段是"已完成"），只有类型嵌入能把它们解耦开。**去掉类型嵌入，本方案即失效。**
 - **全连接注意力**（spec §5.1）：原双轴块稀疏掩码（`block_mask` / `DualAxisLayer`）整体删除。
+- **补零列必须恒为 0**（spec §5.3.1）：`SEG_SLICE` 之外的列一旦非零即抛 `ValueError`——**不静默清零**。
+  单 Linear 会照吃 `W[:, 7:]` 这类补零列权重，上游列偏移写错必须当场炸出来（快速失败纪律）。
 
 ⚠️ 2026-10-02：**几何偏置（GeomBias）已移除**——几何/度量感知路线整条砍除
 （见 `progress-log.md` §12.6）。本模块不再接收 dist/conf。
@@ -79,30 +81,34 @@ class LayoutEncoder(nn.Module):
 
         返回 (token 嵌入 (1, N, d), 全局上下文 (1, d)=均值池化)。
         `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
-        按 `SEG_SLICE` 清补零列，并核对总长。
+        核对补零列为 0，并核对总长。
         """
         n_m, n_b, n_v, n_g = seg
         N = n_m + n_b + n_v + n_g
         assert tok_feat.shape[1] == N, f"tok_feat 行数 {tok_feat.shape[1]} != sum(seg)={N}"
         tid = torch.cat([torch.full((n,), i, dtype=torch.long)
                          for i, n in enumerate(seg)])          # 每个 token 的类型 id
-        cols = self._col_mask(seg, tok_feat.dtype)
-        x = (self.embed(tok_feat[0] * cols) + self.type_emb[tid]).unsqueeze(0)
+        self._require_zero_padding(tok_feat, seg)
+        x = (self.embed(tok_feat[0]) + self.type_emb[tid]).unsqueeze(0)
         for layer in self.layers:
             x = layer(x)
         x = self.ln(x)
         return x, x.mean(dim=1)
 
-    def _col_mask(self, seg: tuple[int, int, int, int], dtype: torch.dtype) -> torch.Tensor:
-        """(N, F_MAX) 0/1 列掩码：各段只放行 `SEG_SLICE` 内的有效列，补零列置 0。
+    def _require_zero_padding(self, tok_feat: torch.Tensor,
+                              seg: tuple[int, int, int, int]) -> None:
+        """补零列（`SEG_SLICE` 之外）必须恒为 0，否则抛 `ValueError`——**不静默清零**。
 
-        ⚠️ 补零列在 `build_tok` 里恒为 0，但单 Linear 会照吃 `W[:, 7:]` 这类补零列权重——
-        上游一旦列偏移写错（数据落进补零列），编码器就会把它当真值。此处按列真相
-        `SEG_SLICE` 显式清零，把"补零列不影响嵌入"钉成编码器自己的不变量。
+        ⚠️ 单 Linear 会照吃 `W[:, 7:]` 这类补零列权重：上游一旦把数据写进补零列，嵌入就会
+        带上一个本该**不存在**的分量。静默清零会把这种列偏移写错吞成看不见的 bug，故此处
+        快速失败。补零列本应恒 0，见 spec §5.3.1。
         """
-        cols = torch.zeros(sum(seg), self.feat_dim, dtype=dtype)
         r = 0
         for key, n in zip(_SEG_KEYS, seg):
-            cols[r:r + n, SEG_SLICE[key]] = 1.0
+            sl = SEG_SLICE[key]
+            pad = list(range(sl.start or 0)) + list(range(sl.stop, self.feat_dim))
+            if n and pad and bool((tok_feat[0, r:r + n][:, pad] != 0).any()):
+                raise ValueError(
+                    f"{key} 段的补零列 {pad} 非 0（行 {r}..{r + n - 1}）：补零列本应恒 0，"
+                    f"见 spec §5.3.1——上游列偏移写错？")
             r += n
-        return cols

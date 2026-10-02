@@ -5,7 +5,7 @@ import torch
 import pytest
 
 from plcsp.nn.encoder import LayoutEncoder
-from plcsp.nn.features import F_B, F_G, F_M, F_MAX
+from plcsp.nn.features import F_B, F_G, F_M, F_MAX, F_V
 
 
 def _tok(n_m=6, n_b=10, n_v=3, fill=1.0):
@@ -49,11 +49,11 @@ def test_type_embedding_distinguishes_segments():
 
 
 @pytest.mark.unit
-def test_padded_columns_do_not_affect_embedding():
-    """补零列不得影响嵌入——把它们改成任意值，输出必须**逐位不变**。
+def test_nonzero_in_padded_columns_is_rejected():
+    """补零列非 0 必须**报错**（快速失败），而不是被静默吞掉。
 
-    这是"统一宽度 + 单 Linear"方案的正确性前提：补零列乘的是权重列，
-    若某处列偏移写错、把有效列当成了补零列，嵌入就会变。本测试把该风险钉死。
+    单 Linear 会照吃补零列的权重（`W[:, 7:]`），故"数据落进补零列"（上游列偏移写错）
+    必须当场炸出来；静默清零会把它变成看不见的 bug。补零列本应恒 0，见 spec §5.3.1。
     """
     enc = LayoutEncoder().eval()
     a, seg = _tok(fill=1.0)
@@ -62,8 +62,22 @@ def test_padded_columns_do_not_affect_embedding():
     b[0, :n_m, F_M:] = 99.0                      # M 段补零列
     b[0, n_m:n_m + n_b, F_B:] = 99.0             # B 段补零列
     b[0, -1, F_G:] = 99.0                        # G 段补零列
-    with torch.no_grad():
-        assert torch.allclose(enc(a, seg)[0], enc(b, seg)[0], atol=1e-6)
+    with pytest.raises(ValueError):
+        enc(b, seg)
+
+
+@pytest.mark.unit
+def test_seg_slice_matches_declared_widths():
+    """`SEG_SLICE` 必须从 0 起、恰好覆盖该段的**声明宽度**——直接守列偏移。
+
+    若某段被收窄一位（如 `M: slice(0, 6)` 而 `F_M=7`），补零列断言照样通过
+    （`build_tok` 不往那列写，它本来就是 0），列的**语义**却已错位——本断言把该盲区补上。
+    """
+    from plcsp.nn.features import SEG_SLICE
+    for key, width in (("M", F_M), ("B", F_B), ("V", F_V), ("G", F_G)):
+        sl = SEG_SLICE[key]
+        assert sl.start == 0, f"{key} 段列区间未从 0 起：{sl}"
+        assert sl.stop == width, f"{key} 段列区间 {sl} 与声明宽度 {width} 不符"
 
 
 @pytest.mark.unit
