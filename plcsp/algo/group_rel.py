@@ -23,6 +23,7 @@ spec §5.3.4 五条硬性约定在本模块的落点：
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -273,6 +274,15 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     if clip_eps is not None and epochs <= 1:
         raise ValueError("epochs=1 配 clip_eps 是空转：new 与 logp_old 同参数算出 ⇒ ratio≡1 "
                          "⇒ clamp 恒等。请用 epochs>1，或 clip_eps=None（纯组内 REINFORCE）。")
+    if epochs > 1:
+        # ⚠️ F1（评审裁定）：**不能硬禁**（lr 足够小时多 epoch 合法），但必须把"静默烧算力"点破。
+        warnings.warn(
+            f"epochs={epochs} 配 clip_eps={clip_eps}：链级 logp 是**求和**，一次更新（默认 "
+            "lr=1e-3）就把每条链的 Δlogp 推过 log(1+clip_eps)，于是之后所有链的 ratio 出界、"
+            "∂obj/∂new ≡ 0——第 2..k 个 epoch **一个参数都不会变**，却照样付链前向 + 反向。"
+            "确要多 epoch：把 lr 调到足够小（如 1e-6 量级），或按链长放大 clip_eps"
+            "（n=100 时约 20）。诊断里的 clipped_frac/grad_norm 是该现象的直接读数。",
+            stacklevel=2)
     if policy.optim is None:
         policy.optim = torch.optim.Adam(policy.parameters(), lr=lr)
 

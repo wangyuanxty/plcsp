@@ -50,27 +50,22 @@ def test_chain_has_one_decision_per_op_and_per_task():
 
 @pytest.mark.unit
 def test_logp_is_sum_not_mean():
-    """⚠️ Review Focus：logp 必须取**求和**——现状 S 用平均、L 用求和，同一次比较里口径不一致。"""
+    """⚠️ Review Focus：logp 必须取**求和**（不是平均/归一化）。
+
+    判据 = **可加性分解**：整条链的 logp 恰等于"前半 + 后半"。任何"除以决策数"的实现都会
+    **硬红**——半链的平均 ≠ 整链平均（差 2 倍量级）。旧判据（"整链 |logp| > 半链 |logp|"）
+    对平均实现**碰巧也通过**，是假守卫（评审 F2，本计划第三次同类）。
+    """
     inst, lay, dm, cfg, ctx, pol = _setup()
     decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
     lp = chain_logp(decisions, pol)
-
-    # 求和口径：隐式验证——logp 的绝对值应随决策数线性增长，而不是被压在 O(1)
-    decisions_k = decisions[: max(4, len(decisions) // 2)]
-    lp_k = chain_logp(decisions_k, pol)
-    # ⚠️ 用 `.item()` 而非 `float(...)`：后者对 requires_grad 张量发 UserWarning
-    # （brief 里的 `float(...)` 写法会把测试输出弄脏）。
-    assert abs(lp.item()) > abs(lp_k.item()), "logp 未随决策数增长——疑似仍取平均"
-
-
-@pytest.mark.unit
-def test_ratio_is_one_for_unchanged_policy():
-    """同一策略、同一条链 → ratio 必须为 1（这是 PPO 裁剪的前提）。"""
-    inst, lay, dm, cfg, ctx, pol = _setup()
-    decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    a = chain_logp(decisions, pol)
-    b = chain_logp(decisions, pol)
-    assert torch.exp(b - a).item() == pytest.approx(1.0, abs=1e-5)
+    k = len(decisions) // 2
+    assert k >= 4, f"链路太短（{len(decisions)}）——分解判据失去意义"
+    lp_head = chain_logp(decisions[:k], pol)
+    lp_tail = chain_logp(decisions[k:], pol)
+    # ⚠️ 用 `.item()`：`float(requires_grad 张量)` 会发 UserWarning（弄脏测试输出）。
+    assert lp.item() == pytest.approx(lp_head.item() + lp_tail.item(), abs=1e-3), \
+        "chain_logp 不可加（整链 ≠ 前半 + 后半）——疑似取平均/归一化，而非求和"
 
 
 @pytest.mark.unit
@@ -140,14 +135,34 @@ def test_clipped_path_ratio_uses_sampling_time_logp():
     判据用 `lr=0`（不更新参数）把它变成**确定性**的：`new` 与 `old` 同参数 ⇒ `ratio ≡ 1`
     （若 `old` 来自别处/别的时刻，这里立刻 ≠1）。顺带说明：`epochs=1` 的裁剪正是同一个
     恒等式，故那条路是空转（由 `test_clip_epoch_combinations_are_guarded` 拒收）。
+
+    ⚠️ 原 `test_ratio_is_one_for_unchanged_policy`（同策略两遍 `chain_logp` 比大小）已删：
+    同策略 + 同决策 + 无 dropout ⇒ `b − a` **恒为 0**、`exp(0)` **恒为 1**，对任何实现缺陷
+    都不能变红（评审 F3 的恒真判据）。本测试的 `lr=0` 判据才是该性质的**真守卫**。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
-    r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
-                               w=_weights(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
+    # ⚠️ 本配置必然触发 F1 的"多 epoch 饱和"警告（那正是为什么这里要配 lr=0）——显式收下它，
+    # 免得测试输出带噪；警告本身由 `test_multi_epoch_clip_warns_about_saturation` 负责钉。
+    with pytest.warns(UserWarning, match="链级"):
+        r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
+                                   w=_weights(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
     assert -1e9 < r < 0.0, "裁剪路径的组均值奖励不有限"
     assert diag["ratio"] == pytest.approx(1.0, abs=1e-6), "old 与 new 不同源——省法算错了"
     assert diag["clipped_frac"] == 0.0, "参数没动却报出界——clipped_frac 口径错"
     assert diag["grad_norm"] > 0.0, "裁剪路径梯度范数为 0——诊断退化"
+
+
+@pytest.mark.unit
+def test_multi_epoch_clip_warns_about_saturation():
+    """⚠️ F1（评审裁定）：`epochs>1` 在链级尺度上是**静默烧算力**——链级 logp 是求和，一次更新
+    （默认 lr）就把每条链的 Δlogp 推过 `log(1+clip_eps)`，之后 `∂obj/∂new ≡ 0`，多出来的
+    epoch 一个参数都不会变。**不能硬禁**（lr 足够小则合法），故必须**警告**：消息要点明机理
+    与出路（调小 lr / 按链长放大 clip_eps）。这里用 `lr=1e-6` 演示"合法用法"仍会警告。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    with pytest.warns(UserWarning, match="链级"):
+        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
+                         w=_weights(inst, cfg), epochs=2, clip_eps=0.2, lr=1e-6)
 
 
 @pytest.mark.unit
