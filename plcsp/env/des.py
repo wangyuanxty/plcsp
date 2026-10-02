@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 """SimPy DES 核心（《方法设计文档》§4.2：SimPy 单一后端，无物理库）。
 
-v0 边界（诚实声明）：
-- **无区段管制**（2026-10-02 移除，见 progress-log §十五）：实测通道争用 ≤0.07%，物流瓶颈在车辆数
-  而非通道容量。AGV 一次行驶到底。
-- 每叶链独立扰动流：每 episode 一个 rng（seed_chain），对应理论骨架 A1。
-- 机器故障=泊松流：故障期间占用机台（中断-恢复），修复时长 repair_time。
-- 完成时刻以"末工序在机台加工完毕"为准（搬运回库不计入 makespan 口径——v0 简化，M1.1 对齐 BKS 口径）。
+**十一约束全部接入且可独立开关**（spec §3.3，P1b 2026-10-02）——开关一律走
+`ConstraintConfig`，关掉时**不消耗随机数**，故"关 = 该约束从未存在"。
+
+单位：**仿真时间 = 分钟，布局坐标 = 米**（bug#13 约定）；能耗 = kWh，走 `plcsp/energy.py`。
+
+边界（诚实声明）：
+- AGV 有**空载段**（2026-10-02 补齐；此前 AGV 从上一卸货点瞬移到取货点）。
+- 机器故障/AGV 故障=泊松流；⑨ 的故障**腿间检出**（不打断正在进行的行驶）。
+- ⑦ 模糊运输时间**已砍**（与 ① 拥堵重复表达不确定性）；⑥ 用三角模糊数，非正态。
+- 完成时刻以"末工序在机台加工完毕"为准（搬运回库不计入 makespan——对齐 BKS 口径）。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import numpy as np
 import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
@@ -87,6 +92,12 @@ class SimConfig:
     battery_low: float = 0.20     # ⑪ 低电阈值（占容量比）
     battery_high: float = 0.80    # ⑪ 充电目标（占容量比）
     charge_kw: float = 3.0        # ⑪ 充电功率 [kW]
+    # ⑧ 交期系数 d_j = τ·M_ref。**2026-10-02 由 0.85 重标为 0.90**：0.85 是在 P1b 之前
+    # 标定的，此后空载段/生产三约束/异构车队都改了 makespan，误期率漂到 26%/44%/65%。
+    # 重扫结果：τ=0.90 → 20%/28%/48%，**三个实例都非退化**。
+    # ⚠️ 没有任何单一 τ 能让三实例同时落进 20–40%——交期紧度本身就随实例变，这要如实报告。
+    tau: float = 0.90
+    fuzzy_spread: float = 0.2     # ⑥ 三角模糊宽度（±20%）
 
     @property
     def eff_speed(self) -> float:
@@ -99,6 +110,73 @@ class OpLite:
     __slots__ = ("time",)
     def __init__(self, t: float):
         self.time = t
+
+
+# ══ 信息侧约束的纯函数（⑥ 模糊加工 · ⑧ 交期），放在模块级以便单测直接调用 ══
+
+def sample_fuzzy_time(nominal: float, spread: float = 0.2, rng_seed: int = 0) -> float:
+    """⑥ 三角模糊数 `(a, b, c) = (nom·(1−s), nom, nom·(1+s))` 抽样。
+
+    **模糊 ≠ 随机**：隶属度函数归一后就是三角分布，故按标准逆变换抽样。
+    关键性质是**有界**（落在支撑集 [a, c] 内）——正态无界，会被审稿人抓。
+    """
+    if spread < 0.0:
+        raise ValueError(f"模糊宽度必须 ≥ 0，收到 {spread}")
+    a, b, c = nominal * (1.0 - spread), nominal, nominal * (1.0 + spread)
+    if c == a:                       # spread=0 或 nominal=0：退化为确定值
+        return float(b)
+    u = float(np.random.default_rng(rng_seed).random())
+    F = (b - a) / (c - a)
+    if u < F:
+        return a + math.sqrt(u * (b - a) * (c - a))
+    return c - math.sqrt((1.0 - u) * (c - b) * (c - a))
+
+
+def compute_due_dates(n_jobs: int, tau: float, m_ref: float) -> dict[int, float]:
+    """⑧ 交期 `d_j = τ · M_ref`（spec §3.5）——同一实例所有作业**同值**（共同交期形）。"""
+    return {j: tau * m_ref for j in range(n_jobs)}
+
+
+def weighted_tardiness(completes: dict[int, float], due: dict[int, float],
+                       weights: dict[int, float]) -> float:
+    """⑧ 加权总拖期 `TWT = Σ w_j · max(0, C_j − d_j)`（spec §4.1 的目标口径）。"""
+    return float(sum(weights.get(j, 1.0) * max(0.0, c - due[j])
+                     for j, c in completes.items() if j in due))
+
+
+_MREF_CACHE: dict = {}
+_MREF_BUSY = False
+
+
+def _instance_key(inst: Instance) -> tuple:
+    """实例内容指纹——用于缓存 `M_ref`（比 id() 稳，比文件名稳）。"""
+    return (inst.n_machines, inst.n_jobs,
+            tuple(tuple(min(t for _, t in op) for op in job) for job in inst.jobs))
+
+
+def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
+                       seed_layout: int = 0) -> float:
+    """⑧ 的 `M_ref` = **参考调度**（每工序取最短候选 + AGV 轮询派车）的 makespan。
+
+    ⚠️ **绝不能取被优化的那次 episode 的 makespan**——否则交期随策略一起漂移，
+    目标退化（旧 `due_factor` 就是这么坏的：实测 MK01 tardy 恒为 10/10）。
+    故单独跑一次并缓存；重入时 `_due` 会退化为"无交期"（见 `SimWorld._due`）。
+    """
+    key = _instance_key(inst) + (seed_layout,)
+    if key in _MREF_CACHE:
+        return _MREF_CACHE[key]
+    global _MREF_BUSY
+    if _MREF_BUSY:                   # 理论上被 `_due` 的短路挡住，此处兜底
+        raise RuntimeError("reference_makespan 重入")
+    _MREF_BUSY = True
+    try:
+        r = rollout(inst, seed_layout=seed_layout, seed_chain=0,
+                    cfg=cfg or SimConfig(), constraints=None)
+    finally:
+        _MREF_BUSY = False
+    val = float(r["makespan"])
+    _MREF_CACHE[key] = val
+    return val
 
 
 def _try_acquire(env, res, timeout):
@@ -504,7 +582,23 @@ class SimWorld:
         self.constraints = constraints      # 十一约束开关（spec §3.3）
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
-        return {j: self.cfg.due_factor * sum(t for _, t in ops) for j, ops in plans.items()}
+        """⑧ 交期 `d_j = τ·M_ref`。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
+
+        旧口径 `due_factor × Σ工时` **已废弃**（spec §3.5：完全没算排队/运输/争用，
+        实测 tardy 恒为 100%）。`cfg.due_factor` 仅作历史字段保留，活代码不再读。
+        """
+        if not self.constraints.due_dates or _MREF_BUSY:
+            return {}                    # 参考调度自身运行时不递归求 M_ref
+        m_ref = reference_makespan(self.inst, self.cfg, self.layout.layout_seed)
+        return compute_due_dates(len(plans), self.cfg.tau, m_ref)
+
+    def _tardy(self, plans, completes, due) -> tuple[int, float]:
+        """(误期作业数, 加权总拖期 TWT)。无交期时两者恒为 0。"""
+        if not due:
+            return 0, 0.0
+        cnt = sum(1 for j in plans if j in completes and completes[j] > due[j])
+        weights = {j: 1.0 for j in plans}      # 权重：暂取等权（assumed，见 spec §9）
+        return cnt, weighted_tardiness(completes, due, weights)
 
     def _energy_report(self, stats: dict, makespan: float) -> dict:
         """三态时长 → M2 能耗（spec §3.4，引证 GFJSPT-MMRS）。
@@ -570,7 +664,13 @@ class SimWorld:
         for j, job_ops in enumerate(inst.jobs):
             plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
                 int(np.argmin([t for _, t in alts])) for alts in job_ops]
-            plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
+            # ⑥ 模糊加工：标称时间 → 三角模糊数抽样。**每条 (job, op) 用派生种子**，
+            # 不碰仿真主随机流——故关掉 ⑥ 时逐位等于"该约束从未存在"。
+            fuzzy = self.constraints.fuzzy_processing
+            plans[j] = [(job_ops[oi][plan[oi]][0],
+                         (sample_fuzzy_time(job_ops[oi][plan[oi]][1], self.cfg.fuzzy_spread,
+                                            rng_seed=seed_chain * 1_000_003 + j * 1009 + oi)
+                          if fuzzy else job_ops[oi][plan[oi]][1]))
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -628,7 +728,9 @@ class SimWorld:
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
-                "fail_events": stats["fail_events"], "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
+                "fail_events": stats["fail_events"],
+                "tardy": self._tardy(plans, completes, due)[0],
+                "tardy_twt": self._tardy(plans, completes, due)[1],
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
@@ -673,7 +775,13 @@ class SimWorld:
         for j, job_ops in enumerate(inst.jobs):
             plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
                 int(np.argmin([t for _, t in alts])) for alts in job_ops]
-            plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
+            # ⑥ 模糊加工：标称时间 → 三角模糊数抽样。**每条 (job, op) 用派生种子**，
+            # 不碰仿真主随机流——故关掉 ⑥ 时逐位等于"该约束从未存在"。
+            fuzzy = self.constraints.fuzzy_processing
+            plans[j] = [(job_ops[oi][plan[oi]][0],
+                         (sample_fuzzy_time(job_ops[oi][plan[oi]][1], self.cfg.fuzzy_spread,
+                                            rng_seed=seed_chain * 1_000_003 + j * 1009 + oi)
+                          if fuzzy else job_ops[oi][plan[oi]][1]))
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -720,7 +828,8 @@ class SimWorld:
                 "rework_events": stats["rework_events"],
                 "pm_events": stats["pm_events"],
                 "fail_events": stats["fail_events"],
-                "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
+                "tardy": self._tardy(plans, completes, due)[0],
+                "tardy_twt": self._tardy(plans, completes, due)[1],
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),

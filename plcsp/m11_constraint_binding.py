@@ -47,7 +47,8 @@ BINDING_PCT = 2.0          # 判据（计划 Global Constraints）：|Δ%| < 2 �
 # **Task 4/5/6 每接一个都要把它加进来**，否则该约束会被误报成"未接线"。
 WIRED = ("congestion", "finite_buffer", "machine_failure",
          "rework", "setup_time", "maintenance",
-         "agv_failure", "heterogeneous_fleet", "charging")
+         "agv_failure", "heterogeneous_fleet", "charging",
+         "fuzzy_processing", "due_dates")
 
 CONSTRAINTS = ("congestion", "finite_buffer", "machine_failure", "rework", "setup_time",
                "fuzzy_processing", "due_dates", "agv_failure", "heterogeneous_fleet",
@@ -111,6 +112,10 @@ def _probe_charging(lay, cfg) -> None:
                               capacity=a.capacity, battery_kwh=0.3)
 
 
+def _probe_fuzzy_processing(lay, cfg) -> None:
+    cfg.fuzzy_spread = min(0.95, cfg.fuzzy_spread * 3.0)     # ±20% → ±60%
+
+
 PROBES: dict[str, tuple[str, Callable]] = {
     "machine_failure": ("fail_rate ×100", _probe_machine_failure),
     "finite_buffer": ("缓冲 cap 全=1", _probe_finite_buffer),
@@ -121,13 +126,14 @@ PROBES: dict[str, tuple[str, Callable]] = {
     "agv_failure": ("AGV MTBF ÷100", _probe_agv_failure),
     "heterogeneous_fleet": ("载量满/速度两极", _probe_heterogeneous_fleet),
     "charging": ("充电阈值 80%", _probe_charging),
+    "fuzzy_processing": ("模糊宽度 ×3", _probe_fuzzy_processing),
 }
 
 
 def run_variant(inst, cfg: SimConfig, constraints: ConstraintConfig, seeds: int,
                 *, mutate: Callable | None = None, seed_layout: int = 0) -> dict | None:
     """同布局同种子跑 seeds 次。**逐种子保留指标**（只留均值就算不出种子间 σ）。"""
-    ms, en, td = [], [], []
+    ms, en, td, tw = [], [], [], []
     for s in range(seeds):
         lay = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=cfg.aisle_width,
                             n_agv=cfg.n_agv, max_agv_capacity=cfg.max_agv_capacity)
@@ -138,15 +144,20 @@ def run_variant(inst, cfg: SimConfig, constraints: ConstraintConfig, seeds: int,
         r = SimWorld(inst, lay, dm, cfg, graph=g, constraints=constraints).run(seed_chain=s)
         if r["horizon_hit"] or r["jobs_done"] != inst.n_jobs:
             continue
-        ms.append(r["makespan"]); en.append(r["energy"]); td.append(r["tardy"])
+        ms.append(r["makespan"]); en.append(r["energy"])
+        td.append(r["tardy"]); tw.append(r["tardy_twt"])
     if not ms:
         return None
-    return {"makespan": ms, "energy": en, "tardy": td}
+    return {"makespan": ms, "energy": en, "tardy": td, "twt": tw}
 
 
-def _paired_delta(base: dict, var: dict) -> tuple[float, float]:
-    """配对差值（逐种子）→ (均值%, 种子间 σ%)。σ 是噪声地板的估计。"""
-    ds = [(v - b) / b * 100.0 for b, v in zip(base["makespan"], var["makespan"])]
+def _paired_delta(base: dict, var: dict, key: str = "makespan") -> tuple[float, float]:
+    """配对差值（逐种子）→ (均值%, 种子间 σ%)。σ 是噪声地板的估计。
+
+    `key` 可换 —— **⑧ 交期不影响仿真，只影响目标**，故判它要看 `twt`/`tardy` 而不是 makespan。
+    """
+    ds = [(v - b) / b * 100.0 if b else 0.0
+          for b, v in zip(base[key], var[key])]
     return st.mean(ds), (st.stdev(ds) if len(ds) > 1 else 0.0)
 
 
@@ -174,9 +185,12 @@ def main() -> None:
         base = run_variant(inst, SimConfig(), ConstraintConfig(), args.seeds)
         if base is None:
             print("  基线无有效样本\n"); continue
+        n_j = load_mk(name).n_jobs
         print(f"  基线  makespan={st.mean(base['makespan']):7.1f}  "
-              f"energy={st.mean(base['energy']):6.2f} kWh  tardy={st.mean(base['tardy']):4.2f}")
-        print(f"  {'约束':<14}{'关态 Δmks':>12}{'(σ)':>8}   {'极端档':<14}{'Δmks':>9}   判定")
+              f"energy={st.mean(base['energy']):6.2f} kWh  "
+              f"tardy={st.mean(base['tardy']):4.2f}/{n_j}"
+              f" ({100*st.mean(base['tardy'])/n_j:4.1f}%)  twt={st.mean(base['twt']):7.1f}")
+        print(f"  {'约束':<14}{'关态 Δ(判据)':>14}{'(σ)':>8}   {'极端档':<14}{'Δ(判据)':>10}   判定")
 
         for c in todo:
             off = ConstraintConfig().with_off(c)
@@ -184,7 +198,9 @@ def main() -> None:
             if go is None:
                 print(f"  {LABELS[c]:<14}{'（无有效样本）':>12}")
                 continue
-            d_off, sd_off = _paired_delta(base, go)
+            # ⑧ 的效应在目标上而非工期上——用 TWT 当判据，其余用 makespan
+            judge = "twt" if c == "due_dates" else "makespan"
+            d_off, sd_off = _paired_delta(base, go, judge)
 
             if c in PROBES:
                 label, probe = PROBES[c]
@@ -192,7 +208,7 @@ def main() -> None:
                 if ge is None:
                     ext_lab, d_ext, sd_ext = label, float("nan"), 0.0
                 else:
-                    ext_lab, d_ext, sd_ext = label, *_paired_delta(base, ge)
+                    ext_lab, d_ext, sd_ext = label, *_paired_delta(base, ge, judge)
             else:
                 ext_lab, d_ext, sd_ext = "探针缺失", float("nan"), 0.0
 
