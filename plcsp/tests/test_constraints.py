@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from plcsp.env.constraints import ABLATION_GROUPS, ConstraintConfig
@@ -22,7 +24,7 @@ def test_default_config_has_all_constraints_on():
 @pytest.mark.unit
 def test_config_is_frozen():
     cfg = ConstraintConfig()
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.rework = False          # frozen dataclass 应拒绝赋值
 
 

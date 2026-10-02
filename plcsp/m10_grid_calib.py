@@ -38,7 +38,8 @@ def main() -> None:
                 r = rollout(inst, seed_chain=s, cfg=cfg)
                 if r["horizon_hit"] or r["jobs_done"] != inst.n_jobs:
                     continue
-                ms.append(r["makespan"]); tv.append(r["travel_time_total"])
+                ms.append(r["makespan"])
+                tv.append(r["travel_time_total"])
             if not ms:
                 print(f"{name:6} {na:5}  （无有效样本）")
                 continue

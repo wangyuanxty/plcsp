@@ -20,7 +20,7 @@ import torch
 
 from ..env.instances import Instance
 from ..env.layout import Layout
-from .features import F_DYN, token_feature_dim
+from .features import token_feature_dim
 
 F_TOKEN = token_feature_dim()          # 2026-10-02: 10 → 6（几何 4 位已删）
 

@@ -137,11 +137,24 @@ def run_variant(inst, cfg: SimConfig, constraints: ConstraintConfig, seeds: int,
         r = SimWorld(inst, lay, dm, cfg, graph=g, constraints=constraints).run(seed_chain=s)
         if r["horizon_hit"] or r["jobs_done"] != inst.n_jobs:
             continue
-        ms.append(r["makespan"]); en.append(r["energy"])
-        td.append(r["tardy"]); tw.append(r["tardy_twt"])
+        ms.append(r["makespan"])
+        en.append(r["energy"])
+        td.append(r["tardy"])
+        tw.append(r["tardy_twt"])
     if not ms:
         return None
     return {"makespan": ms, "energy": en, "tardy": td, "twt": tw}
+
+
+def _is_significant(delta_pct: float, sd_pct: float, n_seed: int) -> bool:
+    """binding 判定须**同时**过两关：① 相对变化 >= 2%（计划判据）；② 配对 t 显著。
+
+    ② 用**配对差的标准误** sd/sqrt(n)（不是 sd 本身）——逐种子配对后共同随机性已消掉，
+    2*SE 在 n=10 时约为 0.63*sd（t≈2，p≈0.05）。若误用 2*sd，会把 +82.9% 这种
+    巨大效应也判成噪声（sd 在故障频发档下本来就大）。
+    """
+    se = sd_pct / math.sqrt(max(n_seed, 1))
+    return abs(delta_pct) >= BINDING_PCT and abs(delta_pct) >= 2.0 * se
 
 
 def _paired_delta(base: dict, var: dict, key: str = "makespan") -> tuple[float, float]:
@@ -177,13 +190,16 @@ def main() -> None:
         print(f"===== {name}（{inst.n_machines} 机位，{args.seeds} 种子）=====")
         base = run_variant(inst, SimConfig(), ConstraintConfig(), args.seeds)
         if base is None:
-            print("  基线无有效样本\n"); continue
+            print("  基线无有效样本\n")
+            continue
         n_j = load_mk(name).n_jobs
         print(f"  基线  makespan={st.mean(base['makespan']):7.1f}  "
               f"energy={st.mean(base['energy']):6.2f} kWh  "
               f"tardy={st.mean(base['tardy']):4.2f}/{n_j}"
               f" ({100*st.mean(base['tardy'])/n_j:4.1f}%)  twt={st.mean(base['twt']):7.1f}")
         print(f"  {'约束':<14}{'关态 Δ(判据)':>14}{'(σ)':>8}   {'极端档':<14}{'Δ(判据)':>10}   判定")
+
+        n_seed = len(base["makespan"])
 
         for c in todo:
             off = ConstraintConfig().with_off(c)
@@ -205,19 +221,9 @@ def main() -> None:
             else:
                 ext_lab, d_ext, sd_ext = "探针缺失", float("nan"), 0.0
 
-            # 判定须**同时**过两关：① 相对变化 ≥ 2%（计划判据）；② 配对 t 显著。
-            # ② 用**配对差的标准误** σ/√n（不是 σ 本身）——逐种子配对后共同随机性已消掉，
-            # n=5 时 2·SE ≈ 0.89σ，对应 t≈2（p≈0.05）。若误用 2σ 会把 +82.9% 这种
-            # 巨大效应也判成噪声（σ 在故障频发档下本来就大）。
-            n_seed = len(base["makespan"])
-
-            def _sig(delta: float, sd: float) -> bool:
-                se = sd / math.sqrt(max(n_seed, 1))
-                return abs(delta) >= BINDING_PCT and abs(delta) >= 2.0 * se
-
             has_ext = not math.isnan(d_ext)
-            sig_off = _sig(d_off, sd_off)
-            sig_ext = has_ext and _sig(d_ext, sd_ext)
+            sig_off = _is_significant(d_off, sd_off, n_seed)
+            sig_ext = has_ext and _is_significant(d_ext, sd_ext, n_seed)
             if d_off == 0.0 and (not has_ext or d_ext == 0.0):
                 # 两列都**逐位相同** = 该约束没改变任何结果。两种可能，本工具分不出来：
                 # (a) 开关未接线（Task 4–6 的待办）；(b) 已接线但本工况下从不触发。

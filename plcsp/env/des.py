@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 import numpy as np
 import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
@@ -32,7 +31,7 @@ SECONDS_PER_MIN = 60.0
 
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
             cfg: SimConfig | None = None, op_choices: list[list[int]] | None = None,
-            machine_gap: float = 1.0, aisle_width: float = 1.5,
+            aisle_width: float = 1.5,
             agv_phi: list[int] | None = None, constraints=None) -> dict:
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
@@ -74,12 +73,7 @@ class SimConfig:
     zone_hold: float = 1.0        # 缓冲满退避时长 [min]
     zone_granularity: str = "node"   # 区段粒度：node|row|col|all（越粗→区段越少→争用越强）
     zone_wait_limit: float = 8.0     # 区段申请等待上限 [min]（超时→退避重试）
-    zone_hold_limit: float = 8.0  # 区段申请等待上限（超时→释放重试）[min]
     repair_time: float = 5.0      # [min]
-    due_factor: float = 1.8       # ⚠️ 已废弃（见 §3.5，改用 τ·M_ref）——活代码不再读它
-    energy_power: float = 1.0     # ⚠️ **已废弃**（P1b Task 2，2026-10-02）：旧式"单位时间能耗代理"
-                                  #   算出的是时间不是能量。活代码不再读它；能耗走 `plcsp/energy.py`
-                                  #   的 M2 模型。字段保留仅供旧脚本构造 cfg 时不报错。
     aisle_width: float = 1.5      # 通道宽（米）：窄通道限速 = Phase A2 真权衡来源
     # ── 约束参数（**全部 assumed**，无文献出处；见 spec §9 的 assumed 表）──
     p_rework: float = 0.05        # ④ 返工率 [1/工序]
@@ -115,7 +109,7 @@ class OpLite:
 
 def compute_due_dates(n_jobs: int, tau: float, m_ref: float) -> dict[int, float]:
     """⑧ 交期 `d_j = τ · M_ref`（spec §3.5）——同一实例所有作业**同值**（共同交期形）。"""
-    return {j: tau * m_ref for j in range(n_jobs)}
+    return dict.fromkeys(range(n_jobs), tau * m_ref)
 
 
 def weighted_tardiness(completes: dict[int, float], due: dict[int, float],
@@ -158,15 +152,6 @@ def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
     val = float(r["makespan"])
     _MREF_CACHE[key] = val
     return val
-
-
-def _try_acquire(env, res, timeout):
-    req = res.request()
-    events = yield req | env.timeout(timeout)
-    if req in events:
-        return True, req
-    req.cancel()          # 关键：撤销孤儿请求，否则资源"授予"后容量永久泄漏（v0 第一大坑）
-    return False, req
 
 
 class MachineSim:
@@ -261,9 +246,9 @@ def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
     if granularity == "row":
         return {i: spec.node_rc(i)[0] for i in range(n)}, spec.n_rows + 1
     if granularity == "col":
-        return {i: spec.rc if False else spec.node_rc(i)[1] for i in range(n)}, spec.n_cols + 1
+        return {i: spec.node_rc(i)[1] for i in range(n)}, spec.n_cols + 1
     if granularity == "all":
-        return {i: 0 for i in range(n)}, 1
+        return dict.fromkeys(range(n), 0), 1
     raise ValueError(f"未知区段粒度：{granularity}")
 
 
@@ -279,7 +264,7 @@ class ZoneManager:
     def __init__(self, env: simpy.Environment, zone_of: dict[int, int], n_zones: int,
                  wait_limit: float):
         self.env, self.wait_limit, self.zone_of, self.n = env, wait_limit, zone_of, n_zones
-        self.holder: dict[int, int | None] = {z: None for z in range(n_zones)}
+        self.holder: dict[int, int | None] = dict.fromkeys(range(n_zones))
         self.pending: dict[int, int] = {}
         self._ev: dict[int, simpy.Event] = {}
         self.waits: list[float] = []      # 区段等待时长 [min]——拥堵的唯一度量
@@ -566,7 +551,7 @@ class SimWorld:
         """⑧ 交期 `d_j = τ·M_ref`。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
 
         旧口径 `due_factor × Σ工时` **已废弃**（spec §3.5：完全没算排队/运输/争用，
-        实测 tardy 恒为 100%）。`cfg.due_factor` 仅作历史字段保留，活代码不再读。
+        实测 tardy 恒为 100%）。旧字段 `due_factor` / `energy_power` 已随 P1b 清理删除。
         """
         if not self.constraints.due_dates or _MREF_BUSY:
             return {}                    # 参考调度自身运行时不递归求 M_ref
@@ -578,7 +563,7 @@ class SimWorld:
         if not due:
             return 0, 0.0
         cnt = sum(1 for j in plans if j in completes and completes[j] > due[j])
-        weights = {j: 1.0 for j in plans}      # 权重：暂取等权（assumed，见 spec §9）
+        weights = dict.fromkeys(plans, 1.0)      # 权重：暂取等权（assumed，见 spec §9）
         return cnt, weighted_tardiness(completes, due, weights)
 
     def _energy_report(self, stats: dict, makespan: float) -> dict:

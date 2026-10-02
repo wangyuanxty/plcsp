@@ -1,6 +1,7 @@
-"""策略网络——机台选择（S 层）+ AGV 派车（L 层）两个头。无 critic（组内相对优势见 group_rel.py）。
+"""策略网络——机台选择（S 层）+ AGV 派车（L 层）两个头。
 
-⚠️ 2026-10-02：**分批（B 层）头已删除**——分批环节整条砍除（`progress-log.md` §12.5）。
+**无 critic**：组内相对优势用组内基线（见 `group_rel.py`），不需要价值网络。
+2026-10-02：分批（B 层）头已删（分批环节砍除）；2026-10-03：critic 头 `v_head` 随 PPO 变体一并删除。
 """
 from __future__ import annotations
 
@@ -28,12 +29,6 @@ class PolicyNet(nn.Module):
                 nn.Linear(enc.d_model + feat_op, hidden), nn.GELU(), nn.Linear(hidden, 1))
         self.l_head = nn.Sequential(nn.Linear(n_feat_l, hidden), nn.GELU(),
                                     nn.Linear(hidden, n_agv))  # L 层：任务特征(+车状态)→AGV 候选
-        self.v_head = nn.Sequential(nn.Linear(n_feat_l, hidden), nn.GELU(),
-                                    nn.Linear(hidden, 1))      # critic：任务特征→终局价值基线
-
-    def v(self, feat_l: torch.Tensor) -> torch.Tensor:
-        """(1,1,F_l) → (1,) 终局价值（critic 基线；PPO/基线策略用）。"""
-        return self.v_head(feat_l).squeeze()
 
     def mach_logits(self, feat_op: torch.Tensor, feat_cand: torch.Tensor) -> torch.Tensor:
         """(B,1,F_op) × (B,Ncand,F_cand) → (B,1,Ncand) 候选分数。"""

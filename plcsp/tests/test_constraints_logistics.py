@@ -57,7 +57,8 @@ def test_multiload_delivers_more_items_per_trip():
             r = rollout(inst, seed_chain=s, cfg=SimConfig(max_agv_capacity=cap),
                         constraints=ConstraintConfig())
             assert not r["horizon_hit"] and r["jobs_done"] == inst.n_jobs
-            trips += r["trips"]; deliveries += r["deliveries"]
+            trips += r["trips"]
+            deliveries += r["deliveries"]
         tot[tag] = (trips, deliveries)
     assert tot["multi"][1] == tot["single"][1], "件数应不受载量影响"
     assert tot["multi"][0] <= tot["single"][0], "多载量下行程数反而变多"

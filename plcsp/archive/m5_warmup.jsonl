@@ -1,8 +1,0 @@
-{"method": "GRPO", "step": 10, "eval_mean": 373.49826989101507, "elapsed": 6.1}
-{"method": "GRPO", "step": 20, "eval_mean": 373.49826989101507, "elapsed": 10.5}
-{"method": "GRPO", "step": 30, "eval_mean": 373.49826989101507, "elapsed": 15.1}
-{"method": "GRPO", "step": 40, "eval_mean": 373.49826989101507, "elapsed": 19.5}
-{"method": "SA-GRPO", "step": 10, "eval_mean": 373.49826989101507, "elapsed": 32.5}
-{"method": "SA-GRPO", "step": 20, "eval_mean": 373.49826989101507, "elapsed": 45.5}
-{"method": "SA-GRPO", "step": 30, "eval_mean": 373.49826989101507, "elapsed": 58.5}
-{"method": "SA-GRPO", "step": 40, "eval_mean": 373.49826989101507, "elapsed": 71.2}

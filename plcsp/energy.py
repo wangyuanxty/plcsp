@@ -18,9 +18,9 @@ from __future__ import annotations
 # ── 引证常量（GFJSPT-MMRS, SWEVO 99:102181, 2025；spec §3.4 表）──
 # 机床三档（按原文献机位分组）：rpm 区间 + 切削/空载功率区间 [kW]
 MACHINE_TIERS: dict[str, dict[str, tuple[int, int] | tuple[float, float]]] = {
-    "M1_M4": dict(rpm=(1500, 4500), proc=(0.951, 1.17), idle=(0.74, 0.90)),
-    "M5_M6": dict(rpm=(2000, 6000), proc=(0.30, 0.60), idle=(0.24, 0.50)),
-    "M7_M10": dict(rpm=(1000, 4000), proc=(0.20, 0.56), idle=(0.16, 0.36)),
+    "M1_M4": {"rpm": (1500, 4500), "proc": (0.951, 1.17), "idle": (0.74, 0.90)},
+    "M5_M6": {"rpm": (2000, 6000), "proc": (0.30, 0.60), "idle": (0.24, 0.50)},
+    "M7_M10": {"rpm": (1000, 4000), "proc": (0.20, 0.56), "idle": (0.16, 0.36)},
 }
 # 档位边界：原文献 10 台机床分组为 M1–M4 / M5–M6 / M7–M10（0-based 机位，逐字照抄）
 _PAPER_TIERS = ("M1_M4", "M1_M4", "M1_M4", "M1_M4",

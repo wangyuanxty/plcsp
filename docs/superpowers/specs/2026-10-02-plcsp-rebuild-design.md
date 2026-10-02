@@ -559,6 +559,9 @@ plcsp/                          ← 由 geosched 改名
 
 **✅ 已确认砍不得（曾误列入删除名单）**：`env/layout.py`、`env/corridors.py`——二者是仿真器核心，`des.rollout()` 经它们建距离矩阵；`rollout → rollout_evaluate → train_step` 与 `m9_due_calib` 全在链上。
 | `m5_*` ~ `m8_*` 脚本 + jsonl | → `archive/`（负例证据）|
+
+> 🔻 **2026-10-03 更新**：`plcsp/archive/` **已整体删除**（用户指令）。上表描述的是 P0 当时的动作；
+> 被删文件全部在 git 历史中（`1671fda` 及之前）。负例结论不依赖原始 jsonl（已转录进 `progress-log.md` §十三）。
 | `viz_layout.py` | 🟡 暂留（论文需布局示意图）|
 | `env/layout.py` / `env/corridors.py` | ✅ **不动**（曾误列入删除名单）|
 

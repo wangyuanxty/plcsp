@@ -4,7 +4,6 @@ references/
 checkpoints/
 
 # ── 生成物 ──
-geosched/figs/
 plcsp/figs/
 __pycache__/
 *.pyc

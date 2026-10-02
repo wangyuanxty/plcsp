@@ -40,7 +40,7 @@ class ConstraintConfig:
         for n in names:
             if not hasattr(self, n):
                 raise ValueError(f"未知约束开关：{n}")
-        return replace(self, **{n: False for n in names})
+        return replace(self, **dict.fromkeys(names, False))
 
 
 _FULL = ConstraintConfig()

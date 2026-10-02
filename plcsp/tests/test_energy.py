@@ -29,7 +29,7 @@ def test_agv_energy_is_kwh_not_kw_times_min():
 @pytest.mark.unit
 def test_machine_energy_uses_three_states():
     """机床三态各自贡献：待机/加工/换型 功率不同，缺一不可。"""
-    p = dict(idle_kw=0.74, proc_kw=0.951, setup_kw=0.74)     # GFJSPT-MMRS M1–M4 低速档
+    p = {"idle_kw": 0.74, "proc_kw": 0.951, "setup_kw": 0.74}     # GFJSPT-MMRS M1–M4 低速档
     only_idle = machine_energy_kwh(0.0, 60.0, 0.0, **p)
     only_proc = machine_energy_kwh(60.0, 0.0, 0.0, **p)
     only_setup = machine_energy_kwh(0.0, 0.0, 60.0, **p)
