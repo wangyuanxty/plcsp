@@ -25,10 +25,11 @@ SECONDS_PER_MIN = 60.0
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
             cfg: SimConfig | None = None, op_choices: list[list[int]] | None = None,
             machine_gap: float = 1.0, aisle_width: float = 1.5,
-            agv_phi: list[int] | None = None) -> dict:
+            agv_phi: list[int] | None = None, constraints=None) -> dict:
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
-    `layout_type` **保留但忽略**（旧调用方仍传）——计划 3 统一清理。
+    `layout_type` **保留但忽略**（旧调用方仍传）。
+    `constraints` = `ConstraintConfig`（十一约束开关，spec §3.3）；None → 全开。
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
@@ -38,7 +39,7 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     # ⚠️ aisle_width 必须同时进 SimConfig——eff_speed 读的是 cfg.aisle_width（窄道降速）。
     # 否则 `rollout(aisle_width=1.0)` 只改几何、不改速度，窄道敏感性实验**静默失效**。
     eff_cfg = cfg if cfg is not None else SimConfig(aisle_width=aisle_width)
-    return SimWorld(inst, layout, dm, eff_cfg, graph=g).run(
+    return SimWorld(inst, layout, dm, eff_cfg, graph=g, constraints=constraints).run(
         seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
 
 
@@ -92,12 +93,17 @@ class MachineSim:
     """机台：输入缓冲 → 加工（故障中断-恢复）→ 输出缓冲（满则阻塞）。缓冲满=阻塞源。"""
 
     def __init__(self, env, pad: MachinePad, rng, cfg: SimConfig, stats: dict, completes: dict,
-                 events_q: simpy.Store):
+                 events_q: simpy.Store, finite_buffer: bool = True, machine_failure: bool = True):
         self.env, self.pad, self.rng, self.cfg, self.stats = env, pad, rng, cfg, stats
         self.completes = completes
         self.events_q = events_q
-        self.in_q = simpy.Store(env, capacity=pad.in_cap)
-        self.out_q = simpy.Store(env, capacity=pad.out_cap)
+        self.finite_buffer = finite_buffer      # ② 关 → 无界缓冲
+        self.machine_failure = machine_failure  # ③ 关 → 不抛故障
+        # SimPy 的 Store 不接受 capacity=None；无界用 inf（且下游的"缓冲满"检查须能识别 inf）
+        cap_in = pad.in_cap if finite_buffer else float("inf")
+        cap_out = pad.out_cap if finite_buffer else float("inf")
+        self.in_q = simpy.Store(env, capacity=cap_in)
+        self.out_q = simpy.Store(env, capacity=cap_out)
         self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障期间占用）
 
     def run(self):
@@ -108,14 +114,17 @@ class MachineSim:
                 yield req
                 t = self.env.now
                 finish = t + op.time
-                while t < finish:
-                    nxt_fail = t + self.rng.exponential(1.0 / max(self.pad.fail_rate, 1e-9))
-                    seg = min(nxt_fail, finish) - t
-                    yield self.env.timeout(seg)
-                    if nxt_fail < finish:
-                        self.stats["fail_events"] += 1
-                        yield self.env.timeout(self.cfg.repair_time)   # 中断-恢复
-                    t += seg
+                if not self.machine_failure:
+                    yield self.env.timeout(op.time)        # ③ 关：无故障，一次跑完
+                else:
+                    while t < finish:
+                        nxt_fail = t + self.rng.exponential(1.0 / max(self.pad.fail_rate, 1e-9))
+                        seg = min(nxt_fail, finish) - t
+                        yield self.env.timeout(seg)
+                        if nxt_fail < finish:
+                            self.stats["fail_events"] += 1
+                            yield self.env.timeout(self.cfg.repair_time)   # 中断-恢复
+                        t += seg
                 self.stats["process_time"] += op.time
             self.stats["ops_done"] = self.stats.get("ops_done", 0) + 1
             if is_last:
@@ -224,10 +233,12 @@ class AgvSim:
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
-                 tasks_in, machines: list, graph, zm, bound: bool = False):
+                 tasks_in, machines: list, graph, zm, bound: bool = False,
+                 congestion: bool = True):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
         self.g, self.zm = graph, zm
+        self.congestion = congestion        # ① 关 → 无区段管制
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
 
     def run(self):
@@ -235,6 +246,21 @@ class AgvSim:
         while True:
             frm, to, item, path = yield q.get()
             self.stats["tasks_get"] = self.stats.get("tasks_get", 0) + 1
+            if not self.congestion:                 # ① 关：不申请区段，按距离直行
+                a = self.machines[frm].pad.dock_node
+                b = self.machines[to].pad.dock_node
+                seg = (float(self.m_dm[a, b])
+                       / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
+                yield self.env.timeout(seg)
+                self.stats["travel_time"] += seg
+                self.stats["moves"] += 1
+                self.stats["agv_del"][self.aid] += 1
+                self.stats["agv_pos"][self.aid] = to
+                while len(self.machines[to].in_q.items) >= self.machines[to].in_q.capacity:
+                    yield self.env.timeout(self.cfg.zone_hold)
+                yield self.machines[to].in_q.put(item)
+                self.stats["deliveries"] += 1
+                continue
             # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
             zseq = [self.zm.zone_of[p] for p in path]
             zseq = [z for i, z in enumerate(zseq) if i == 0 or z != zseq[i - 1]]   # 合并同一区段的连续段
@@ -281,10 +307,14 @@ class SimWorld:
     """一次 episode：1 布局 + 1 实例 + 1 条独立扰动流 → 指标 dict。"""
 
     def __init__(self, inst: Instance, layout: Layout, m_dm: np.ndarray,
-                 cfg: SimConfig | None = None, graph=None):
+                 cfg: SimConfig | None = None, graph=None, constraints=None):
         self.inst, self.layout, self.m_dm = inst, layout, m_dm
         self.cfg = cfg or SimConfig()
         self.g = graph      # 格点走廊图（AGV 逐段路径的来源）
+        if constraints is None:
+            from .constraints import ConstraintConfig
+            constraints = ConstraintConfig()
+        self.constraints = constraints      # 十一约束开关（spec §3.3）
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         return {j: self.cfg.due_factor * sum(t for _, t in ops) for j, ops in plans.items()}
@@ -316,7 +346,9 @@ class SimWorld:
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
-        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q)
+        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q,
+                           finite_buffer=self.constraints.finite_buffer,
+                           machine_failure=self.constraints.machine_failure)
                     for i in range(inst.n_machines)]
         bound = agv_phi is not None
         if bound:
@@ -327,7 +359,8 @@ class SimWorld:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in,
-                               machines, self.g, zm, bound=bound).run())
+                               machines, self.g, zm,
+                               congestion=self.constraints.congestion, bound=bound).run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
         inject_q: list = []
@@ -391,14 +424,17 @@ class SimWorld:
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
-        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q)
+        machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q,
+                           finite_buffer=self.constraints.finite_buffer,
+                           machine_failure=self.constraints.machine_failure)
                     for i in range(inst.n_machines)]
         tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
         for m in machines:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                               self.g, zm, bound=True).run())
+                               self.g, zm,
+                               congestion=self.constraints.congestion, bound=True).run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
         for j in jkeys:
