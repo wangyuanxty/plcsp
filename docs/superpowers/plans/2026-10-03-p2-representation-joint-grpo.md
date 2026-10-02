@@ -299,14 +299,16 @@ git commit -m "feat: 仿真状态快照（P2 Task 1）——特征层的唯一�
   - `FEATURE_NAMES: dict[str, tuple[str, ...]]`（每段字段名，供论文附录与错位排查）
   - `NormContext`（frozen dataclass）：`total_work_min` / `m_ref` / `n_m` / `n_jobs` / `n_agv` / `bbox_diag` / `max_fail_rate` / `pm_interval` / `max_weight` / `max_queued`
   - `norm_context(inst, layout, m_ref) -> NormContext`
-  - `build_tok(snap, inst, layout, ctx) -> tuple[np.ndarray, tuple[int, int, int, int]]`（返回 `(N, F)` 与 `seg=(n_m, n_jobs, n_agv, 1)`；**F 各段不同，故返回的是 list 而非单张量**）
+  - `F_MAX = 10`（= max(7,8,10,3)）、`SEG_SLICE: dict[str, slice]`（各段在补齐张量里占的列）
+  - `build_tok(snap, inst, layout, ctx) -> tuple[np.ndarray, tuple[int,int,int,int]]`（**单张 `(N, F_MAX)`** + `seg`）
   - `machine_features(snap, ctx) -> np.ndarray` `(n_m, F_M)`
   - `job_features(snap, ctx) -> np.ndarray` `(n_jobs, F_B)`
   - `vehicle_features(snap, ctx) -> np.ndarray` `(n_agv, F_V)`
   - `global_features(snap, ctx) -> np.ndarray` `(1, F_G)`
 
-> ⚠️ **三段宽度不同**，故 `build_tok` 返回的是**按段分组的列表**，不是单张 `(N,F)` 张量。
-> 分段投影在 Task 3 里对每段各自 `Linear(F_seg → d)`。
+> ⚠️ **输入是单张张量**（spec §5.3.1）：四段各自的 per-token 特征**补齐到 `F_MAX` 后按序列拼接**。
+> 列语义在四段间**重叠**（第 3 列在 M 段是"在加工"、在 B 段是"已完成"），靠**类型嵌入**解耦——
+> 故 Task 3 的类型嵌入是**必需**的，去掉即失效。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -323,7 +325,7 @@ from plcsp.env.des import SimConfig, SimWorld
 from plcsp.env.instances import load_mk
 from plcsp.env.layout import sample_layout
 from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
-from plcsp.nn.features import F_B, F_G, F_M, F_V, FEATURE_NAMES, norm_context
+from plcsp.nn.features import F_B, F_G, F_M, F_MAX, F_V, FEATURE_NAMES, norm_context
 from plcsp.nn.state_emb import build_tok
 
 
@@ -347,22 +349,26 @@ def test_field_counts_match_declared_widths():
 
 
 @pytest.mark.unit
-def test_build_tok_shapes_and_seg():
+def test_build_tok_is_one_padded_tensor():
+    """输入是**单张** `(N, F_MAX)`——四段按行拼接、列不足处补零（spec §5.3.1）。"""
     inst, lay, w, ctx = _ctx_and_snap()
-    segs, seg = build_tok(w.snapshot(), inst, lay, ctx)
+    tok, seg = build_tok(w.snapshot(), inst, lay, ctx)
+    n_m, n_b, n_v, n_g = seg
     assert seg == (inst.n_machines, inst.n_jobs, SimConfig().n_agv, 1)
-    for i, (rows, width) in enumerate(zip(segs, (F_M, F_B, F_V, F_G))):
-        assert rows.shape == (seg[i], width), f"第 {i} 段形状不符：{rows.shape} vs seg={seg}" 
+    assert tok.shape == (n_m + n_b + n_v + n_g, F_MAX)
+    # 补零列必须**恒为 0**（M 段 7:、B 段 8:、G 段 3:）
+    assert np.all(tok[:n_m, F_M:] == 0.0)
+    assert np.all(tok[n_m:n_m + n_b, F_B:] == 0.0)
+    assert np.all(tok[-n_g:, F_G:] == 0.0) 
 
 
 @pytest.mark.unit
 def test_features_are_finite_and_bounded():
     """归一化后不得出现 NaN/inf，且不应有远超 [0,1] 量级的失控维。"""
     inst, lay, w, ctx = _ctx_and_snap(done=True)
-    segs, _ = build_tok(w.snapshot(), inst, lay, ctx)
-    for rows in segs:
-        assert np.isfinite(rows).all(), "出现 NaN/inf"
-        assert np.abs(rows).max() < 20.0, f"有维失控：max|·|={np.abs(rows).max():.1f}"
+    tok, _ = build_tok(w.snapshot(), inst, lay, ctx)
+    assert np.isfinite(tok).all(), "出现 NaN/inf"
+    assert np.abs(tok).max() < 20.0, f"有维失控：max|·|={np.abs(tok).max():.1f}"
 
 
 @pytest.mark.unit
@@ -380,9 +386,10 @@ def test_backlog_feature_is_normalized_by_total_work():
 def test_seg_lengths_come_from_actual_rows_not_hardcoded():
     """⚠️ Review Focus #2：seg 由各段**实际行数**推出，不得硬编码实例规模。"""
     inst, lay, w, ctx = _ctx_and_snap("mk10")
-    segs, seg = build_tok(w.snapshot(), inst, lay, ctx)
-    assert seg[0] == len(segs[0]) == inst.n_machines == 15
-    assert seg[1] == len(segs[1]) == inst.n_jobs == 20
+    tok, seg = build_tok(w.snapshot(), inst, lay, ctx)
+    assert seg[0] == inst.n_machines == 15
+    assert seg[1] == inst.n_jobs == 20
+    assert tok.shape[0] == sum(seg)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -398,7 +405,7 @@ Expected: FAIL — `ImportError: cannot import name 'F_M'`
 
 ⚠️ 2026-10-03 重写：此前本模块只有 `F_DYN=6` 一个桩常量，**没有任何字段定义**，
 且三类 token 被迫同宽（单一 `Linear` 所致）。现按 spec §5.3.1 定死三套字段 + Global，
-宽度各异，由 `encoder.py` 的**分段投影**承接。
+四段**补齐到同一宽度** `F_MAX=10` 后按序列拼接成单张张量，由 `encoder.py` 的**单个 Linear** 升维。
 
 **归一化一律用实例静态量**（总工时 / `M_ref` / 机器数 / 包围盒对角线）——
 仿真前即知，训练与推理一致。**不用 per-episode 归一化**：在线决策下不可得。
@@ -408,6 +415,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 F_M, F_B, F_V, F_G = 7, 8, 10, 3
+F_MAX = max(F_M, F_B, F_V, F_G)          # 10 —— 补齐后的统一宽度
+
+# 各段在补齐张量 (N, F_MAX) 里占的列；超出部分恒为 0
+SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
+                               "V": slice(0, F_V), "G": slice(0, F_G)}
 
 # ⚠️ 字段名清单与宽度**必须逐段相等**——有测试守着（test_field_counts_match_declared_widths）。
 # 它同时是论文附录的特征表与排错时的对照表。
@@ -445,8 +457,7 @@ class NormContext:
 """快照 + 实例 + 布局 → 编码器输入（spec §5.3.1）。
 
 三段宽度不同（F_M=7 / F_B=8 / F_V=10 / F_G=3），故产出**按段分组的数组列表** +
-`seg`，由 `encoder.py` 的分段投影各自升维。**不再拼成单张 (N,F) 张量**——
-那正是旧版被迫"三类同宽"的根源。
+`seg`。四段特征**补齐到 `F_MAX` 后按序列拼成单张 `(N, F_MAX)`**（spec §5.3.1）。
 """
 from __future__ import annotations
 
@@ -541,15 +552,23 @@ def global_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def build_tok(snap: Snapshot, inst: Instance, layout: Layout,
-              ctx: NormContext) -> tuple[list[np.ndarray], tuple[int, int, int, int]]:
-    """快照 → 四段特征数组 + `seg`。
+              ctx: NormContext) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """快照 → **单张** `(N, F_MAX)` 特征张量 + `seg`（spec §5.3.1）。
+
+    四段各自算完后按 `SEG_SLICE` 填进对应行，**列不足处保持 0**（补零）。
+    故 `tok[:n_m, 7:]`、`tok[n_m:n_m+n_jobs, 8:]`、`tok[-1, 3:]` 恒为 0。
 
     ⚠️ `seg` 由**各段实际行数**推出，**不硬编码实例规模**（Review Focus #2）。
     """
-    segs = [machine_features(snap, ctx), job_features(snap, ctx),
-            vehicle_features(snap, ctx), global_features(snap, ctx)]
-    seg = (segs[0].shape[0], segs[1].shape[0], segs[2].shape[0], segs[3].shape[0])
-    return segs, seg
+    parts = (("M", machine_features(snap, ctx)), ("B", job_features(snap, ctx)),
+             ("V", vehicle_features(snap, ctx)), ("G", global_features(snap, ctx)))
+    seg = tuple(p.shape[0] for _k, p in parts)                    # (n_m, n_jobs, n_agv, 1)
+    tok = np.zeros((sum(seg), F_MAX), dtype=np.float32)
+    r = 0
+    for key, p in parts:
+        tok[r:r + p.shape[0], SEG_SLICE[key]] = p                 # 补零列保持 0
+        r += p.shape[0]
+    return tok, seg
 ```
 
 - [ ] **Step 5: 跑测试确认通过**
@@ -571,45 +590,59 @@ git commit -m "feat: token 特征重设计（P2 Task 2）——三套字段 + �
 
 ---
 
-### Task 3: 编码器分段投影 + 类型嵌入
+### Task 3: 编码器统一宽度 + 类型嵌入
 
 **Files:**
 - Modify: `plcsp/nn/encoder.py`
 - Test: `plcsp/tests/test_encoder_segments.py`
 
 **Interfaces:**
-- Consumes: Task 2 的 `F_M/F_B/F_V/F_G`
+- Consumes: Task 2 的 `F_MAX`
 - Produces:
-  - `LayoutEncoder(d_model=128, n_heads=4, n_layers=8, dims=(F_M,F_B,F_V,F_G))`
-  - `LayoutEncoder.forward(segs: list[Tensor], seg: tuple[int,int,int,int]) -> (tok (1,N,d), ctx (1,d))`
-  - `LayoutEncoder.N_SEG_TYPES = 4`（类型嵌入的类数）
+  - `LayoutEncoder(d_model=128, n_heads=4, n_layers=8, feat_dim=F_MAX)`
+  - `LayoutEncoder.forward(tok_feat: Tensor (1,N,F_MAX), seg: tuple[int,int,int,int]) -> (tok (1,N,d), ctx (1,d))`
+  - `LayoutEncoder.N_SEG_TYPES = 4`；`LayoutEncoder.type_emb: Parameter (4, d_model)` — **必需，不可省**
 
 - [ ] **Step 1: 写失败测试**
 
 创建 `plcsp/tests/test_encoder_segments.py`：
 
 ```python
-"""分段投影 + 类型嵌入的测试（P2 Task 3）。"""
+"""统一宽度投影 + 类型嵌入的测试（P2 Task 3）。"""
 from __future__ import annotations
 
 import torch
 import pytest
 
 from plcsp.nn.encoder import LayoutEncoder
-from plcsp.nn.features import F_B, F_G, F_M, F_V
+from plcsp.nn.features import F_B, F_G, F_M, F_MAX
 
 
-def _segs(n_m=6, n_b=10, n_v=3, fill=1.0):
-    return [torch.full((1, n, w), fill)
-            for n, w in ((n_m, F_M), (n_b, F_B), (n_v, F_V), (1, F_G))]
+def _tok(n_m=6, n_b=10, n_v=3, fill=1.0):
+    """按补齐规则造一张 (1, N, F_MAX)：各段只填自己的有效列，其余为 0。"""
+    from plcsp.nn.features import F_MAX, SEG_SLICE
+    t = torch.zeros(1, n_m + n_b + n_v + 1, F_MAX)
+    for start, n, key in ((0, n_m, "M"), (n_m, n_b, "B"), (n_m + n_b, n_v, "V"),
+                          (n_m + n_b + n_v, 1, "G")):
+        t[0, start:start + n, SEG_SLICE[key]] = fill
+    return t, (n_m, n_b, n_v, 1)
 
 
 @pytest.mark.unit
 def test_forward_shapes():
     enc = LayoutEncoder()
-    tok, ctx = enc(*_segs())
+    tok, ctx = enc(*_tok())
     assert tok.shape == (1, 6 + 10 + 3 + 1, enc.d_model)
     assert ctx.shape == (1, enc.d_model)
+
+
+@pytest.mark.unit
+def test_single_linear_projection_not_per_segment():
+    """输入是**单张**张量、**单个** Linear（spec §5.3.1 的统一宽度方案）。"""
+    enc = LayoutEncoder()
+    assert hasattr(enc, "embed") and isinstance(enc.embed, torch.nn.Linear)
+    assert enc.embed.in_features == F_MAX
+    assert not hasattr(enc, "proj"), "仍存在分段投影——与统一宽度方案不符"
 
 
 @pytest.mark.unit
@@ -619,21 +652,28 @@ def test_type_embedding_distinguishes_segments():
     旧版正是这样坏的：单一 Linear + 无类型嵌入，`mask='full'` 下 seg 完全不被使用。
     """
     enc = LayoutEncoder().eval()
-    tok, _ = enc(*_segs(fill=0.0))
+    tok, _ = enc(*_tok(fill=0.0))
     # 机台段首 token 与车辆段首 token 的嵌入必须不同
     assert not torch.allclose(tok[0, 0], tok[0, 16], atol=1e-6)
     assert not torch.allclose(tok[0, 0], tok[0, 19], atol=1e-6)
 
 
 @pytest.mark.unit
-def test_per_segment_projection_has_independent_weights():
-    """分段投影 = 每段一套权重（不是共享一套）。"""
-    enc = LayoutEncoder()
-    ws = [p for p in enc.proj.parameters()]
-    assert len(enc.proj) == 4, "应有 4 段投影（M/B/V/G）"
-    assert len(ws) == 8, "每段 Linear 有 weight+bias"
-    assert enc.proj[0].weight.shape == (enc.d_model, F_M)
-    assert enc.proj[2].weight.shape == (enc.d_model, F_V)
+def test_padded_columns_do_not_affect_embedding():
+    """补零列不得影响嵌入——把它们改成任意值，输出必须**逐位不变**。
+
+    这是"统一宽度 + 单 Linear"方案的正确性前提：补零列乘的是权重列，
+    若某处列偏移写错、把有效列当成了补零列，嵌入就会变。本测试把该风险钉死。
+    """
+    enc = LayoutEncoder().eval()
+    a, seg = _tok(fill=1.0)
+    b = a.clone()
+    n_m, n_b, _, _ = seg
+    b[0, :n_m, F_M:] = 99.0                      # M 段补零列
+    b[0, n_m:n_m + n_b, F_B:] = 99.0             # B 段补零列
+    b[0, -1, F_G:] = 99.0                        # G 段补零列
+    with torch.no_grad():
+        assert torch.allclose(enc(a, seg)[0], enc(b, seg)[0], atol=1e-6)
 
 
 @pytest.mark.unit
@@ -664,23 +704,29 @@ class LayoutEncoder(nn.Module):
     N_SEG_TYPES = 4
 
     def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = 8,
-                 dims: tuple[int, int, int, int] = (F_M, F_B, F_V, F_G)):
+                 feat_dim: int = F_MAX):
         super().__init__()
-        self.d_model, self.n_heads, self.n_layers, self.dims = d_model, n_heads, n_layers, dims
-        self.proj = nn.ModuleList([nn.Linear(w, d_model) for w in dims])
+        self.d_model, self.n_heads, self.n_layers = d_model, n_heads, n_layers
+        self.feat_dim = feat_dim
+        self.embed = nn.Linear(feat_dim, d_model)          # **单个** Linear（统一宽度）
         self.type_emb = nn.Parameter(torch.zeros(self.N_SEG_TYPES, d_model))
         self.layers = nn.ModuleList([AttnLayer(d_model, n_heads) for _ in range(n_layers)])
         self.ln = nn.LayerNorm(d_model)
 
-    def forward(self, segs, seg):
-        """segs: 四段 (1, n_i, F_i)；seg=(n_m,n_b,n_v,n_g)。
+    def forward(self, tok_feat, seg):
+        """tok_feat: **单张** (1, N, F_MAX)；seg=(n_m,n_b,n_v,n_g)。
 
-        返回 (tok (1,N,d), ctx (1,d))。seg 只用于**核对**各段行数与 `segs` 一致——
-        类型信息由 `type_emb` 承载，不再靠掩码。
+        返回 (tok (1,N,d), ctx (1,d))。
+        `seg` 用来**生成每个 token 的类型 id**（决定加哪个 `type_emb`），并核对总长。
+        ⚠️ 类型嵌入在统一宽度方案下是**必需**的：四段的列语义重叠（第 3 列在 M 段是
+        "在加工"、在 B 段是"已完成"），只有 type_emb 能把它们解耦开。
         """
-        assert tuple(s.shape[1] for s in segs) == tuple(seg), "seg 与各段实际行数不符"
-        parts = [self.proj[i](segs[i]) + self.type_emb[i] for i in range(self.N_SEG_TYPES)]
-        x = torch.cat(parts, dim=1)
+        n_m, n_b, n_v, n_g = seg
+        N = n_m + n_b + n_v + n_g
+        assert tok_feat.shape[1] == N, f"tok_feat 行数 {tok_feat.shape[1]} != sum(seg)={N}"
+        tid = torch.cat([torch.full((n,), i, dtype=torch.long)
+                         for i, n in enumerate(seg)])          # 每个 token 的类型 id
+        x = (self.embed(tok_feat[0]) + self.type_emb[tid]).unsqueeze(0)
         for layer in self.layers:
             x = layer(x)
         x = self.ln(x)
@@ -703,7 +749,7 @@ Expected: 全绿（116 项）
 
 ```bash
 git add plcsp/nn/encoder.py plcsp/tests/test_encoder_segments.py
-git commit -m "refactor: 编码器分段投影 + 类型嵌入（P2 Task 3）——三类 token 不再被迫同宽"
+git commit -m "refactor: 编码器统一宽度 + 类型嵌入（P2 Task 3）——单个 Linear + 必需的类型嵌入"
 ```
 
 ---
@@ -734,20 +780,19 @@ import pytest
 
 from plcsp.algo.policy import PolicyNet, v_token_index
 from plcsp.nn.encoder import LayoutEncoder
-from plcsp.nn.features import F_B, F_G, F_M, F_V
+from plcsp.nn.features import F_MAX
 
 
 def _enc_inputs(n_m=6, n_b=10, n_v=3):
-    segs = [torch.randn(1, n, w) for n, w in ((n_m, F_M), (n_b, F_B), (n_v, F_V), (1, F_G))]
-    return segs, (n_m, n_b, n_v, 1)
+    return torch.randn(1, n_m + n_b + n_v + 1, F_MAX), (n_m, n_b, n_v, 1)
 
 
 @pytest.mark.unit
 def test_both_heads_read_the_same_encoder():
     """⚠️ Review Focus #5：L 头必须走编码器——这是'联合链'的前提。"""
     pol = PolicyNet(enc=LayoutEncoder(), n_agv=3)
-    segs, seg = _enc_inputs()
-    tok, _ = pol.forward_enc(segs, seg)
+    tok_feat, seg = _enc_inputs()
+    tok, _ = pol.forward_enc(tok_feat, seg)
     idx = v_token_index(seg)
     logits = pol.agv_logits_emb(tok, torch.zeros(1, 1, 3), torch.tensor(idx))
     assert logits.shape == (1, 1, 3)
@@ -757,13 +802,13 @@ def test_both_heads_read_the_same_encoder():
 def test_l_head_gradient_reaches_encoder():
     """⚠️ Review Focus #5：从 L 头反传，编码器参数必须有非零梯度（否则'联合'是假的）。"""
     pol = PolicyNet(enc=LayoutEncoder(), n_agv=3)
-    segs, seg = _enc_inputs()
-    tok, _ = pol.forward_enc(segs, seg)
+    tok_feat, seg = _enc_inputs()
+    tok, _ = pol.forward_enc(tok_feat, seg)
     out = pol.agv_logits_emb(tok, torch.zeros(1, 1, 3),
                              torch.tensor(v_token_index(seg))).sum()
     out.backward()
-    g = pol.enc.proj[2].weight.grad          # V 段投影
-    assert g is not None and g.abs().sum() > 0, "L 头梯度没到编码器 V 段投影"
+    g = pol.enc.embed.weight.grad            # 编码器输入投影
+    assert g is not None and g.abs().sum() > 0, "L 头梯度没到编码器"
 
 
 @pytest.mark.unit
@@ -793,11 +838,11 @@ class PolicyNet(nn.Module):
         # ...（既有参数保留，新增下面一行）
         self.optim: torch.optim.Optimizer | None = None   # 由训练器在首步惰性创建（Adam）
 
-    def forward_enc(self, segs, seg):
+    def forward_enc(self, tok_feat, seg):
         """编码器前向（两个头共用）。无编码器时返回 (None, None)。"""
         if self.enc is None:
             return None, None
-        return self.enc(segs, seg)
+        return self.enc(tok_feat, seg)
 
     def agv_logits_emb(self, tok, feat_task, cand_idx) -> torch.Tensor:
         """(1,N,d) × (1,1,F_task) × (n_cand,) → (1,1,n_cand)。
@@ -1225,8 +1270,8 @@ def test_gradient_flows_to_both_heads_and_encoder():
     chain_logp(decisions, pol).backward()
     for name, p in (("s_head_tok", pol.s_head_tok[0].weight),
                     ("l_head_tok", pol.l_head_tok[0].weight),
-                    ("enc.proj[0]", pol.enc.proj[0].weight),
-                    ("enc.proj[2]", pol.enc.proj[2].weight)):
+                    ("enc.embed", pol.enc.embed.weight),
+                    ("enc.type_emb", pol.enc.type_emb)):
         assert p.grad is not None and p.grad.abs().sum() > 0, f"{name} 无梯度"
 
 
@@ -1252,7 +1297,7 @@ Expected: FAIL — `ImportError: cannot import name 'roll_chain'`
 @dataclass
 class Decision:
     kind: str                       # "S" | "L"
-    segs: tuple                     # 当时的四段特征（tuple of np.ndarray, 冻结）
+    tok: np.ndarray                 # 当时的 **单张** (N, F_MAX) 特征（已冻结）
     seg: tuple
     feat: np.ndarray                # 决策特征（S: 工序特征；L: 任务特征）
     cand: tuple[int, ...]           # 候选（S: 机台号；L: 车号）
@@ -1272,18 +1317,18 @@ def roll_chain(inst, layout, dm, cfg, policy, seed,
     w = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout))
 
     def _freeze(snap):
-        segs, seg = build_tok(snap, inst, layout, ctx)
-        return tuple(np.asarray(x, dtype=np.float32) for x in segs), seg
+        tok, seg = build_tok(snap, inst, layout, ctx)
+        return np.asarray(tok, dtype=np.float32), seg
 
-    def _act(kind, tok_segs, seg, feat, cand):
+    def _act(kind, tok_feat, seg, feat, cand):
         with torch.no_grad():
             tok, _ = policy.forward_enc(
-                [torch.as_tensor(x, dtype=torch.float32) for x in tok_segs], seg)
+                torch.as_tensor(tok_feat, dtype=torch.float32).unsqueeze(0), seg)
             logits = (policy.mach_logits_emb if kind == "S" else policy.agv_logits_emb)(
                 tok, torch.as_tensor(feat, dtype=torch.float32), torch.tensor(cand))
             p = torch.softmax(logits.flatten(), -1)
             a = int(torch.multinomial(p, 1).item()) if sample else int(p.argmax())
-        decisions.append(Decision(kind=kind, segs=tok_segs, seg=seg,
+        decisions.append(Decision(kind=kind, tok=tok_feat, seg=seg,
                                   feat=np.asarray(feat, dtype=np.float32),
                                   cand=tuple(cand), action=cand[a]))
         return a
@@ -1312,7 +1357,8 @@ def chain_logp(decisions: list[Decision], policy) -> torch.Tensor:
     """
     total = torch.zeros(())
     for d in decisions:
-        tok, _ = policy.forward_enc([torch.as_tensor(s, dtype=torch.float32) for s in d.segs], d.seg)
+        tok, _ = policy.forward_enc(
+            torch.as_tensor(d.tok, dtype=torch.float32).unsqueeze(0), d.seg)
         if d.kind == "S":
             logits = policy.mach_logits_emb(tok, torch.as_tensor(d.feat), torch.tensor(d.cand))
         else:
@@ -1454,7 +1500,7 @@ def test_encoder_actually_receives_nonzero_features():
     """⚠️ Review Focus：P0 遗留的"输入全零"必须已消失——这是 P2 的头号验收项。"""
     inst, lay, dm, cfg, ctx, pol = _setup()
     decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    nonzero = [float(abs(s).sum()) for d in decisions for s in d.segs]
+    nonzero = [float(abs(d.tok).sum()) for d in decisions]
     assert min(nonzero) > 0.0, "仍有全零特征段——编码器等于吃零输入"
 
 
@@ -1523,7 +1569,7 @@ git add -A && git commit -m "feat: A 端到端跑通（P2 Task 8 验收）"
 
 ## 完成后的状态
 
-- **编码器不再是零输入**——`tok_feat` 由 `Snapshot` 实时构造，三段宽度各异、分段投影、带类型嵌入
+- **编码器不再是零输入**——`tok_feat` 由 `Snapshot` 实时构造；单张 `(N, F_MAX)` + 单 Linear + **必需的类型嵌入**
 - **两头读同一份 token 嵌入**——L 头不再失明，联合链成立
 - **S 层在线**——决策点看得见当时的机台积压/缓冲/保养余量
 - **奖励三目标**——`1/f^ref` 归一化权重，与 `M_ref` 同源
