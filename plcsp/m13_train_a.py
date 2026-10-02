@@ -22,7 +22,8 @@ ckpt 每 `--save-every` 步落盘）。
   整条序列（网络初始化 + 每步的动作采样）都被确定，跨进程即可复现。本脚本**故意不钉**：
   `--seed` 只表达"仿真扰动流"这一个语义，把它同时当动作种子会让两种随机来源纠缠在一起。
 
-输出**一律落 `run_dir`（默认 `checkpoints/a_<inst>`，已被 `.gitignore` 排除），不落包目录**：
+输出**一律落 `run_dir`（默认 = **仓库根**的 `checkpoints/a_<inst>`，锚 `__file__` 而非 CWD，
+故在包目录里执行也不会建出包内 `checkpoints/`；该目录已被 `.gitignore` 排除），不落包目录**：
 
 - `run_dir/metrics.ndjson`——每步一行 `{"step","r","t",…诊断}`（增量追加，可断外部分析）；
   `--eval-every` 打开时另有 `{"step","eval":{"makespan_mean","makespan_std","rule_makespan"}}`；
@@ -52,9 +53,12 @@ from .env.reward import ReferenceObjectives, reward_weights
 from .nn.encoder import LayoutEncoder
 from .nn.state_emb import norm_context
 
-# 评估种子起点（与训练的 0..steps-1 分离）。⚠️ `joint_chain_step` 内部另有
-# `seed_chain = seed*1000 + g` 的映射（第 s 步第 g 条链），故训练步号与这些评估种子不撞车。
-EVAL_SEED_BASE = 10_000
+# 评估种子起点。⚠️ **必须避开训练用过的扰动流**（评审 F1 修的就是这里）：`joint_chain_step`
+# 第 s 步第 g 条链用 `seed_chain = s*1000 + g`（`group_rel.py`），故训练流落在
+# `[seed0*1000, (seed0+steps)*1000)`。**旧值 10_000 与"第 10 步"的训练流正面相撞**
+# （G=8 时 10000..10007 全被第 10 步用过 ⇒ 5 个评估流全是训练流），评估集与训练集不分离会把
+# 论文 setup 节那句话写错。取 **10**6**：`steps < 1000` 时恒安全。
+EVAL_SEED_BASE = 10 ** 6
 
 
 def build_setup(inst_name: str, cfg: SimConfig | None = None):
@@ -94,14 +98,22 @@ def main() -> None:
     ap.add_argument("--G", type=int, default=8, help="组大小（J=1，预算全给 G）")
     ap.add_argument("--lr", type=float, default=3e-4, help="Adam 学习率（仅首步生效）")
     ap.add_argument("--seed", type=int, default=0, help="仿真扰动流种子基（不锁动作采样）")
-    ap.add_argument("--run-dir", default=None, help="默认 checkpoints/a_<inst>")
+    ap.add_argument("--run-dir", default=None,
+                    help="默认 <仓库根>/checkpoints/a_<inst>（锚 __file__，不是 CWD）")
     ap.add_argument("--save-every", type=int, default=10)
     ap.add_argument("--eval-every", type=int, default=0, help="每 N 步评估一次；0 = 不评估")
     ap.add_argument("--eval-seeds", type=int, default=5, help="评估的扰动种子数")
     ap.add_argument("--resume", action="store_true", help="从 run_dir/ckpt.pt 续跑")
     args = ap.parse_args()
 
-    run_dir = Path(args.run_dir or f"checkpoints/a_{args.inst}")
+    # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
+    # `plcsp/checkpoints/`，正好破坏本文件 docstring 里"不落包目录"的保证（评审 Minor）。
+    run_dir = Path(args.run_dir) if args.run_dir else (
+        Path(__file__).resolve().parents[1] / "checkpoints" / f"a_{args.inst}")
+    if args.resume and not (run_dir / "ckpt.pt").exists():
+        print(f"[m13] ⚠️ --resume 但 {run_dir / 'ckpt.pt'} 不存在：将从 step 0 重跑，且 "
+              "metrics.ndjson 是**追加**模式 ⇒ 会出现重复 step 号（按 step 取最新一行）。",
+              flush=True)
     inst, lay, dm, cfg, ctx, pol = build_setup(args.inst)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）

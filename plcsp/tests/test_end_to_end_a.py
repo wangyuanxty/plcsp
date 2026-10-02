@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""A 端到端验收（P2 Task 8）——三条断言钉住"P2 真的接通了"：
+"""A 端到端验收（P2 Task 8）——三条断言钉住"P2 真的接通了"，每条各配一条**牙齿**测试：
 
-1. **编码器输入非零且是活的**（P0 遗留的"tok_feat 全零"必须已消失——这是 P2 的头号验收项）；
+1. **编码器输入非零且是活的**（P0 遗留的"tok_feat 全零"必须已消失——这是 P2 的头号验收项）
+   ＋ `test_zeroed_features_would_be_caught`（变异守卫：把 `build_tok` 换回全零，断言必须变红）；
 2. **30 步内组均值奖励有改善**（"在学"而非"跑通"）；
-3. **训练后 argmax 策略优于规则基线**（严格 `<`，加权标量化 A 的验收线）。
+3. **训练后 argmax 策略优于规则基线**（严格 `<`，加权标量化 A 的验收线）
+   ＋ `test_untrained_control_does_not_beat_rule_baseline`（防假绿对照：**未训练**的同口径
+   argmax 必须**不**优于规则）——评审 F2 补：没有它，③ 的绿色只能靠"信我"。
 
 ⚠️ **预算（R1 裁定）**：本文件的全部训练预算是 **30 步 × G=4**。MK01 上
 `joint_chain_step(G=8)` 实测 18.2 s/步（Task 7）⇒ 300 步 ≈ 1.5 h，**不能进单元测试**。
@@ -39,6 +42,11 @@ from plcsp.nn.state_emb import norm_context
 
 STEPS, G, LR = 30, 4, 3e-4        # R1 裁定的小预算（见模块头）
 EVAL_SEEDS = 10                   # argmax 评估的扰动种子数（J>1 只用于评估，spec §5.3.4 约定 3）
+# ⚠️ **评估种子必须避开训练流**（评审 F1）：`joint_chain_step` 第 s 步第 g 条链用
+# `seed_chain = s*1000 + g`，故 30 步 × G=4 的训练流 ∈ [0, 29004)。旧值 10_000 **与第 10 步的
+# 训练流正面相撞**（10000..10003 —— 10 个评估流里 4 个是训练流），"评估集与训练集分离"这句话
+# 当时是**假的**。取 10**6：`steps*1000 + G ≤ 10**6` 时恒安全（steps < 1000）。
+EVAL_SEED_BASE = 10 ** 6
 
 
 def _setup(name: str = "mk01"):
@@ -75,7 +83,8 @@ def a_run() -> _ARun:
     """**一次** 30 步 × G=4 的联合链训练 + argmax 评估——测试 2/3 共用，避免重复训练。
 
     评估用**argmax**（`sample=False`）而非采样：A 要交付的是"训练出来的策略"，采样的方差
-    会把 30 步的小信号淹没。评估种子从 10_000 起，与训练种子（0..29）分离。
+    会把 30 步的小信号淹没。评估种子从 `EVAL_SEED_BASE = 10**6` 起——**与训练流严格分离**
+    （训练第 s 步第 g 条链的流是 `s*1000+g`，30 步最多到 29003；旧值 10_000 会撞第 10 步，评审 F1）。
     """
     torch.manual_seed(0)     # ⚠️ 必须在 `_setup()` **之前**：网络初始化与动作采样都走**全局
     #                          torch RNG**（Task 7）——不钉种子则每次运行的初始权重与 30 步
@@ -89,13 +98,14 @@ def a_run() -> _ARun:
         r, _diag = joint_chain_step(pol, inst, lay, dm, cfg, ctx, w, seed=s, G=G, lr=LR)
         rewards.append(float(r))
     secs = time.time() - t0
-    trained = tuple(float(roll_chain(inst, lay, dm, cfg, pol, seed=10_000 + s, ctx=ctx,
+    trained = tuple(float(roll_chain(inst, lay, dm, cfg, pol, seed=EVAL_SEED_BASE + s, ctx=ctx,
                                      sample=False)[1]["makespan"])
                     for s in range(EVAL_SEEDS))
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])
     print(f"\n[A-e2e] {STEPS} 步 × G={G}：{secs:.0f} s（{secs / STEPS:.1f} s/步）｜"
           f"r 前 10 = {mean(rewards[:10]):.2f} → 后 10 = {mean(rewards[-10:]):.2f}｜"
-          f"argmax makespan = {mean(trained):.1f}（{EVAL_SEEDS} 种子）vs 规则 {rule:.1f}")
+          f"argmax makespan = {mean(trained):.1f} vs 规则 {rule:.1f}"
+          f"（训练后 {EVAL_SEEDS} 种子 {[round(x, 1) for x in trained]}）")
     return _ARun(rewards=tuple(rewards), trained=trained, rule=rule, seconds=secs)
 
 
@@ -172,11 +182,42 @@ def test_trained_argmax_beats_rule_baseline(a_run: _ARun):
     同一次运行（与 `ReferenceObjectives` 同源），故这条断言的分母与奖励口径一致。
 
     ⚠️ **R1 预警过"30 步可能反超不了"**，故本条**实测定档**（同进程、`torch.manual_seed(0)`，
-    布局 seed 0、默认 `SimConfig`）：训练后 **86.8** vs 规则 **103.4**（**−16.1%**），
-    而未训练的同口径 argmax 是 **238.0**（规则的 2.30×）。**反超余量足够，故保留严格 `<`，
-    不降级**；对照组见 Task 8 报告与 `progress-log.md` §十八——它才是"训练确实起了作用"的判据。
+    布局 seed 0、默认 `SimConfig`）：训练后 **85.0** vs 规则 **103.4**（**−17.8%**），
+    逐种子 `[82.1, 91.7, 86.8, 84.2, 90.0, 79.8, 91.7, 90.8, 82.1, 71.1]`。**反超余量足够，
+    故保留严格 `<`，不降级**；牙齿由 `test_untrained_control_does_not_beat_rule_baseline` 提供
+    （未训练同口径 argmax = **233.2**，规则的 2.25× ⇒ 不训练时本断言必红）。
+
+    📌 **评审 F1 留痕**：修 F1 前本条的读数是 86.8（−16.1%）——那次评估种子 `10_000..10_009`
+    里有 4 个是**第 10 步训练过的流**（`s*1000+g`）。修成 `10**6` 后重测为 **85.0**：
+    **泄漏在数值上是噪声级的（还把数字压低了一点），但"评估集与训练集分离"这句话之前是假的**
+    ——论文 setup 节要写的是修后这条。
     """
     trained, rule = mean(a_run.trained), a_run.rule
     assert trained < rule, (
         f"训练后 argmax makespan {trained:.1f} 未优于规则基线 {rule:.1f}"
         f"（10 种子 {[round(x, 1) for x in a_run.trained]}；30 步 × G={G} 的小预算）")
+
+
+@pytest.mark.unit
+def test_untrained_control_does_not_beat_rule_baseline():
+    """⚠️ **防假绿对照**（评审 F2）：断言 ③ 的全部价值在"训练**确实**起了作用"——故这里造一个
+    **全新未训练**的 `PolicyNet`，在**同一些评估种子**上跑同口径 argmax，断言它**不优于**规则基线。
+
+    没有这条，"训练后 85.0 < 103.4"只能要求审稿人**信我**（原来那份对照只写在 docstring 与报告
+    里，仓库里没有任何东西能证明断言 ③ 会红）。与断言 ① 的变异守卫同理，这条是 ③ 的**牙齿**。
+    `torch.manual_seed(0)` 与 fixture 同一起点 ⇒ 这里的"未训练"就是 `a_run` 训练前的那一版参数。
+    实测：**233.2 vs 规则 103.4（2.25×）**——不训练时断言 ③ 必红。
+
+    只取 **2** 个扰动种子：对照要的是"量级判据"（它差一个数量级，2 个种子足够），省墙钟。
+    """
+    torch.manual_seed(0)                     # 必须与 a_run 的起点一致 ⇒ 同一份初始权重
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    scores = [float(roll_chain(inst, lay, dm, cfg, pol, seed=EVAL_SEED_BASE + s, ctx=ctx,
+                               sample=False)[1]["makespan"]) for s in range(2)]
+    rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])
+    print(f"[A-e2e] 未训练对照（同 {len(scores)} 个评估种子的 argmax）："
+          f"makespan = {mean(scores):.1f} {[round(x, 1) for x in scores]} vs 规则 {rule:.1f}")
+    assert mean(scores) > rule, (
+        f"**未训练**策略的 argmax makespan {mean(scores):.1f} 竟然不劣于规则基线 {rule:.1f}"
+        f"（{len(scores)} 种子 {[round(x, 1) for x in scores]}）——那断言 ③ 就是假绿："
+        f"'训练后更优'可能只是随便初始化的功劳，而不是训练的")

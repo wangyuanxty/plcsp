@@ -425,8 +425,9 @@ wᵢ = 1 / fᵢ^ref        fᵢ^ref = 参考调度（§3.5 的 M_ref 口径）�
 > （特征与快照）、`nn/encoder.py`（统一宽度 + 类型嵌入）、`algo/policy.py`（两头读同一份嵌入）、
 > `env/des.py::run_gated`（在线 S 层）、`env/reward.py`（三目标加权标量化）、
 > `algo/group_rel.py`（联合链 GRPO）、`algo/runner.py` + `m13_train_a.py`（长训练）。
-> **端到端验收 = `plcsp/tests/test_end_to_end_a.py`**（30 步 × G=4 小预算，三条断言 + 一条变异
-> 守卫全绿；实测数字见 `docs/progress-log.md` §十八）。回归门禁 `plcsp/tests/` **160 项全绿**。
+> **端到端验收 = `plcsp/tests/test_end_to_end_a.py`**（30 步 × G=4 小预算，三条断言 + 两条守卫
+> 〔变异守卫 / 防假绿对照〕全绿；实测数字见 `docs/progress-log.md` §十八）。
+> 回归门禁 `plcsp/tests/` **161 项全绿**。
 > 下表四条"现状"**全部已解决**（逐条勾掉，见下方"已解决"列）。
 
 > 本节此前**不存在**——训练细节只在代码里，且代码与 §5.2 的声明不一致（见 §5.3.4 的"三处不一致"）。
