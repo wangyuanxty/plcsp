@@ -98,9 +98,11 @@ def load_mk(name: str = "mk01", base: Path | None = None) -> Instance:
     官方 `.fjs` 经回归测试核对：10/10 实例的维度与总工序数全部正确。
     见 `plcsp/tests/test_instances.py`。
     """
+    # 夹具来源（P0 整支评审发现 #3 的修复）：10 个 .fjs 共约 20 KB，随包存于
+    # plcsp/data/brandimarte/，**不再依赖被 .gitignore 排除的 third_party/**（1.5 GB / 33 嵌套 .git）。
+    # 原始出处：third_party/fjsp-gnnrl/evaluations/standard/brandimarte/brandimarte_dataset/
     if base is None:
-        base = Path(__file__).resolve().parents[2] / "third_party" / "fjsp-gnnrl" / \
-            "evaluations" / "standard" / "brandimarte" / "brandimarte_dataset"
+        base = Path(__file__).resolve().parents[1] / "data" / "brandimarte"
     f = base / f"Mk{int(name[2:]):02d}.fjs" if name[2:].isdigit() else None
     if f is None or not f.exists():
         avail = sorted(p.name for p in base.glob("Mk*.fjs"))[:12] if base.exists() else []

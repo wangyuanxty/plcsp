@@ -514,3 +514,48 @@
 - **处置**：共演化作为"贡献"= **正式否决**（与树式分层、L（物流）环节同档）；仅作为方法边界讨论进论文。
 
 
+
+## 十四、P0 地基执行记录（2026-10-02）
+
+**计划**：`docs/superpowers/plans/2026-10-02-p0-foundation.md`｜**spec**：`docs/superpowers/specs/2026-10-02-plcsp-rebuild-design.md`
+**执行方式**：inline（executing-plans）｜**结果**：4 任务全完成，5 次提交，49 项测试全绿
+
+### 14.1 整支评审结论（opus 评审员，零 Critical / 3 Important / 10 Minor）
+**"可以合并"**。五条 Review Focus 全部实测通过。3 项 Important 已在同一次 fix pass 修完（见 14.2）。
+
+### 14.2 已修的 3 项 Important（每项 RED→GREEN）
+1. **包 docstring 仍描述已砍路线**——`plcsp/__init__`（"SA-GRPO package"）、`algo/__init__`（"SA-GRPO 树式学习器"）、`nn/__init__`（"几何不变特征"）。spec §7/§12#6 逐字要求"改名时一并重写"，计划只做了机械改名。→ 三处重写。
+2. **`INDEX.md` 自称唯一入口，却没指向权威 spec**，且仍把已作废的 `method-design.md` 标为"写论文的主依据"；`数据：plcsp/*.jsonl` 亦已不存在。→ 文档地图补 spec 行、标废旧文档、修数字漂移。
+3. **唯一的回归门禁在新克隆上必然全红**——`test_instances.py` 依赖被 `.gitignore` 排除的 1.5 GB `third_party/`。→ **10 个官方 `.fjs`（约 20 KB）随包入库 `plcsp/data/brandimarte/`**，`load_mk` 默认改读它。**门禁自此自包含。**
+
+### 14.3 执行中做的 Ruling（偏离计划之处，均已记账）
+| # | 位置 | 裁定 | 若错的代价 |
+|---|---|---|---|
+| 1 | Setup | 先跑 Task 1 建仓再建 skill 工作区（`sdd-workspace` 需要 git，而 Task 1 就是 `git init`）| 无 |
+| 2 | Task 1 | `.gitignore` 增补 `.superpowers/` 与 `.claude/settings.local.json` | 无 |
+| 3 | Task 1 | `core.autocrlf=false`（消 LF/CRLF 警告与未来虚假 diff）| 无 |
+| 4 | Task 2 | docs 替换范围收窄为 `INDEX.md`+`citation-cards.md`——计划原命令会误改 **plan 自身**（23 处刻意引用旧名）| 低（历史文档保留旧名属史实）|
+| 5 | Task 3 | `F_TOKEN` 10→6、`LayoutEncoder` 默认 `feat_dim` 跟改 | P2 重设计特征时可能再调 |
+| 6 | Task 3 | 删除 `group_rel.tree_step`/`_mode_feat`（用已删的 `batch_logits`）；`runner.py` 仅 import 未调用，改 import 行 | 无 |
+| 7 | Task 3 | 追加归档 `m2_smoke`/`m3_smoke`/`m8_adv`（被测对象已删 / import 已归档模块）| 失去 M3 期冒烟测试，P2 需新写 |
+| 8 | Task 4 | 可回溯判据由 `--diff-filter=D` 改为 `git log --follow`（`git mv` 记为**重命名**不是删除）| 无 |
+| 9 | Final | 测试判据放宽为"同句含废弃标记则允许提及已砍术语"——留痕有价值，禁止的是"**肯定地**描述" | 极少数情况下可能漏掉真违规 |
+| 10 | Final | 从 `RETIRED_TERMS` 移除"双轴"——轴向分解是**当前真实架构**（P0 只删几何偏置），测试表列错了 | 无 |
+
+### 14.4 评审提出的 Minor（**未修，留待 P2 顺手处理**）
+1. `des.py` 分批残骸：`inject_q` 恒空、`if inject_q:` 死分支、`_transporter` 仍留形参（语义正确，仅易误读）
+2. `des.py` 三处注释仍在讲分批（`:122-123`、`:305-307`、`:396`）
+3. `des.py:19` `Zone = simpy.Resource` 死别名（spec §7 要求顺手清，计划漏列）
+4. `resume_training` 兜底措辞把**任何** RuntimeError 都归因于 batch 头——实测旧 ckpt 首因是 `l_head`/`v_head` 整批缺失；未来 shape 不符时会系统性误导
+5. 文档漂移：`group_rel.py` 模块 docstring、`local_l_step`/`local_tree_step` docstring、`runner.py:3` 仍写"SA-GRPO"
+6. 归档脚本的用法行被 sed 改成 `python -m plcsp.m2_smoke`，但文件在 `archive/` 下且无 `__init__.py` → **双重不可用**（归档不运行，故 Minor）
+7. `nn/state_emb.py` 导入 `F_DYN` 未使用
+8. `INDEX.md:68` "`.git` 仅 805 K" 为 Task 1 时旧值（实测 loose 1.07 MiB）
+9. `policy.py:1/:32` 写"无 critic"，但 `v_head`/`v()` 实在且被 `l_seq_step_ppo` 使用
+10. 盘上残留 `algo/__pycache__/standard_tree.cpython-312.pyc`（含旧包名，已被 ignore、不影响运行）
+
+### 14.5 🔴 P0 暴露的关键发现（**P1/P2 必读**）
+**旧的 `encode_state` 产出的 token 特征，除 4 位静态几何外全是桩 0**——动态量（缓冲占用/负载/电量/等待/占道）**从未接入过**。几何一删，编码器输入**全零**（实测 `(tok==0).all() == True`），但训练路径**不报错**、损失照降——**静默产出无意义结果**。
+
+> **故 P2 不是"删掉几何就行"，而是必须重新设计 token 特征。**
+> 评审员建议给 `encode_state` 加 `warnings.warn` 或直接 `raise`，把"静默"变成"响亮失败"——**建议 P2 采纳**。

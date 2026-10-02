@@ -14,15 +14,17 @@
 **生产-物流协同调度（PLCSP）的深度强化学习研究**：两环节联动 = 排产（FJSP）→ 物流（真 AGV 派车）；自建 SimPy 测试台 + Transformer 编码器 + 组内相对 RL（GRPO）；目标顶刊。
 （2026-10-02 两处删减：① 原"**三环节** = 分批 → 排产 → 物流"——分批已砍，见 `progress-log.md` §12.5；② 原"**几何/度量感知注意力**编码器"——几何线已砍，见 §12.6。）
 
-代码：`plcsp/`（Python 包）｜数据：`plcsp/*.jsonl`｜文献 PDF：`references/`（63 篇）｜模型：`checkpoints/`
+代码：`plcsp/`（Python 包）｜数据：`plcsp/archive/*.jsonl`（旧实验数据）｜文献 PDF：`references/`（103 篇）｜模型：`checkpoints/`（**19 个旧 checkpoint 已作废**，见 §5.5）
 
 ## 2. 文档地图
 
 | 文件 | 内容 | 谁在用 |
 |---|---|---|
 | **INDEX.md** | 本文件——索引入口 | 新会话第一站 |
-| `method-design.md` | 方法设计（问题定义 §1.1、编码器 §2.3、算法 §3、环境 §4、实验计划 §5） | 写论文的主依据 |
-| `feasibility-report.md` | 可行性分析、领域定位、文献对位表 | 立项依据 |
+| ⭐ **`superpowers/specs/2026-10-02-plcsp-rebuild-design.md`** | **权威设计（当前方案）**——问题定义、11 约束、目标与奖励、骨架、实验设计、实施分期 | **写论文的唯一依据** |
+| `superpowers/plans/2026-10-02-p0-foundation.md` | P0 地基实施计划（建仓/改名/归档） | 已执行完毕 |
+| ~~`method-design.md`~~ | **已取代**（旧的"三环节 + 几何感知 + SA-GRPO"方案整批作废）——仅作历史参考，重写见 spec §12#7 | ⚫ 勿依据 |
+| ~~`feasibility-report.md`~~ | **已作废**（"国际首次""空位"类表述整批失效）——重写见 spec §12#7 | ⚫ 勿依据 |
 | `theory-bounds.md` | 理论骨架（LoTV 条件塔 / 有限样本界 v0.1） | 理论章节 |
 | `literature.md` | 文献总表（编号 + 期刊 + 档次 + 定位） | 检索/引用 |
 | `literature-landscape-2026.md` | **2026 风向标**（六条热点 / 必读论文 / 我方位置对照） | 选题定位 |
