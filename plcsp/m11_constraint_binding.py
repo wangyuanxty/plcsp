@@ -39,14 +39,15 @@ from .env.constraints import ConstraintConfig
 from .env.corridors import build_corridor_graph, dock_distance_matrix
 from .env.des import SimConfig, SimWorld
 from .env.instances import load_mk
-from .env.layout import sample_layout
+from .env.layout import AgvSpec, sample_layout
 
 TARGETS = ("mk01", "mk10")
 BINDING_PCT = 2.0          # 判据（计划 Global Constraints）：|Δ%| < 2 ⟹ 不 binding
 # ⚠️ 已接入 `des.py` 的约束——用于消歧"关态零影响"是"从不触发"还是"未接线"。
 # **Task 4/5/6 每接一个都要把它加进来**，否则该约束会被误报成"未接线"。
 WIRED = ("congestion", "finite_buffer", "machine_failure",
-         "rework", "setup_time", "maintenance")
+         "rework", "setup_time", "maintenance",
+         "agv_failure", "heterogeneous_fleet", "charging")
 
 CONSTRAINTS = ("congestion", "finite_buffer", "machine_failure", "rework", "setup_time",
                "fuzzy_processing", "due_dates", "agv_failure", "heterogeneous_fleet",
@@ -86,6 +87,30 @@ def _probe_maintenance(lay, cfg) -> None:
     cfg.pm_interval /= 10.0                          # 120 → 12 min 主轴工时
 
 
+def _probe_agv_failure(lay, cfg) -> None:
+    cfg.agv_mtbf /= 100.0                            # 480 → 4.8 min：故障频发
+
+
+def _probe_heterogeneous_fleet(lay, cfg) -> None:
+    """极端异构：载量拉满、速度差拉到 ±20% 两端、电量取最小（充电压力最大）。"""
+    for i, a in enumerate(lay.agvs):
+        lay.agvs[i] = AgvSpec(id=a.id, speed_factor=1.2 if i % 2 else 0.8,
+                              capacity=cfg.max_agv_capacity, battery_kwh=2.0)
+
+
+def _probe_charging(lay, cfg) -> None:
+    """极端充电压力：阈值抬到 80% **且**电池缩到 0.3 kWh。
+
+    ⚠️ 只抬阈值是不够的——mk01 一个 episode 的 AGV 总耗电仅约 0.27 kWh，
+    而电池 2–4 kWh，**放掉也不到 20%**，所以连阈值 80% 都触不到（实测恰好 0.00%）。
+    缩电池才能把"机制是否接对"和"参数尺度是否合理"分开。
+    """
+    cfg.battery_low = 0.80
+    for i, a in enumerate(lay.agvs):
+        lay.agvs[i] = AgvSpec(id=a.id, speed_factor=a.speed_factor,
+                              capacity=a.capacity, battery_kwh=0.3)
+
+
 PROBES: dict[str, tuple[str, Callable]] = {
     "machine_failure": ("fail_rate ×100", _probe_machine_failure),
     "finite_buffer": ("缓冲 cap 全=1", _probe_finite_buffer),
@@ -93,6 +118,9 @@ PROBES: dict[str, tuple[str, Callable]] = {
     "rework": ("返工率 ×10", _probe_rework),
     "setup_time": ("换型时长 ×10", _probe_setup_time),
     "maintenance": ("保养间隔 ÷10", _probe_maintenance),
+    "agv_failure": ("AGV MTBF ÷100", _probe_agv_failure),
+    "heterogeneous_fleet": ("载量满/速度两极", _probe_heterogeneous_fleet),
+    "charging": ("充电阈值 80%", _probe_charging),
 }
 
 
@@ -101,7 +129,8 @@ def run_variant(inst, cfg: SimConfig, constraints: ConstraintConfig, seeds: int,
     """同布局同种子跑 seeds 次。**逐种子保留指标**（只留均值就算不出种子间 σ）。"""
     ms, en, td = [], [], []
     for s in range(seeds):
-        lay = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=cfg.aisle_width)
+        lay = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=cfg.aisle_width,
+                            n_agv=cfg.n_agv, max_agv_capacity=cfg.max_agv_capacity)
         if mutate is not None:
             mutate(lay, cfg)
         g = build_corridor_graph(lay)
@@ -161,24 +190,36 @@ def main() -> None:
                 label, probe = PROBES[c]
                 ge = run_variant(inst, SimConfig(), ConstraintConfig(), args.seeds, mutate=probe)
                 if ge is None:
-                    ext_lab, d_ext = label, float("nan")
+                    ext_lab, d_ext, sd_ext = label, float("nan"), 0.0
                 else:
-                    ext_lab, d_ext = label, _paired_delta(base, ge)[0]
+                    ext_lab, d_ext, sd_ext = label, *_paired_delta(base, ge)
             else:
-                ext_lab, d_ext = "探针缺失", float("nan")
+                ext_lab, d_ext, sd_ext = "探针缺失", float("nan"), 0.0
 
-            # 判定：两列都 < 2% ⟹ 不 binding（计划 Global Constraints 的判据）
+            # 判定须**同时**过两关：① 相对变化 ≥ 2%（计划判据）；② 配对 t 显著。
+            # ② 用**配对差的标准误** σ/√n（不是 σ 本身）——逐种子配对后共同随机性已消掉，
+            # n=5 时 2·SE ≈ 0.89σ，对应 t≈2（p≈0.05）。若误用 2σ 会把 +82.9% 这种
+            # 巨大效应也判成噪声（σ 在故障频发档下本来就大）。
+            n_seed = len(base["makespan"])
+
+            def _sig(delta: float, sd: float) -> bool:
+                se = sd / math.sqrt(max(n_seed, 1))
+                return abs(delta) >= BINDING_PCT and abs(delta) >= 2.0 * se
+
             has_ext = not math.isnan(d_ext)
-            worst = max(abs(d_off), abs(d_ext) if has_ext else 0.0)
-            if d_off == 0.0 and (not has_ext or abs(d_ext) < BINDING_PCT):
-                # 关态**逐位相同** = 该约束没改变任何结果。两种可能，本工具分不出来：
+            sig_off = _sig(d_off, sd_off)
+            sig_ext = has_ext and _sig(d_ext, sd_ext)
+            if d_off == 0.0 and (not has_ext or d_ext == 0.0):
+                # 两列都**逐位相同** = 该约束没改变任何结果。两种可能，本工具分不出来：
                 # (a) 开关未接线（Task 4–6 的待办）；(b) 已接线但本工况下从不触发。
                 # 用 WIRED 常量消歧：在 WIRED 里 = (b)，不在 = (a)。
                 verdict = "⚠ 未接线" if c not in WIRED else "关态零影响"
-            elif worst < BINDING_PCT:
-                verdict = "不 binding"
-            else:
+            elif sig_off or sig_ext:
                 verdict = "binding"
+            elif abs(d_off) >= BINDING_PCT or (has_ext and abs(d_ext) >= BINDING_PCT):
+                verdict = "⚠ 疑似噪声"      # 过了 2% 但配对 t 不显著
+            else:
+                verdict = "不 binding"
             ext_s = "     n/a" if not has_ext else f"{d_ext:+8.2f}%"
             print(f"  {LABELS[c]:<14}{d_off:+11.2f}%{sd_off:7.2f}   {ext_lab:<14}{ext_s}   {verdict}")
         print()

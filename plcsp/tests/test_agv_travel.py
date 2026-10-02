@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from plcsp.env.constraints import ConstraintConfig
 from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
 from plcsp.env.des import SimConfig, rollout
 from plcsp.env.instances import load_mk
@@ -43,13 +44,17 @@ def test_travel_time_equals_distance_matrix_exactly():
     这里同时校验**总额**与**空载/负载分账**——只对总额会让"两段记反"蒙混过关。
     """
     # Arrange
+    # ⚠️ 必须在**单载**下测：⑩ 多载量开启时一趟送多件，`travel_time_total` 会**小于**
+    #    Σ 每件的负载段（实测少 ~2.4 min），精确等式不成立。这条断言守的是"节点索引没错"，
+    #    与拼车无关，故把异构车队关掉（载量退化为 1）后再对拍。
     inst = load_mk("mk01")
     cfg = SimConfig(n_agv=1)
-    lay = sample_layout(inst.n_machines, seed=0)          # 与 rollout 默认 seed_layout=0 一致
+    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)   # 同 rollout 默认 seed_layout
     dm = dock_distance_matrix(build_corridor_graph(lay))
 
     # Act
-    r = rollout(inst, seed_chain=1, cfg=cfg)
+    r = rollout(inst, seed_chain=1, cfg=cfg,
+                constraints=ConstraintConfig(heterogeneous_fleet=False))
 
     # Assert：对每条搬运任务逐条重算两段，求和后必须逐位相等
     def _minutes(u: int, v: int) -> float:

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import simpy
+from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
+                      machine_energy_kwh, machine_params_for, total_energy_kwh)
 from .corridors import shortest_node_path
 from .layout import Layout, MachinePad
 from .instances import Instance
@@ -34,12 +36,14 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
-    layout = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=aisle_width)
-    g = build_corridor_graph(layout)
-    dm = dock_distance_matrix(g)
     # ⚠️ aisle_width 必须同时进 SimConfig——eff_speed 读的是 cfg.aisle_width（窄道降速）。
     # 否则 `rollout(aisle_width=1.0)` 只改几何、不改速度，窄道敏感性实验**静默失效**。
     eff_cfg = cfg if cfg is not None else SimConfig(aisle_width=aisle_width)
+    # ⚠️ 车队规模与载量上限必须**同步进布局**，否则布局车队 ≠ 仿真车队（静默错误）。
+    layout = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=aisle_width,
+                           n_agv=eff_cfg.n_agv, max_agv_capacity=eff_cfg.max_agv_capacity)
+    g = build_corridor_graph(layout)
+    dm = dock_distance_matrix(g)
     return SimWorld(inst, layout, dm, eff_cfg, graph=g, constraints=constraints).run(
         seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
 
@@ -77,6 +81,12 @@ class SimConfig:
     setup_min_default: float = 2.0   # ⑤ 异型换型时长 [min]（同作业连做 = 0）
     pm_interval: float = 120.0    # ⑫ 预防性维护间隔 [min 主轴工时]
     pm_duration: float = 10.0     # ⑫ 维护停机时长 [min]
+    max_agv_capacity: int = 3     # ⑩ 车队载量上限 [件]（1 = 退化为单载）
+    agv_mtbf: float = 480.0       # ⑨ AGV 平均无故障时间 [min]（8 h）
+    agv_mttr: float = 10.0        # ⑨ AGV 平均修复时间 [min]
+    battery_low: float = 0.20     # ⑪ 低电阈值（占容量比）
+    battery_high: float = 0.80    # ⑪ 充电目标（占容量比）
+    charge_kw: float = 3.0        # ⑪ 充电功率 [kW]
 
     @property
     def eff_speed(self) -> float:
@@ -278,8 +288,8 @@ class AgvSim:
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
-                 tasks_in, machines: list, graph, zm, constraints,
-                 bound: bool = False):
+                 tasks_in, machines: list, graph, zm, constraints, spec, rng,
+                 chargers=(), charger_res=(), bound: bool = False):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
         self.g, self.zm = graph, zm
@@ -287,11 +297,94 @@ class AgvSim:
         self.congestion = constraints.congestion    # ① 关 → 无区段管制
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
         self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
+        # ⑩ 异构车队：**开关关掉时倍率=1、载量=1**，即与"约束从未存在"逐位相同
+        hetero = constraints.heterogeneous_fleet
+        self.capacity = spec.capacity if hetero else 1
+        self.speed = cfg.agv_speed_mps * (spec.speed_factor if hetero else 1.0)
+        self.battery_cap = spec.battery_kwh
+        self.battery = spec.battery_kwh     # [kWh]，只在 ⑪ 开启时增减
+        self.chargers, self.charger_res = list(chargers), list(charger_res)
+        # ⑨ 故障：**每台车一条独立随机流**——否则关掉 AGV 故障会移位机台故障流（消融不干净）
+        self.rng = rng
+        self.down = False
+        self.up = simpy.Event(env)
+        self.up.succeed()                   # 初始可用
 
     def _seg_min(self, u: int, v: int) -> float:
         """节点 u→v 的行驶时长 [min]。距离矩阵给的是最短路，故 u,v 不必相邻。"""
-        return (float(self.m_dm[u, v])
-                / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
+        return float(self.m_dm[u, v]) / (self.cfg.eff_speed * self.speed) / SECONDS_PER_MIN
+
+    def _drain(self, leg: str, minutes: float) -> None:
+        """⑪ 行驶耗电：kWh = kW × min ÷ 60（与 `energy.py` 同一套三态功率）。"""
+        if not self.con.charging:
+            return
+        kw = AGV_EMPTY_KW if leg == "empty" else AGV_LOADED_KW
+        self.battery = max(0.0, self.battery - kw * minutes / 60.0)
+        self.stats["battery_min_kwh"] = min(self.stats.get("battery_min_kwh", self.battery_cap),
+                                            self.battery)
+
+    def _failures(self):
+        """⑨ AGV 故障：按泊松流停机 `agv_mttr`，期间不接活。
+
+        **腿间检出**：故障不打断正在进行的行驶（在途任务滞留在车上），
+        在下一段行驶开始前生效。这是简化，但 MTBF(480 min) 远大于单段行驶时长，误差可忽略。
+        """
+        while True:
+            yield self.env.timeout(self.rng.exponential(self.cfg.agv_mtbf))
+            self.stats["agv_fail_events"] += 1
+            # ⚠️ 必须**先换一个新的未触发事件**再置 down：否则等待者会反复 yield 一个
+            # 已经 succeed 的事件 → 仿真时间不推进、空转成死循环（实测 pytest 直接挂死）。
+            self.up = simpy.Event(self.env)
+            self.down = True
+            yield self.env.timeout(self.cfg.agv_mttr)
+            self.down = False
+            self.up.succeed()
+
+    def _wait_up(self):
+        """⑨ 若当前停机，等到修复。"""
+        while self.down:
+            yield self.up
+
+    def _maybe_charge(self):
+        """⑪ 低电 → 就近找**空闲**充电桩充到 `battery_high`。
+
+        只在**待命时**充电，不在取货/送货途中中断——中断会把在途工件撂在半路。
+        桩被占则试下一个（本车不排队干等，回队后下一轮再试）。
+        """
+        if not self.con.charging or not self.chargers:
+            return
+        if self.battery > self.cfg.battery_low * self.battery_cap:
+            return
+        src = self.pos_node if self.pos_node is not None else self.chargers[0].node
+        for ch in sorted(self.chargers, key=lambda c: float(self.m_dm[src, c.node])):
+            res = self.charger_res[ch.id]
+            if res.count >= res.capacity:       # 桩被占（SimPy 单线程，检查与申请之间无 yield）
+                continue
+            with res.request() as req:
+                yield req
+                ok, self.pos_node = yield from self._drive(src, ch.node, "empty")
+                if not ok:
+                    return
+                need = self.cfg.battery_high * self.battery_cap - self.battery
+                yield self.env.timeout(need / self.cfg.charge_kw * 60.0)   # kWh ÷ kW → h → min
+                self.battery = self.cfg.battery_high * self.battery_cap
+                self.stats["charge_events"] += 1
+            return
+
+    def _collect(self, q, frm: int, to: int, first: tuple) -> list:
+        """⑩ 同向拼车：从**队首连续段**取走与本件同 (取货点, 卸货点) 的任务，最多 `capacity` 件。
+
+        只看队首连续段（不搜全队列）——故**不会打乱其它任务的相对顺序**，代价是拼车机会变少。
+        容量为 1 时直接返回单件（退化即"该约束从未存在"）。
+        """
+        batch = [first]
+        while len(batch) < self.capacity and q.items:
+            nxt = q.items[0]                    # 偷看队首；与下面的 get 之间无 yield，安全
+            if (nxt[0], nxt[1]) != (frm, to):
+                break
+            batch.append((yield q.get()))
+            self.stats["tasks_get"] += 1
+        return batch
 
     def _drive(self, src: int, dst: int, leg: str):
         """把车从 `src` 节点开到 `dst` 节点，行驶时长累入 `leg` 态（"empty" / "loaded"）。
@@ -305,6 +398,7 @@ class AgvSim:
         if not self.congestion:                 # ① 关：不申请区段，按距离直行
             seg = self._seg_min(src, dst)
             yield self.env.timeout(seg)
+            self._drain(leg, seg)               # ⑪ 行驶耗电
             self.stats["travel_time"] += seg
             self.stats[f"agv_{leg}_min"] += seg
             self.stats["moves"] += 1
@@ -330,6 +424,7 @@ class AgvSim:
                 prev_z = z
             seg = self._seg_min(path[pi], path[pi + 1])
             yield self.env.timeout(seg)
+            self._drain(leg, seg)               # ⑪ 行驶耗电
             travel += seg
             end = path[pi + 1]
             self.stats["moves"] += 1
@@ -340,9 +435,17 @@ class AgvSim:
 
     def run(self):
         q = self.tasks_in[self.aid] if self.bound else self.tasks_in
+        if self.con.agv_failure:
+            self.env.process(self._failures())       # ⑨ 关掉时不启进程 → 不抽随机数
         while True:
+            yield from self._wait_up()               # ⑨ 停机中不接活
+            yield from self._maybe_charge()          # ⑪ 待命时补电
+            yield from self._wait_up()
+            t0 = self.env.now
             frm, to, item, path = yield q.get()
-            self.stats["tasks_get"] = self.stats.get("tasks_get", 0) + 1
+            if self.con.charging:                    # ⑪ 待命也耗电（三态口径）
+                self._drain_idle(self.env.now - t0, AGV_IDLE_KW)
+            self.stats["tasks_get"] += 1
             a = self.machines[frm].pad.dock_node
             b = self.machines[to].pad.dock_node
             # ── 空载段：当前停位 → 取货点 ──
@@ -352,20 +455,33 @@ class AgvSim:
                     self.stats["requeue"] = self.stats.get("requeue", 0) + 1
                     q.put((frm, to, item, path))
                     continue
-            # ── 负载段：取货点 → 卸货点 ──
+            # ⑩ 同向拼车：把队首连续的同 (取货点, 卸货点) 任务一并装走
+            batch = yield from self._collect(q, frm, to, (frm, to, item, path))
+            # ── 负载段：取货点 → 卸货点（整批一趟）──
             ok, self.pos_node = yield from self._drive(a, b, "loaded")
             if not ok:
                 yield self.env.timeout(self.cfg.zone_hold)
                 self.stats["requeue"] = self.stats.get("requeue", 0) + 1
-                q.put((frm, to, item, path))
+                for t in batch:                      # 整批退回队列
+                    q.put(t)
                 continue
-            self.stats["agv_del"][self.aid] += 1      # L 层状态轨迹（负载差/最后位置）
-            self.stats["agv_pos"][self.aid] = to
-            # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
-            while len(self.machines[to].in_q.items) >= self.machines[to].in_q.capacity:
-                yield self.env.timeout(self.cfg.zone_hold)
-            yield self.machines[to].in_q.put(item)
-            self.stats["deliveries"] += 1
+            self.stats["trips"] += 1
+            for (_f, t2, _item2, _p2) in batch:
+                self.stats["agv_del"][self.aid] += 1  # L 层状态轨迹（负载差/最后位置）
+                self.stats["agv_pos"][self.aid] = t2
+                # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
+                while len(self.machines[t2].in_q.items) >= self.machines[t2].in_q.capacity:
+                    yield self.env.timeout(self.cfg.zone_hold)
+                yield self.machines[t2].in_q.put(_item2)
+                self.stats["deliveries"] += 1
+
+    def _drain_idle(self, minutes: float, idle_kw: float) -> None:
+        """⑪ 待命耗电（与 `_drain` 同一口径，只是功率取待机值）。"""
+        if minutes <= 0.0:
+            return
+        self.battery = max(0.0, self.battery - idle_kw * minutes / 60.0)
+        self.stats["battery_min_kwh"] = min(self.stats.get("battery_min_kwh", self.battery_cap),
+                                            self.battery)
 
 class SimWorld:
     """一次 episode：1 布局 + 1 实例 + 1 条独立扰动流 → 指标 dict。"""
@@ -403,8 +519,6 @@ class SimWorld:
 
         `horizon_hit` 时 makespan 可能小于某台机的加工结束时刻，故 `idle` 取 `max(0, ·)` 兜底。
         """
-        from ..energy import (machine_energy_kwh, machine_params_for, agv_energy_kwh,
-                              total_energy_kwh)
         proc, setup = stats["proc_min"], stats["setup_min"]
         per_machine = []
         for m in range(len(proc)):
@@ -443,7 +557,12 @@ class SimWorld:
                  "setup_min": [0.0] * self.inst.n_machines,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
-                 "rework_events": 0, "pm_events": 0}
+                 "rework_events": 0, "pm_events": 0,
+                 # 物流侧约束的事件计数（⑨⑩⑪）
+                 "trips": 0, "charge_events": 0, "agv_fail_events": 0,
+                 "battery_min_kwh": float("inf"),
+                 "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
+                 "trans_evt": 0, "tasks_put": 0}
         env = simpy.Environment()
         inst = self.inst
         # 计划表：job -> [(mach, time)]（按 op_choices 或贪婪最短选择）
@@ -467,9 +586,18 @@ class SimWorld:
             tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
         for m in machines:
             env.process(m.run())
+        charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
+        fleet = self.layout.agvs or []
+        if len(fleet) != self.cfg.n_agv:      # 静默错误护栏：布局车队 ≠ 仿真车队
+            raise ValueError(
+                f"布局车队 {len(fleet)} 台 ≠ SimConfig.n_agv={self.cfg.n_agv}——"
+                "直接构造 SimWorld 时须传 sample_layout(..., n_agv=cfg.n_agv)")
         for a in range(self.cfg.n_agv):
-            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in,
-                               machines, self.g, zm, self.constraints, bound=bound).run())
+            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
+                               self.g, zm, self.constraints, fleet[a],
+                               np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
+                               chargers=self.layout.chargers, charger_res=charger_res,
+                               bound=bound).run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
         inject_q: list = []
@@ -495,6 +623,11 @@ class SimWorld:
                 "setup_minutes_total": float(sum(stats["setup_min"])),
                 "rework_events": stats["rework_events"],
                 "pm_events": stats["pm_events"],
+                "trips": stats["trips"], "charge_events": stats["charge_events"],
+                "agv_fail_events": stats["agv_fail_events"],
+                "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
+                                    else stats["battery_min_kwh"]),
+                "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
                 "fail_events": stats["fail_events"], "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
                 "horizon_hit": stats.get("horizon_hit", False),
@@ -528,7 +661,12 @@ class SimWorld:
                  "setup_min": [0.0] * self.inst.n_machines,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
-                 "rework_events": 0, "pm_events": 0}
+                 "rework_events": 0, "pm_events": 0,
+                 # 物流侧约束的事件计数（⑨⑩⑪）
+                 "trips": 0, "charge_events": 0, "agv_fail_events": 0,
+                 "battery_min_kwh": float("inf"),
+                 "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
+                 "trans_evt": 0, "tasks_put": 0}
         env = simpy.Environment()
         inst = self.inst
         plans = {}
@@ -547,9 +685,18 @@ class SimWorld:
         tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
         for m in machines:
             env.process(m.run())
+        charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
+        fleet = self.layout.agvs or []
+        if len(fleet) != self.cfg.n_agv:
+            raise ValueError(
+                f"布局车队 {len(fleet)} 台 ≠ SimConfig.n_agv={self.cfg.n_agv}——"
+                "直接构造 SimWorld 时须传 sample_layout(..., n_agv=cfg.n_agv)")
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                               self.g, zm, self.constraints, bound=True).run())
+                               self.g, zm, self.constraints, fleet[a],
+                               np.random.default_rng([seed_chain, 1000 + a]),
+                               chargers=self.layout.chargers, charger_res=charger_res,
+                               bound=True).run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
         for j in jkeys:
