@@ -33,10 +33,14 @@ def test_travel_time_is_small_fraction_of_makespan():
 
 @pytest.mark.unit
 def test_travel_time_equals_distance_matrix_exactly():
-    """行驶总时长必须**精确等于** Σ 距离矩阵最短路（Review Focus ④）。
+    """空载段 + 负载段必须**逐位等于** Σ 距离矩阵最短路，且**分账正确**（Review Focus ④）。
 
     这是防"索引用了机台号而非通道节点号"的唯一有效断言——旧版只断言上界，
     实测余量 3.7 倍，把 `dock_node` 换成机台号**照样通过**（P1a 评审 I3）。
+
+    P1b Task 2 加了空载段：n_agv=1 时任务按 `task_flow` 生成序 FIFO 执行，
+    故第 k 条任务的空载段 = 第 k−1 条任务的卸货点到第 k 条的取货点（首条无空载段）。
+    这里同时校验**总额**与**空载/负载分账**——只对总额会让"两段记反"蒙混过关。
     """
     # Arrange
     inst = load_mk("mk01")
@@ -47,14 +51,23 @@ def test_travel_time_equals_distance_matrix_exactly():
     # Act
     r = rollout(inst, seed_chain=1, cfg=cfg)
 
-    # Assert：对每条搬运任务逐条重算，求和后必须逐位相等
-    expected = 0.0
+    # Assert：对每条搬运任务逐条重算两段，求和后必须逐位相等
+    def _minutes(u: int, v: int) -> float:
+        return float(dm[u, v]) / cfg.eff_speed / cfg.agv_speed_mps / 60.0
+
+    loaded, empty, prev_dock = 0.0, 0.0, None
     for _job, _oi, frm_m, to_m in r["task_flow"]:
         a = lay.machines[frm_m].dock_node
         b = lay.machines[to_m].dock_node
-        expected += float(dm[a, b]) / cfg.eff_speed / cfg.agv_speed_mps / 60.0
+        loaded += _minutes(a, b)
+        if prev_dock is not None:
+            empty += _minutes(prev_dock, a)
+        prev_dock = b
     assert len(r["task_flow"]) > 0, "本 episode 应有搬运任务"
-    assert r["travel_time_total"] == pytest.approx(expected, rel=1e-9)
+    assert r["travel_time_total"] == pytest.approx(loaded + empty, rel=1e-9)
+    assert r["energy_breakdown"]["agv_states_min"]["loaded"] == pytest.approx(loaded, rel=1e-9)
+    assert r["energy_breakdown"]["agv_states_min"]["empty"] == pytest.approx(empty, rel=1e-9)
+    assert empty > 0.0, "空载段未接入（v0 的 AGV 瞬移取货问题复发）"
 
 
 @pytest.mark.unit

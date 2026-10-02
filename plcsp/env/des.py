@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import simpy
+from .corridors import shortest_node_path
 from .layout import Layout, MachinePad
 from .instances import Instance
 
@@ -63,8 +64,10 @@ class SimConfig:
     zone_wait_limit: float = 8.0     # 区段申请等待上限 [min]（超时→退避重试）
     zone_hold_limit: float = 8.0  # 区段申请等待上限（超时→释放重试）[min]
     repair_time: float = 5.0      # [min]
-    due_factor: float = 1.8       # ⚠️ 已废弃（见 §3.5，改用 τ·M_ref）
-    energy_power: float = 1.0     # ⚠️ 已废弃（见 §3.4，改用 M2 能耗模型）
+    due_factor: float = 1.8       # ⚠️ 已废弃（见 §3.5，改用 τ·M_ref）——活代码不再读它
+    energy_power: float = 1.0     # ⚠️ **已废弃**（P1b Task 2，2026-10-02）：旧式"单位时间能耗代理"
+                                  #   算出的是时间不是能量。活代码不再读它；能耗走 `plcsp/energy.py`
+                                  #   的 M2 模型。字段保留仅供旧脚本构造 cfg 时不报错。
     aisle_width: float = 1.5      # 通道宽（米）：窄通道限速 = Phase A2 真权衡来源
 
     @property
@@ -126,6 +129,8 @@ class MachineSim:
                             yield self.env.timeout(self.cfg.repair_time)   # 中断-恢复
                         t += seg
                 self.stats["process_time"] += op.time
+                self.stats["proc_min"][self.pad.id] += op.time   # M2 能耗：按机位计的切削时长
+                # 换型时长（⑤ setup_time）在 Task 4 接入；此处仅占位，保持三态口径统一
             self.stats["ops_done"] = self.stats.get("ops_done", 0) + 1
             if is_last:
                 self.completes[job] = self.env.now      # 末工序完成即出库（不进输出缓冲/无搬运）
@@ -224,12 +229,15 @@ class ZoneManager:
 
 
 class AgvSim:
-    """AGV：取任务 → 按格点距离行驶 → 投递。
+    """AGV：待命 → 空载驶向取货机台 → 装载驶向卸货机台 → 投递。
 
-    ⚠️ 2026-10-02：**区段管制（ZoneManager）已整条移除**。实测表明：在网格布局 + 现实车队规模下，
-    通道争用占比 ≤0.07%（对照：旧 line 单环上 MK01 n_agv=4 是 32%）。结论——
-    **物流的瓶颈是车辆数量（任务排队），不是通道容量（路口争用）**。
-    故 AGV 不再申请区段，一次行驶到底。见 progress-log §十五 与 spec §3.3。
+    **两个行驶段**（P1b Task 2 补齐）：
+    - **空载段**：从当前停位开到取货点。v0 **缺失此段**（AGV 从上一个卸货点"瞬移"到取货点），
+      等于凭空多出运力、且使 AGV 只有"负载"一个状态。补齐后运输负荷才真实。
+    - **负载段**：取货点 → 卸货点，沿用格点最短路。
+
+    区段管制（① congestion）**可开关**：开时逐段申请/释放区段（持当前 → 申请下一 → 放上一），
+    等待环或超时则回队重试；关时不申请，按距离一次到底。
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
@@ -240,61 +248,79 @@ class AgvSim:
         self.g, self.zm = graph, zm
         self.congestion = congestion        # ① 关 → 无区段管制
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
+        self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
+
+    def _seg_min(self, u: int, v: int) -> float:
+        """节点 u→v 的行驶时长 [min]。距离矩阵给的是最短路，故 u,v 不必相邻。"""
+        return (float(self.m_dm[u, v])
+                / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
+
+    def _drive(self, src: int, dst: int, leg: str):
+        """把车从 `src` 节点开到 `dst` 节点，行驶时长累入 `leg` 态（"empty" / "loaded"）。
+
+        返回 `(ok, end_node)`。`ok=False` = 区段争用超时或等待环——此时车停在 `end_node`
+        且**已释放**持有的区段；**失败前已走的路程照样计入时长**（否则能耗会被低估）。
+        区段管制关闭时按最短路一次到底。
+        """
+        if src == dst:
+            return True, dst
+        if not self.congestion:                 # ① 关：不申请区段，按距离直行
+            seg = self._seg_min(src, dst)
+            yield self.env.timeout(seg)
+            self.stats["travel_time"] += seg
+            self.stats[f"agv_{leg}_min"] += seg
+            self.stats["moves"] += 1
+            return True, dst
+        # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
+        path = shortest_node_path(self.g, src, dst)
+        zseq = [self.zm.zone_of[p] for p in path]
+        zseq = [z for i, z in enumerate(zseq) if i == 0 or z != zseq[i - 1]]   # 合并同一区段的连续段
+        granted, cycle = yield from self.zm.wait_zone(self.aid, zseq[0], self.cfg.zone_wait_limit)
+        if cycle or not granted:
+            return False, src
+        travel, end, prev_z = 0.0, src, zseq[0]
+        for pi in range(len(path) - 1):
+            z = self.zm.zone_of[path[pi + 1]]
+            if z != prev_z:
+                granted, cycle = yield from self.zm.wait_zone(self.aid, z, self.cfg.zone_wait_limit)
+                if cycle or not granted:
+                    self.zm.release(self.aid, prev_z)
+                    self.stats["travel_time"] += travel
+                    self.stats[f"agv_{leg}_min"] += travel
+                    return False, end
+                self.zm.release(self.aid, prev_z)
+                prev_z = z
+            seg = self._seg_min(path[pi], path[pi + 1])
+            yield self.env.timeout(seg)
+            travel += seg
+            end = path[pi + 1]
+            self.stats["moves"] += 1
+        self.zm.release(self.aid, prev_z)
+        self.stats["travel_time"] += travel
+        self.stats[f"agv_{leg}_min"] += travel
+        return True, dst
 
     def run(self):
         q = self.tasks_in[self.aid] if self.bound else self.tasks_in
         while True:
             frm, to, item, path = yield q.get()
             self.stats["tasks_get"] = self.stats.get("tasks_get", 0) + 1
-            if not self.congestion:                 # ① 关：不申请区段，按距离直行
-                a = self.machines[frm].pad.dock_node
-                b = self.machines[to].pad.dock_node
-                seg = (float(self.m_dm[a, b])
-                       / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
-                yield self.env.timeout(seg)
-                self.stats["travel_time"] += seg
-                self.stats["moves"] += 1
-                self.stats["agv_del"][self.aid] += 1
-                self.stats["agv_pos"][self.aid] = to
-                while len(self.machines[to].in_q.items) >= self.machines[to].in_q.capacity:
-                    yield self.env.timeout(self.cfg.zone_hold)
-                yield self.machines[to].in_q.put(item)
-                self.stats["deliveries"] += 1
-                continue
-            # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
-            zseq = [self.zm.zone_of[p] for p in path]
-            zseq = [z for i, z in enumerate(zseq) if i == 0 or z != zseq[i - 1]]   # 合并同一区段的连续段
-            granted, cycle = yield from self.zm.wait_zone(self.aid, zseq[0],
-                                                          self.cfg.zone_wait_limit)
-            if cycle or not granted:
-                self.stats["requeue"] = self.stats.get("requeue", 0) + 1
-                q.put((frm, to, item, path))
-                continue
-            travel = 0.0
-            prev_z = zseq[0]
-            ok = True
-            for pi in range(len(path) - 1):
-                z = self.zm.zone_of[path[pi + 1]]
-                if z != prev_z:
-                    granted, cycle = yield from self.zm.wait_zone(self.aid, z,
-                                                                  self.cfg.zone_wait_limit)
-                    if cycle or not granted:
-                        ok = False
-                        break
-                    self.zm.release(self.aid, prev_z)
-                    prev_z = z
-                seg = (float(self.m_dm[path[pi], path[pi + 1]])
-                       / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
-                yield self.env.timeout(seg)
-                travel += seg
-                self.stats["moves"] += 1
-            self.zm.release(self.aid, prev_z)
+            a = self.machines[frm].pad.dock_node
+            b = self.machines[to].pad.dock_node
+            # ── 空载段：当前停位 → 取货点 ──
+            if self.pos_node is not None and self.pos_node != a:
+                ok, self.pos_node = yield from self._drive(self.pos_node, a, "empty")
+                if not ok:
+                    self.stats["requeue"] = self.stats.get("requeue", 0) + 1
+                    q.put((frm, to, item, path))
+                    continue
+            # ── 负载段：取货点 → 卸货点 ──
+            ok, self.pos_node = yield from self._drive(a, b, "loaded")
             if not ok:
                 yield self.env.timeout(self.cfg.zone_hold)
                 self.stats["requeue"] = self.stats.get("requeue", 0) + 1
                 q.put((frm, to, item, path))
                 continue
-            self.stats["travel_time"] += travel
             self.stats["agv_del"][self.aid] += 1      # L 层状态轨迹（负载差/最后位置）
             self.stats["agv_pos"][self.aid] = to
             # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
@@ -319,6 +345,40 @@ class SimWorld:
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         return {j: self.cfg.due_factor * sum(t for _, t in ops) for j, ops in plans.items()}
 
+    def _energy_report(self, stats: dict, makespan: float) -> dict:
+        """三态时长 → M2 能耗（spec §3.4，引证 GFJSPT-MMRS）。
+
+        **占用时长的口径**（关键，防"状态统计漏一段"）：
+        - 机床：只有 `proc_min`（切削）与 `setup_min`（换型，Task 4 接入）是**显式**累计的，
+          其余全部归入 `idle_min`，由**闭合恒等式**给出：`makespan − proc − setup`。
+          这样**三个状态之和恒等于在场时长**，不留残差。故障修复期、缓冲满阻塞期、
+          等待期都自动落在空闲态——物理上也都对（机床通电但主轴不切削）。
+        - AGV：`empty_min` / `loaded_min` 显式累计，`idle_min = makespan × 车数 − 两者之和`。
+          待命、等待取货、缓冲区满让步、区段争用等待一并归入空闲态（车辆静止即待机功率）。
+
+        `horizon_hit` 时 makespan 可能小于某台机的加工结束时刻，故 `idle` 取 `max(0, ·)` 兜底。
+        """
+        from ..energy import (machine_energy_kwh, machine_params_for, agv_energy_kwh,
+                              total_energy_kwh)
+        proc, setup = stats["proc_min"], stats["setup_min"]
+        per_machine = []
+        for m in range(len(proc)):
+            p = machine_params_for(m, len(proc))
+            idle = max(0.0, makespan - proc[m] - setup[m])
+            per_machine.append(machine_energy_kwh(proc[m], idle, setup[m],
+                                                  idle_kw=p["idle_kw"], proc_kw=p["proc_kw"],
+                                                  setup_kw=p["setup_kw"]))
+        machine_kwh = float(sum(per_machine))
+        agv_idle = max(0.0, makespan * self.cfg.n_agv
+                       - stats["agv_empty_min"] - stats["agv_loaded_min"])
+        agv_kwh = agv_energy_kwh(agv_idle, stats["agv_empty_min"], stats["agv_loaded_min"])
+        return {"machine_kwh": machine_kwh, "agv_kwh": agv_kwh,
+                "shop_kwh": total_energy_kwh(0.0, 0.0, makespan),   # 仅车间固定项
+                "total_kwh": total_energy_kwh(machine_kwh, agv_kwh, makespan),
+                "machine_kwh_per_machine": per_machine,
+                "agv_states_min": {"idle": agv_idle, "empty": stats["agv_empty_min"],
+                                   "loaded": stats["agv_loaded_min"]}}
+
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
@@ -332,7 +392,11 @@ class SimWorld:
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
-                 "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv}
+                 "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv,
+                 # M2 能耗的三态时长（P1b Task 2）：机床按机位计，AGV 按车队合计
+                 "proc_min": [0.0] * self.inst.n_machines,
+                 "setup_min": [0.0] * self.inst.n_machines,
+                 "agv_empty_min": 0.0, "agv_loaded_min": 0.0}
         env = simpy.Environment()
         inst = self.inst
         # 计划表：job -> [(mach, time)]（按 op_choices 或贪婪最短选择）
@@ -378,9 +442,11 @@ class SimWorld:
                                                               # until：时间比较恒真，须以完成度判）
         due = self._due(plans)
         makespan = (max(completes.values()) if completes else env.now)
+        energy = self._energy_report(stats, makespan)
         return {"makespan": makespan,
                 "completes": dict(completes),          # 每作业完工时刻（交期校准 / TWT 需要）
-                "energy": (stats["process_time"] + stats["travel_time"]) * self.cfg.energy_power,
+                "energy": energy["total_kwh"],         # M2 引证模型（spec §3.4），单位 kWh
+                "energy_breakdown": energy,
                 "fail_events": stats["fail_events"], "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
                 "horizon_hit": stats.get("horizon_hit", False),
@@ -390,9 +456,6 @@ class SimWorld:
                 "dbg": {k: v for k, v in stats.items()
                         if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue")},
                 "travel_time_total": float(stats["travel_time"]),
-                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
-                              "max": float(max(zm.waits)) if zm.waits else 0.0},
-                "n_zones": zm.n,
                 "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
                               "max": float(max(zm.waits)) if zm.waits else 0.0},
                 "n_zones": zm.n}
@@ -411,7 +474,11 @@ class SimWorld:
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
-                 "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv}
+                 "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv,
+                 # M2 能耗的三态时长（P1b Task 2）：机床按机位计，AGV 按车队合计
+                 "proc_min": [0.0] * self.inst.n_machines,
+                 "setup_min": [0.0] * self.inst.n_machines,
+                 "agv_empty_min": 0.0, "agv_loaded_min": 0.0}
         env = simpy.Environment()
         inst = self.inst
         plans = {}
@@ -449,9 +516,11 @@ class SimWorld:
         stats["horizon_hit"] = len(completes) < inst.n_jobs   # 同 run()（原：run_gated 漏设旗标）
         due = self._due(plans)
         makespan = (max(completes.values()) if completes else env.now)
+        energy = self._energy_report(stats, makespan)
         return {"makespan": makespan,
                 "completes": dict(completes),          # 每作业完工时刻（同 run()）
-                "energy": (stats["process_time"] + stats["travel_time"]) * self.cfg.energy_power,
+                "energy": energy["total_kwh"],         # M2 引证模型（同 run()）
+                "energy_breakdown": energy,
                 "fail_events": stats["fail_events"],
                 "tardy": sum(1 for j in plans if j in completes and completes[j] > due[j]),
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
