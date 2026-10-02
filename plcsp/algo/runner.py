@@ -8,7 +8,8 @@
 - ckpt = {"step": int, "model": state_dict, "best": float, "seed0": int}
   每 save_every 步写 checkpoints/<run_id>/ckpt.pt；metrics.ndjson 每步追加一行（增量，可断外部分析）；
 - 恢复：resume_training(run_dir) → (policy, ckpt, step)；step 序列续跑（不追求逐位复现：
-  采样依赖全局 np RNG，ckpt 语义 = 续训而非确定性重放——论文口径已声明）。
+  ckpt 只存模型权重与步号、**不还原 Adam 状态**，续跑以当次 lr 重建优化器 ⇒ "续跑段"与
+  "一次跑完"不同。单次连续运行本身是**逐位可复现**的（动作采样自评审 I-3 起由 seed 派生）。
 
 用法：
     run_id = f"{algo}-G{G}-s{seed}"
@@ -127,7 +128,7 @@ if __name__ == "__main__":
     dm = dock_distance_matrix(build_corridor_graph(lay))
     ctx = norm_context(inst, lay, m_ref=100.0)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=cfg.n_agv)          # 训练必须带编码器
+    pol = PolicyNet(enc=LayoutEncoder())                           # 训练必须带编码器
     kw = dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=4)
     d = Path(tempfile.mkdtemp()) / "run_selfcheck"
     run_training(pol, inst, steps=5, step_fn=joint_chain_step, step_kwargs=kw,

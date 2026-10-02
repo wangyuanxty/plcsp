@@ -56,17 +56,6 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
         seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
 
 
-def rollout_evaluate(inst: Instance, plan: list[int] | None, seed: int = 0,
-                     layout_type: str = "line", seed_layout: int = 1) -> float:
-    """M3 训练环叶子评估：给定机台计划 → 一次 episode → 奖励（负 makespan，M3b 换四元权重）。
-
-    同 (plan, seed, seed_layout) → 同值（确定性回放——树采样重放安全）。
-    """
-    r = rollout(inst, layout_type=layout_type, seed_layout=seed_layout,
-                seed_chain=seed, op_choices=plan)
-    return -float(r["makespan"])
-
-
 @dataclass
 class SimConfig:
     n_agv: int = 3          # spec §6.3 主实验值（网格上按边际收益拐点重标）
@@ -859,7 +848,7 @@ class SimWorld:
         jkeys = list(plans.keys())
         inject_q: list = []
         for j in jkeys:
-            m0, t0 = self._pick_machine(j, 0, None, False, plans, None)   # 离线：策略/日志不用
+            m0, t0 = self._pick_machine(j, 0, None, False, plans)         # 离线：不调策略
             env.process(self._release(env, machines[m0].in_q,
                                       (j, 0, OpLite(t0), len(inst.jobs[j]) == 1)))
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
@@ -917,10 +906,9 @@ class SimWorld:
         此刻各队列皆空；同刻投放的作业共享同一初始视界）。`plans` 随之退化为**决策日志**
         （`plans[job][oi]` 在决策后写入），故**决策前不得读它**。
 
-        决策日志回传：`dict["decision_log"]`，条目按首元素 kind 分派——
-        `("S", snap, job, oi, cand, choice)` / `("L", snap, job, (frm, to, oi+1), cand_v, agv)`
-        （`oi+1` = 目标工序序号；`cand_v` = 全车队）。
-        ⚠️ 只记**原始快照**（不构造特征：`env/` 不得依赖 `nn/`）——快照→特征在 `algo/` 层做。
+        ⚠️ 两个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
+        `algo/` 层做。决策留痕同理：`group_rel.roll_chain` 自记自己的 `Decision` 链
+        （旧的 `dict["decision_log"]` 回传因零消费者已删，评审 M-2）。
         """
         if policy_l is None and not online_s:
             return self.run(seed_chain=seed_chain, op_choices=op_choices)
@@ -967,13 +955,12 @@ class SimWorld:
             env.process(agv.run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
-        dec_log: list[tuple] = []               # ⚠️ 必须在投放点决策**之前**建好（S 层留痕）
         for j in jkeys:
-            m0, t0 = self._pick_machine(j, 0, policy_s, online_s, plans, dec_log)
+            m0, t0 = self._pick_machine(j, 0, policy_s, online_s, plans)
             env.process(self._release(env, machines[m0].in_q,
                                       (j, 0, OpLite(t0), len(inst.jobs[j]) == 1)))
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
-                                      bound=True, policy_l=policy_l, dec_log=dec_log,
+                                      bound=True, policy_l=policy_l,
                                       policy_s=policy_s, online_s=online_s))
         # horizon 的工时上界：**按最短候选**估（在线时 `plans` 是决策日志、读不到时长；
         # 离线且用默认贪婪计划时该式 = 各工序所选时长之和，与旧式逐位相同）。
@@ -999,20 +986,18 @@ class SimWorld:
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
-                "travel_time_total": float(stats["travel_time"]),
-                "decision_log": dec_log}
+                "travel_time_total": float(stats["travel_time"])}
 
-    def _pick_machine(self, job: int, oi: int, policy_s, online_s: bool, plans,
-                      dec_log: list | None) -> tuple[int, float]:
+    def _pick_machine(self, job: int, oi: int, policy_s, online_s: bool,
+                      plans) -> tuple[int, float]:
         """**派工点**（P2 Task 5，spec §5.3.2）：选机台 + 取该候选上的加工时长。
 
         两个派工点（投放点的首工序、transporter 的下一工序）**共用此一处**，故"在线/离线"
         只有这一个分支——不存在"改了一处漏了另一处"的形状。
 
-        在线（`online_s=True`）：把**此刻的活状态**快照交给 `policy_s(snap, job, oi, cand)`，
-        并把 `("S", snap, job, oi, cand, choice)` 追加进 `dec_log`；`plans[job][oi]` 是决策
-        日志（决策后写入）。离线（`online_s=False`）：读预计算的 `plans`——不调策略、不取
-        快照、不写日志，**逐位复现旧行为**。
+        在线（`online_s=True`）：把**此刻的活状态**快照交给 `policy_s(snap, job, oi, cand)`；
+        `plans[job][oi]` 随决策写入（决策前不得读它）。离线（`online_s=False`）：读预计算的
+        `plans`——不调策略、不取快照，**逐位复现旧行为**。
 
         ⚠️ `policy_s` 返回非候选机台 → **显式报错**（静默回退会掩盖策略/候选集不一致，
         让整条链的 logp 与动作错位而无人察觉）。
@@ -1025,8 +1010,7 @@ class SimWorld:
             if choice not in cand:
                 raise ValueError(f"policy_s 选了非候选机台 {choice}；"
                                  f"job={job} oi={oi} 候选={cand}")
-            dec_log.append(("S", snap, job, oi, tuple(cand), choice))
-            plans[job][oi] = choice                       # 决策日志：决策后写入
+            plans[job][oi] = choice                       # 计划表随决策写入（决策前不得读）
         else:
             choice = plans[job][oi]
         t = next(t for m, t in alts if m == choice)
@@ -1038,8 +1022,7 @@ class SimWorld:
 
     def _transporter(self, env, events_q, tasks_in, plans, machines, stats, inject_q,
                      bound: bool = False, agv_phi: list[int] | None = None,
-                     policy_l=None, dec_log: list | None = None,
-                     policy_s=None, online_s: bool = False):
+                     policy_l=None, policy_s=None, online_s: bool = False):
         """机台完成事件：非末工序 → 从其输出缓冲取出 → 生成下一工序搬运任务（目标=下一工序机台）。
 
         **这里的取事件处即"下一工序的派工点"**（P2 Task 5）：目标机台由 `_pick_machine` 决定
@@ -1062,7 +1045,7 @@ class SimWorld:
             if is_last:
                 if inject_q:
                     j2 = inject_q.pop(0)
-                    m0, t0 = self._pick_machine(j2, 0, policy_s, online_s, plans, dec_log)
+                    m0, t0 = self._pick_machine(j2, 0, policy_s, online_s, plans)
                     # 注入用独立进程（非 yield 阻塞）：transporter 若在 in_q 满机上阻塞 put，
                     # 事件队列头被卡死 → 输出缓冲无人取 → 机器永不释放空间 → 永久死锁
                     # （jobs=9/10 quiescence 实测）。env.process 与首批注入同模式（_release）。
@@ -1072,7 +1055,7 @@ class SimWorld:
             yield machines[frm_idx].out_q.get()
             # 下一工序的机台在此刻决策（工件已离开机台、即将入下一机台的输入缓冲）
             n_ops = len(self.inst.jobs[job])
-            nxt_m, nxt_t = self._pick_machine(job, oi + 1, policy_s, online_s, plans, dec_log)
+            nxt_m, nxt_t = self._pick_machine(job, oi + 1, policy_s, online_s, plans)
             from .corridors import shortest_node_path
             _path = shortest_node_path(self.g, machines[frm_idx].pad.dock_node,
                                        machines[nxt_m].pad.dock_node)   # AGV 实际经过的节点序列
@@ -1095,8 +1078,6 @@ class SimWorld:
                 if agv not in cand_v:
                     # 同 policy_s：非候选**显式报错**——负索引会静默回绕到别的车
                     raise ValueError(f"policy_l 派了不存在的车 {agv}；候选={cand_v}")
-                # 决策日志（P2 Task 5）：只记**原始快照**——不构造特征（env/ 不得依赖 nn/）
-                dec_log.append(("L", snap, job, (frm_idx, nxt_m, oi + 1), tuple(cand_v), agv))
                 yield tasks_in[agv].put(task)
             elif bound:
                 n_agv = len(tasks_in)

@@ -8,19 +8,20 @@
 （`plcsp/tests/test_end_to_end_a.py`）。本脚本要能**后台跑**、**断点续**（`--resume`，
 ckpt 每 `--save-every` 步落盘）。
 
-⚠️ **固定 seed 跨进程不可复现**（Task 7 实测记录，**论文口径必须照此声明**）：
-`roll_chain` / `joint_chain_step` 的**动作采样**走**全局 torch RNG**（`torch.multinomial`），
-**不是**种子流——`--seed` 只决定 `joint_chain_step(seed=...)` 里传给仿真的 `seed_chain`
-（SimPy 的扰动流），**不锁定动作采样**。故：
+⚠️ **`--seed` 的语义（评审 I-3 修后：可复现）**——`--seed` 同时锁定三条随机来源：
 
-- 同一份 ckpt + 同一 `--seed` **跨进程**跑出来的曲线**不会逐位相同**；
-- 论文里"同 seed 复跑"的对照（A/B、消融、种子矩阵）必须在**同一进程、同一调用序列**下做
-  ——本仓的正例是 `plcsp/tests/test_end_to_end_a.py` 的模块级 fixture（训练前
-  `torch.manual_seed(0)`，同一序列一次跑完）；
-- 跨进程只保证**统计可比**（多 seed 取均值/分布），不保证逐位复现；
-- **出路**（要跨进程逐位复现时）：在训练开始前**自己钉** `torch.manual_seed(...)`——钉完之后
-  整条序列（网络初始化 + 每步的动作采样）都被确定，跨进程即可复现。本脚本**故意不钉**：
-  `--seed` 只表达"仿真扰动流"这一个语义，把它同时当动作种子会让两种随机来源纠缠在一起。
+1. **网络初始化**：`main()` 入口 `torch.manual_seed(args.seed)`（在 `build_setup` 构造
+   `PolicyNet` **之前**）；
+2. **仿真扰动流**：第 s 步第 g 条链的 `seed_chain = (args.seed + s) * SEED_STRIDE + g`
+   （`runner.py` 传 `seed0+s`；步长常量在 `group_rel.py`）；
+3. **动作采样**：`joint_chain_step` 用 `torch.Generator().manual_seed(seed0+s)` 采样并透传给
+   `roll_chain`——**不再走全局 torch RNG**。旧实现（Task 7）走 `torch.multinomial` 的全局流，
+   `--seed` 锁不住动作 ⇒ 多进程各跑各的、且**不可复现**，"同 seed 对照 / 种子矩阵"两件事
+   都不成立。
+
+故**同 seed 同调用序列 ⇒ 逐位可复现**，跨进程亦然（CPU 上 torch 的 RNG 由 seed 完全确定；
+SimPy + 每条链独立的 numpy 流亦然）。**唯一例外**：`--resume` 续跑——ckpt 不存优化器状态、
+`--lr` 以当次为准，故"续跑段"与"一次跑完"不同（种子对照请用同一起点、同一预算）。
 
 输出**一律落 `run_dir`（默认 = **仓库根**的 `checkpoints/a_<inst>`，锚 `__file__` 而非 CWD，
 故在包目录里执行也不会建出包内 `checkpoints/`；该目录已被 `.gitignore` 排除），不落包目录**：
@@ -42,7 +43,9 @@ import argparse
 from pathlib import Path
 from statistics import mean, pstdev
 
-from .algo.group_rel import roll_chain
+import torch
+
+from .algo.group_rel import SEED_STRIDE, roll_chain
 from .algo.policy import PolicyNet
 from .algo.runner import run_training
 from .env.corridors import build_corridor_graph, dock_distance_matrix
@@ -54,11 +57,31 @@ from .nn.encoder import LayoutEncoder
 from .nn.state_emb import norm_context
 
 # 评估种子起点。⚠️ **必须避开训练用过的扰动流**（评审 F1 修的就是这里）：`joint_chain_step`
-# 第 s 步第 g 条链用 `seed_chain = s*1000 + g`（`group_rel.py`），故训练流落在
-# `[seed0*1000, (seed0+steps)*1000)`。**旧值 10_000 与"第 10 步"的训练流正面相撞**
-# （G=8 时 10000..10007 全被第 10 步用过 ⇒ 5 个评估流全是训练流），评估集与训练集不分离会把
-# 论文 setup 节那句话写错。取 **10**6**：`steps < 1000` 时恒安全。
+# 第 s 步第 g 条链用 `seed_chain = (seed0+s)*SEED_STRIDE + g`（`runner.py` 传 `seed0+s`），
+# 故训练流落在 `[seed0*1000, (seed0+steps)*1000)`。**旧值 10_000 与"第 10 步"的训练流正面
+# 相撞**（G=8 时 10000..10007 全被第 10 步用过 ⇒ 5 个评估流全是训练流），评估集与训练集不
+# 分离会把论文 setup 节那句话写错。取 **10**6**（本常量唯一定义处，测试从本模块导入）。
+# ⚠️ 安全条件是 **`seed0 + steps ≤ 1000`**，**不是** `steps < 1000`（评审 I-2：训练流随
+# `--seed` 整体平移；`--seed 700 --steps 400` 这种组合旧条件说"安全"（400<1000），实际
+# 训练流最高到 1099000+G-1，正面撞上评估流——同一个 bug 在 seed 维度复发）。
+# 该条件由 `assert_eval_seed_isolated()` 在入口**硬查**，不静默。
 EVAL_SEED_BASE = 10 ** 6
+
+
+def assert_eval_seed_isolated(seed0: int, steps: int) -> None:
+    """训练扰动流与评估扰动流不得相交（="评估集与训练集分离"成立的前提）。
+
+    训练流 = `(seed0+s)*SEED_STRIDE + g`（s < steps，g < G）⇒ 上界 `< (seed0+steps)*1000`；
+    评估流自 `EVAL_SEED_BASE = 10**6` 起。条件：`(seed0 + steps) * SEED_STRIDE ≤ EVAL_SEED_BASE`
+    （G ≤ SEED_STRIDE 时充分）。不满足则**显式报错**——`--seed 700 --steps 301` 正是旧注释
+    `steps < 1000` 放过的反例（700+300 = 1000 恰在边界上，再多一步就越界）。
+    """
+    if (seed0 + steps) * SEED_STRIDE > EVAL_SEED_BASE:
+        raise ValueError(
+            f"--seed {seed0} 配 --steps {steps}：训练扰动流最高到 "
+            f"{(seed0 + steps) * SEED_STRIDE - 1}，会与评估流 [{EVAL_SEED_BASE}, +∞) 相交"
+            f"——评估集与训练集不再分离。请满足 seed0 + steps ≤ "
+            f"{EVAL_SEED_BASE // SEED_STRIDE}（减小 --seed 或 --steps）。")
 
 
 def build_setup(inst_name: str, cfg: SimConfig | None = None):
@@ -76,7 +99,7 @@ def build_setup(inst_name: str, cfg: SimConfig | None = None):
     c = cfg or SimConfig()
     lay = sample_layout(inst.n_machines, seed=0, n_agv=c.n_agv)
     g = build_corridor_graph(lay)
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=c.n_agv)
+    pol = PolicyNet(enc=LayoutEncoder())        # 车队规模由 seg 定，网络无 n_agv 形参（M-4）
     ctx = norm_context(inst, lay, m_ref=reference_makespan(inst, c))
     return inst, lay, dock_distance_matrix(g), c, ctx, pol
 
@@ -97,7 +120,8 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=300, help="训练步数（MK01/G=8 约 18 s/步）")
     ap.add_argument("--G", type=int, default=8, help="组大小（J=1，预算全给 G）")
     ap.add_argument("--lr", type=float, default=3e-4, help="Adam 学习率（仅首步生效）")
-    ap.add_argument("--seed", type=int, default=0, help="仿真扰动流种子基（不锁动作采样）")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="随机种子：同时锁定网络初始化/仿真扰动流/动作采样（见模块 docstring）")
     ap.add_argument("--run-dir", default=None,
                     help="默认 <仓库根>/checkpoints/a_<inst>（锚 __file__，不是 CWD）")
     ap.add_argument("--save-every", type=int, default=10)
@@ -114,6 +138,11 @@ def main() -> None:
         print(f"[m13] ⚠️ --resume 但 {run_dir / 'ckpt.pt'} 不存在：将从 step 0 重跑，且 "
               "metrics.ndjson 是**追加**模式 ⇒ 会出现重复 step 号（按 step 取最新一行）。",
               flush=True)
+    if args.eval_every > 0:                  # 只有真会用评估流时才查（不开评估 = 该条件空真）
+        assert_eval_seed_isolated(args.seed, args.steps)
+    # ⚠️ 必须在 build_setup **之前**：`PolicyNet` 的初始化吃全局 torch RNG。
+    #    动作采样自评审 I-3 起由 `seed0+s` 派生的 `torch.Generator` 负责，与本流互不干扰。
+    torch.manual_seed(args.seed)
     inst, lay, dm, cfg, ctx, pol = build_setup(args.inst)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
@@ -121,7 +150,8 @@ def main() -> None:
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ReferenceObjectives.of(inst, cfg).as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
-    print("[m13] ⚠️ 动作采样走全局 torch RNG：跨进程不可逐位复现（见模块 docstring）", flush=True)
+    print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
+          "（跨进程亦然；唯一例外是 --resume 续跑，见模块 docstring）", flush=True)
 
     run_training(pol, inst, steps=args.steps,
                  step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=args.G, lr=args.lr),

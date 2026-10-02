@@ -37,7 +37,7 @@ def _enc_inputs(n_m=6, n_b=10, n_v=3):
 @pytest.mark.unit
 def test_both_heads_read_the_same_encoder():
     """⚠️ Review Focus #5：L 头必须走编码器——这是'联合链'的前提。"""
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=3)
+    pol = PolicyNet(enc=LayoutEncoder())
     tok_feat, seg = _enc_inputs()
     tok, _ = pol.forward_enc(tok_feat, seg)
     idx = v_token_index(seg)
@@ -49,7 +49,7 @@ def test_both_heads_read_the_same_encoder():
 @pytest.mark.unit
 def test_l_head_gradient_reaches_encoder():
     """⚠️ Review Focus #5：从 L 头反传，编码器参数必须有非零梯度（否则'联合'是假的）。"""
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=3)
+    pol = PolicyNet(enc=LayoutEncoder())
     tok_feat, seg = _enc_inputs()
     tok, _ = pol.forward_enc(tok_feat, seg)
     idx = v_token_index(seg)
@@ -67,7 +67,7 @@ def test_candidate_features_change_the_score():
     候选特征是本仓"消灭死维"纪律下的关键通路：⑤ 换型代价（S 头，`(机台,作业)` 的交互量）与
     "派最近的车"（L 头）都只能走这里（spec §5.3.1②）；恒零的死维等于该通路不存在。
     """
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=3)
+    pol = PolicyNet(enc=LayoutEncoder())
     tok_feat, seg = _enc_inputs()
     tok, _ = pol.forward_enc(tok_feat, seg)
     idx = torch.tensor(v_token_index(seg))

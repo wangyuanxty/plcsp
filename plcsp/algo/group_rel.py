@@ -39,14 +39,17 @@ from ..nn.features import NormContext
 from ..nn.state_emb import build_tok
 
 
-def _z(vals: np.ndarray, mode: str) -> np.ndarray:
-    if mode == "mean":
-        return vals - vals.mean()
-    if mode == "loo":
-        n = len(vals)
-        if n <= 1:
-            return vals.copy()
-        return np.array([vals[i] - (vals.sum() - vals[i]) / (n - 1) for i in range(n)])
+# 训练流步长：第 s 步第 g 条链的仿真扰动种子 = (seed0+s)*SEED_STRIDE + g。`m13_train_a` 的
+# "评估流不得与训练流相交"检查复用此常量（单一来源，避免两处漂移）。
+SEED_STRIDE = 1000
+
+
+def _z(vals: np.ndarray) -> np.ndarray:
+    """组内 z 化（**唯一口径**）：(v − mean) / (std + eps)。
+
+    eps 防"全同奖励"的 0 方差（NaN）。旧实现另带 `mean` / `loo` 两个 mode 分支——**全仓零
+    调用点**（唯一调用方传的就是 "z"），已删（评审 M-6）。
+    """
     return (vals - vals.mean()) / (vals.std() + 1e-9)
 
 
@@ -136,7 +139,8 @@ class Decision:
 
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                policy: PolicyNet, seed: int, ctx: NormContext,
-               sample: bool = True) -> tuple[list[Decision], dict]:
+               sample: bool = True,
+               generator: torch.Generator | None = None) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
     ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
@@ -150,9 +154,13 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
        `policy_l` 契约在 Task 7 由 `(snap, frm, to, oi, cand)` 扩为 `(snap, job, frm, to, oi, cand)`
        ——用 `(frm, to, oi)` 反查作业**多义**（实测 MK01 51/112、MK10 538/985 个键歧义），
        静默取错作业 = 换型特征错，故走显式契约。
+     ⚠️ **动作采样流**（评审 I-3）：`generator=None` ⇒ 按 `torch.Generator().manual_seed(seed)`
+        现建——同 seed 同调用序列的动作**逐位相同**；显式传入者自备种子（`joint_chain_step`
+        自建一条并透传，组内 G 条链顺序共享）。`sample=False`（argmax）不消费该流。
     返回 (决策序列, `run_gated` 的 metrics)。
     """
     decisions: list[Decision] = []
+    gen = generator if generator is not None else torch.Generator().manual_seed(seed)
     world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout))
 
     def _act(kind: str, snap, feat: list[float], cand_feat: np.ndarray,
@@ -169,7 +177,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
             # 用 log_softmax（而非 softmax）取样：同一遍里就拿到所取动作的 log 概率
             # （`Decision.logp`）——裁剪路径据此省掉一整遍"重算 logp_old"的链前向。
             lp_all = torch.log_softmax(logits.flatten(), -1)
-            k = (int(torch.multinomial(lp_all.exp(), 1).item()) if sample
+            k = (int(torch.multinomial(lp_all.exp(), 1, generator=gen).item()) if sample
                  else int(lp_all.argmax()))
             lp_k = float(lp_all[k])
         decisions.append(Decision(kind=kind, tok=tok_feat, seg=seg,
@@ -238,10 +246,16 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     `reward.scalar_reward`）→ **组内 z 化**（`_z`，一个优势，不按头分层）→ 组内更新。
     优化器 = Adam（`policy.optim` 惰性创建：约定 4；不再手写 SGD + 逐元素 clamp）。
 
+    ⚠️ **可复现性**（评审 I-3）：动作采样由 `seed` 派生的 `torch.Generator` 锁定 ⇒ **同 seed
+    同调用序列逐位可复现**（跨进程亦然：CPU 的 torch RNG 由 seed 完全确定）；`seed` 同时是
+    仿真扰动流基（第 g 条链 `seed*SEED_STRIDE + g`）。旧实现走全局 torch RNG，`--seed`
+    锁不住动作——多进程各跑各的，"同 seed 对照 / 种子矩阵"两件事都不成立。
+
     ⚠️ **裁剪只在 `epochs > 1` 时才有意义**（默认 `epochs=1, clip_eps=None` = 纯组内 REINFORCE，
     即 spec §5.3.4/理论骨架的「纯版本」）：`epochs=1` 时 `new` 与 `logp_old` 都在**同一组参数**
-    上算出 ⇒ `ratio ≡ 1` ⇒ `clamp(1, 1±ε) ≡ 1`，裁剪项**恒等**、纯空转（`test_ratio_is_one_
-    for_unchanged_policy` 测的就是这个事实）。故此处显式**拒收**"epochs=1 + clip_eps"这个组合，
+    上算出 ⇒ `ratio ≡ 1` ⇒ `clamp(1, 1±ε) ≡ 1`，裁剪项**恒等**、纯空转（`test_clipped_path_
+    ratio_uses_sampling_time_logp` 的 `lr=0` 判据测的就是这个恒等式）。故此处显式**拒收**
+    "epochs=1 + clip_eps"这个组合，
     并在 `epochs=1` 时**连 `logp_old` 都不算**——省掉一整遍链前向；`epochs>1` 时 `logp_old`
     直接取 `Decision.logp`（采样那一刻已存），**不额外重算**。
 
@@ -288,12 +302,16 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
 
     chains: list[list[Decision]] = []
     rewards: list[float] = []
+    # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
+    #    （消费次序确定 ⇒ 逐位可复现），不再落到全局 torch RNG。
+    gen = torch.Generator().manual_seed(seed)
     for g in range(G):
-        dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * 1000 + g, ctx, sample=True)
+        dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
+                              sample=True, generator=gen)
         chains.append(dec)
         rewards.append(scalar_reward(objective_vector(met), w))
 
-    A = torch.tensor(_z(np.asarray(rewards, dtype=np.float64), "z"), dtype=torch.float32)
+    A = torch.tensor(_z(np.asarray(rewards, dtype=np.float64)), dtype=torch.float32)
 
     # 裁剪路径的 ratio 基准 = 采样那一刻的 logp（`Decision.logp`，无梯度）——不重算，
     # 且与 `chain_logp` 逐位同源（见 `sampled_logp`），故首轮 ratio 严格 = 1。

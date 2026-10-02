@@ -36,13 +36,16 @@ class PolicyNet(nn.Module):
       `setup(prev_job_of_m, j)`、L 头放"该车到取货点的预计行驶时长"。spec §5.3.1②：换型是
       `(机台, 作业)` 的**交互量**，塞不进 M token，只能走这个槽（旧 MLP 路径本有 `feat_cand`，
       重写时不可丢）。
+
+    ⚠️ **无 `n_agv` 形参**（评审 M-4 删）：车队规模由 `seg` 的 V 段长度定（`v_token_index`），
+    网络结构里没有任何一处随车队规模变——旧的 `n_agv` 形参与其 `self.n_agv` 属性**全仓零
+    读取方**，只会给读者"车队规模进网络"的错觉（要理解车队规模如何进网，看 V 段 token）。
     """
     def __init__(self, n_feat_op: int = 3,
-                 hidden: int = 64, enc: LayoutEncoder | None = None, n_agv: int = 2,
+                 hidden: int = 64, enc: LayoutEncoder | None = None,
                  n_feat_task: int = 4, n_feat_cand: int = 1):
         super().__init__()
         self.enc = enc
-        self.n_agv = n_agv                       # 仅留痕：候选台数现由 tok/seg 定（`v_token_index`）
         self.optim: torch.optim.Optimizer | None = None   # 由训练器在首步惰性创建（Adam）
         if enc is not None:
             self.s_head_tok = nn.Sequential(          # 编码器 token 打分头（候选机台）

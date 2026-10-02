@@ -1,6 +1,8 @@
 """联合链 GRPO 的测试（P2 Task 7，spec §5.3.4）。"""
 from __future__ import annotations
 
+import copy
+
 import torch
 import pytest
 
@@ -25,7 +27,7 @@ def _setup(name="mk01"):
     cfg = SimConfig()
     lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
     g = build_corridor_graph(lay)
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=cfg.n_agv)
+    pol = PolicyNet(enc=LayoutEncoder())
     return inst, lay, dock_distance_matrix(g), cfg, norm_context(inst, lay, m_ref=100.0), pol
 
 
@@ -46,6 +48,38 @@ def test_chain_has_one_decision_per_op_and_per_task():
     kinds = [d.kind for d in decisions]
     assert kinds.count("S") == n_ops
     assert kinds.count("L") == metrics["deliveries"]
+
+
+@pytest.mark.unit
+def test_same_seed_reproduces_action_sequence():
+    """⚠️ 评审 I-3：同 seed 跑两次 `roll_chain`，动作序列必须**逐位相同**（可复现性判据）。
+
+    旧实现的动作采样走**全局 torch RNG**（`torch.multinomial` 不传 generator）：`seed=` 只进
+    仿真扰动流，锁不住动作——多进程各跑各的、"同 seed 对照 / 种子矩阵"两件事都不成立。
+    判据取 `(kind, cand, action)` 三元组全覆盖（只看 action 会漏掉"候选集也变了"的形态）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    a, _ = roll_chain(inst, lay, dm, cfg, pol, seed=7, ctx=ctx)
+    b, _ = roll_chain(inst, lay, dm, cfg, pol, seed=7, ctx=ctx)
+    sig_a = [(d.kind, d.cand, d.action) for d in a]
+    sig_b = [(d.kind, d.cand, d.action) for d in b]
+    assert len(sig_a) >= 50, f"链太短（{len(sig_a)} 决策）——判据失去意义"
+    assert sig_a == sig_b, "同 seed 两次的动作序列不同——采样流没接上 seed"
+
+
+@pytest.mark.unit
+def test_different_seeds_give_different_actions():
+    """⚠️ 评审 I-3 的另一半：不同 seed ⇒ 动作序列必须**不同**（否则 seed 根本没接进采样）。
+
+    没有这条，"同 seed 相同"会被"采样恒走一条与 seed 无关的固定序列"蒙混过关——那同样是
+    不可复现的随机性（换 seed 也复现不出差别），且与"seed 矩阵"的语义直接冲突。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    a, _ = roll_chain(inst, lay, dm, cfg, pol, seed=7, ctx=ctx)
+    c, _ = roll_chain(inst, lay, dm, cfg, pol, seed=8, ctx=ctx)
+    sig_a = [(d.kind, d.cand, d.action) for d in a]
+    sig_c = [(d.kind, d.cand, d.action) for d in c]
+    assert sig_a != sig_c, "换 seed 动作序列不变——seed 没接进动作采样"
 
 
 @pytest.mark.unit
@@ -189,3 +223,23 @@ def test_joint_step_uses_adam_and_returns_diagnostics():
     # ⚠️ loss 在裁剪路径首轮**结构性为 0**（ΣA=0）；无裁剪路径非 0。故诊断必须另带一个
     # **非零**的学习信号读数——`grad_norm` = 裁剪前的 ‖∂L/∂θ‖。
     assert diag["grad_norm"] > 0.0, "grad_norm 为 0——诊断退化，看不出训练是否在动"
+
+
+@pytest.mark.unit
+def test_joint_step_bitwise_reproducible_given_seed():
+    """⚠️ 评审 I-3：`joint_chain_step` 在**同 seed + 同起点**下逐位可复现（训练入口的判据）。
+
+    判据 = 两份**同起点**的 policy 副本各跑一步同 seed（G=2），奖励与诊断读数必须**精确
+    相等**（同进程、同参数 ⇒ 同一串浮点运算逐位相同）。这条钉的是 **generator 真被透传进
+    `roll_chain`**——只测 `roll_chain` 自己盖不住它（默认参数会自己兜底建 generator，透传
+    断了照样"看起来可复现"）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    w = _weights(inst, cfg)
+    pa, pb = copy.deepcopy(pol), copy.deepcopy(pol)      # 同起点（深拷贝前共享同一份初始权重）
+    ra, da = joint_chain_step(pa, inst, lay, dm, cfg, ctx, w, seed=3, G=2)
+    rb, db = joint_chain_step(pb, inst, lay, dm, cfg, ctx, w, seed=3, G=2)
+    assert (ra, da["r_std"], da["grad_norm"]) == (rb, db["r_std"], db["grad_norm"]), (
+        f"同 seed 同起点的两步训练读数不同：r={ra} vs {rb}"
+        f"（r_std {da['r_std']} vs {db['r_std']}，grad_norm {da['grad_norm']} vs {db['grad_norm']}）"
+        "——动作采样没有逐位复现")

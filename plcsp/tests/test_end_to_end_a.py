@@ -15,10 +15,11 @@
 ⚠️ 三条测试只用**一次**训练（模块级 fixture `a_run`）：每条各训一遍会把墙钟翻三倍。
 断言 1 自带一次 `roll_chain`（~0.5 s），与训练解耦，故 `-k` 单跑它也成立。
 
-⚠️ **训练 API 自己不带动作采样种子**（Task 7 记录）：`roll_chain` / `joint_chain_step` 的动作
-采样走**全局 torch RNG**，不是 `seed=` 那条流。故**只传 seed 不能锁定动作**——跨进程复现必须
-在调用序列**开头**自己钉 `torch.manual_seed`（本文件的 fixture 就是这么做的，故它的 30 步读数
-可跨进程复现）；论文里的种子对照照此办理（详见 `m13_train_a.py` 的 docstring）。
+⚠️ **动作采样由 `seed` 锁定**（评审 I-3 修后）：`roll_chain` 用
+`torch.Generator().manual_seed(seed)` 采样（`joint_chain_step` 自建一条并透传）——**同 seed
+同调用序列逐位可复现**，跨进程亦然。`torch.manual_seed(0)` 在本文件的 fixture 里仍要钉，
+但它现在只为**网络初始化**（初始化走全局 RNG，不受 `seed=` 影响）；论文里的种子对照照此
+办理（详见 `m13_train_a.py` 的 docstring）。
 """
 from __future__ import annotations
 
@@ -37,16 +38,18 @@ from plcsp.env.des import SimConfig, reference_makespan, rollout
 from plcsp.env.instances import load_mk
 from plcsp.env.layout import sample_layout
 from plcsp.env.reward import ReferenceObjectives, reward_weights
+from plcsp.m13_train_a import EVAL_SEED_BASE       # 评估种子起点：唯一定义处（评审 M-13）
 from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.state_emb import norm_context
 
 STEPS, G, LR = 30, 4, 3e-4        # R1 裁定的小预算（见模块头）
 EVAL_SEEDS = 10                   # argmax 评估的扰动种子数（J>1 只用于评估，spec §5.3.4 约定 3）
 # ⚠️ **评估种子必须避开训练流**（评审 F1）：`joint_chain_step` 第 s 步第 g 条链用
-# `seed_chain = s*1000 + g`，故 30 步 × G=4 的训练流 ∈ [0, 29004)。旧值 10_000 **与第 10 步的
-# 训练流正面相撞**（10000..10003 —— 10 个评估流里 4 个是训练流），"评估集与训练集分离"这句话
-# 当时是**假的**。取 10**6：`steps*1000 + G ≤ 10**6` 时恒安全（steps < 1000）。
-EVAL_SEED_BASE = 10 ** 6
+# `seed_chain = (seed0+s)*1000 + g`，本文件 seed0=0 ⇒ 30 步 × G=4 的训练流 ∈ [0, 29004)。
+# 旧值 10_000 **与第 10 步的训练流正面相撞**（10000..10003 —— 10 个评估流里 4 个是训练流），
+# "评估集与训练集分离"这句话当时是**假的**。安全条件与 `m13_train_a.assert_eval_seed_isolated`
+# 同形式（本文件 seed0=0）：**`steps ≤ EVAL_SEED_BASE // 1000 = 1000`**——条件是 `seed0+steps`
+# 而非 `steps`（评审 I-2）。`EVAL_SEED_BASE` 自 `m13_train_a` 导入：常量只有一处定义（M-13）。
 
 
 def _setup(name: str = "mk01"):
@@ -64,7 +67,7 @@ def _setup(name: str = "mk01"):
     cfg = SimConfig()
     lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
     g = build_corridor_graph(lay)
-    pol = PolicyNet(enc=LayoutEncoder(), n_agv=cfg.n_agv)
+    pol = PolicyNet(enc=LayoutEncoder())
     ctx = norm_context(inst, lay, m_ref=reference_makespan(inst, cfg))
     return inst, lay, dock_distance_matrix(g), cfg, ctx, pol
 
@@ -86,10 +89,10 @@ def a_run() -> _ARun:
     会把 30 步的小信号淹没。评估种子从 `EVAL_SEED_BASE = 10**6` 起——**与训练流严格分离**
     （训练第 s 步第 g 条链的流是 `s*1000+g`，30 步最多到 29003；旧值 10_000 会撞第 10 步，评审 F1）。
     """
-    torch.manual_seed(0)     # ⚠️ 必须在 `_setup()` **之前**：网络初始化与动作采样都走**全局
-    #                          torch RNG**（Task 7）——不钉种子则每次运行的初始权重与 30 步
-    #                          读数都不同（验收数字不可复现、还可能偶发变红）。钉在序列开头后
-    #                          整条轨迹（初始化 + 每步采样）被完全确定 ⇒ 本 fixture 可跨进程复现。
+    torch.manual_seed(0)     # ⚠️ 必须在 `_setup()` **之前**：**网络初始化**走全局 torch RNG
+    #                          （动作采样自评审 I-3 起由 `seed=` 派生，不再吃全局流）——不钉
+    #                          则每次运行的初始权重与 30 步读数都不同（验收数字不可复现）。
+    #                          钉在序列开头后整条轨迹（初始化 + 每步采样）被完全确定 ⇒ 可复现。
     inst, lay, dm, cfg, ctx, pol = _setup()
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
     t0 = time.time()
@@ -182,15 +185,20 @@ def test_trained_argmax_beats_rule_baseline(a_run: _ARun):
     同一次运行（与 `ReferenceObjectives` 同源），故这条断言的分母与奖励口径一致。
 
     ⚠️ **R1 预警过"30 步可能反超不了"**，故本条**实测定档**（同进程、`torch.manual_seed(0)`，
-    布局 seed 0、默认 `SimConfig`）：训练后 **85.0** vs 规则 **103.4**（**−17.8%**），
-    逐种子 `[82.1, 91.7, 86.8, 84.2, 90.0, 79.8, 91.7, 90.8, 82.1, 71.1]`。**反超余量足够，
+    布局 seed 0、默认 `SimConfig`）：训练后 **81.8** vs 规则 **103.4**（**−20.9%**），
+    逐种子 `[75.0, 78.8, 87.8, 80.8, 79.1, 87.0, 92.3, 86.7, 75.0, 75.1]`。**反超余量足够，
     故保留严格 `<`，不降级**；牙齿由 `test_untrained_control_does_not_beat_rule_baseline` 提供
     （未训练同口径 argmax = **233.2**，规则的 2.25× ⇒ 不训练时本断言必红）。
 
+    📌 **评审 I-3 留痕**（本波）：上面这组读数取自**动作采样接 `seed` 之后**的采样流
+    （`torch.Generator().manual_seed(s)`）。修 I-3 前（动作走全局 torch RNG、`seed=` 锁不住）
+    同口径读数是 **85.0**（−17.8%）——**旧值跨进程不可复现**（每次进程一个样），故改记新值；
+    顺带：`r` 前 10 步均值 −25.91 → 后 10 步 −14.33（"在学"判据的读数）。
+
     📌 **评审 F1 留痕**：修 F1 前本条的读数是 86.8（−16.1%）——那次评估种子 `10_000..10_009`
-    里有 4 个是**第 10 步训练过的流**（`s*1000+g`）。修成 `10**6` 后重测为 **85.0**：
-    **泄漏在数值上是噪声级的（还把数字压低了一点），但"评估集与训练集分离"这句话之前是假的**
-    ——论文 setup 节要写的是修后这条。
+    里有 4 个是**第 10 步训练过的流**（`s*1000+g`）。修成 `10**6` 后重测为 85.0（当时仍是
+    I-3 之前的采样流）：**泄漏在数值上是噪声级的（还把数字压低了一点），但"评估集与训练集
+    分离"这句话之前是假的**——论文 setup 节要写的是修后这条。
     """
     trained, rule = mean(a_run.trained), a_run.rule
     assert trained < rule, (
@@ -203,7 +211,7 @@ def test_untrained_control_does_not_beat_rule_baseline():
     """⚠️ **防假绿对照**（评审 F2）：断言 ③ 的全部价值在"训练**确实**起了作用"——故这里造一个
     **全新未训练**的 `PolicyNet`，在**同一些评估种子**上跑同口径 argmax，断言它**不优于**规则基线。
 
-    没有这条，"训练后 85.0 < 103.4"只能要求审稿人**信我**（原来那份对照只写在 docstring 与报告
+    没有这条，"训练后 81.8 < 103.4"只能要求审稿人**信我**（原来那份对照只写在 docstring 与报告
     里，仓库里没有任何东西能证明断言 ③ 会红）。与断言 ① 的变异守卫同理，这条是 ③ 的**牙齿**。
     `torch.manual_seed(0)` 与 fixture 同一起点 ⇒ 这里的"未训练"就是 `a_run` 训练前的那一版参数。
     实测：**233.2 vs 规则 103.4（2.25×）**——不训练时断言 ③ 必红。
@@ -221,3 +229,21 @@ def test_untrained_control_does_not_beat_rule_baseline():
         f"**未训练**策略的 argmax makespan {mean(scores):.1f} 竟然不劣于规则基线 {rule:.1f}"
         f"（{len(scores)} 种子 {[round(x, 1) for x in scores]}）——那断言 ③ 就是假绿："
         f"'训练后更优'可能只是随便初始化的功劳，而不是训练的")
+
+
+@pytest.mark.unit
+def test_eval_seed_condition_covers_seed0():
+    """⚠️ 评审 I-2：安全条件是 **`seed0 + steps ≤ 1000`**，不是 `steps < 1000`。
+
+    训练流 `(seed0+s)*1000 + g` 随 `--seed` **整体平移**——`--seed 700 --steps 300` 会让评估流
+    落回训练流（同一个 bug 在 seed 维度复发），而 `EVAL_SEED_BASE` 那句保证会被抄进论文 setup
+    节。故条件由 `m13_train_a.assert_eval_seed_isolated` 在入口**硬查**（不满足即报错，不静默）；
+    本测试钉住边界与越界两侧。
+    """
+    from plcsp.m13_train_a import assert_eval_seed_isolated
+    assert_eval_seed_isolated(0, 1000)          # 边界内：不报错
+    assert_eval_seed_isolated(700, 300)         # 700+300 = 1000：恰好安全
+    with pytest.raises(ValueError, match="评估集与训练集"):
+        assert_eval_seed_isolated(700, 301)     # 700+301 > 1000：训练流撞上评估流
+    with pytest.raises(ValueError, match="评估集与训练集"):
+        assert_eval_seed_isolated(999, 2)
