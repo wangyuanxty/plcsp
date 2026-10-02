@@ -866,8 +866,10 @@ class SimWorld:
                   policy_l=None, policy_s=None, online_s: bool = False) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）。
 
-        SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** policy_l(feat)，
-        此刻 stats 中的车状态（agv_del/agv_pos）即**实时值**（无并发 → 无需事件/Gate）。
+        SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
+        活状态快照交给它（无并发 → 无需事件/Gate）。L 与 S 的回调契约对称：
+        `policy_l(snap, frm, to, oi+1, cand_v) -> 车号`（候选 = 全车队）；`des.py` 只给原始
+        材料、**不构造任何特征**（层次纪律：`env/` 不得依赖 `nn/`）。
 
         `online_s=False`（默认）：S 层读**预计算**的 `plans`（`op_choices` 或贪婪最短）——
         **逐位复现 P2 之前的静态行为**。
@@ -1006,7 +1008,11 @@ class SimWorld:
 
         输出缓冲满=阻塞源：out_q.put 在机台侧阻塞；此处 get 保证消费（阻塞语义=M1.1 消磨）。
         末工序 + 在途注入队列非空 → 注入下一作业（分批门控波次语义）。
-        L 层（bound）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；超出补轮询。
+        L 层（`policy_l` 非空）：`policy_l(snap, frm, to, oi+1, cand_v) -> 车号`——`snap` = 此刻
+        的活状态，任务身份 = (起送机台, 目标机台, 目标工序序号)，候选 = 全车队；此处**不构造
+        任何特征**（F1，P2 Task 5）。
+        L 层（bound，`policy_l` 为空）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；
+        超出补轮询。
         """
         task_i = 0
 
@@ -1036,26 +1042,18 @@ class SimWorld:
             stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
                                                      tuple(stats["agv_pos"])))       # 任务时点车状态
             if policy_l is not None:
-                n_m = len(machines)
-                d0, p0 = stats["agv_del"], stats["agv_pos"]
-                load_d = float(d0[0] - d0[1]) / 10.0 if len(d0) > 1 else 0.0    # bug#14：n_agv=1
-                pos0 = float(p0[0]) / n_m                                     # 时硬编码 [1] 越界
-                pos1 = float(p0[1]) / n_m if len(p0) > 1 else float(p0[0]) / n_m
-                feat = (np.array([frm_idx / n_m, nxt_m / n_m, (oi + 1) / 8.0,
-                                  load_d, pos0, pos1], dtype=np.float32)
-                        .tolist()
-                        + [len(tasks_in[a].items) / 5.0
-                           for a in range(len(tasks_in))]                       # 在途负载（通用 n_agv）
-                        + [float(task_i) / 50.0, float(task_i % len(tasks_in)) / len(tasks_in)])
-                                                                                # 任务序号+相位（表
-                                                                                # 示缺口：轮换须可表达）
-                feat = np.array(feat, dtype=np.float32)
+                # F1（P2 Task 5）：回调契约与 `policy_s` 对称——快照 + 任务身份 + 候选车号。
+                # 此前这里现搓 11 维扁平特征（含魔数 (oi+1)/8、task_i/50，MK10 上溢出到
+                # 1.75/4.40），其唯一消费者 `PolicyNet.agv_logits` 已随 Task 4 删除——
+                # 即那段是**死代码**，故整体删除：特征一律由调用方从快照自造。
                 snap = self.snapshot()                  # 派车决策时点的活状态（只读）
-                agv = int(policy_l(feat))
-                # 决策日志（P2 Task 5）：只记**原始快照**——不构造特征（env/ 不得依赖 nn/）；
-                # 候选 = 全车队（绑定路径下每车一队列，都是可选项）。
-                dec_log.append(("L", snap, (frm_idx, nxt_m, oi + 1),
-                                tuple(range(len(tasks_in))), agv))
+                cand_v = list(range(len(tasks_in)))     # 候选 = 全车队（每车一队列，都可选）
+                agv = int(policy_l(snap, frm_idx, nxt_m, oi + 1, cand_v))
+                if agv not in cand_v:
+                    # 同 policy_s：非候选**显式报错**——负索引会静默回绕到别的车
+                    raise ValueError(f"policy_l 派了不存在的车 {agv}；候选={cand_v}")
+                # 决策日志（P2 Task 5）：只记**原始快照**——不构造特征（env/ 不得依赖 nn/）
+                dec_log.append(("L", snap, (frm_idx, nxt_m, oi + 1), tuple(cand_v), agv))
                 yield tasks_in[agv].put(task)
             elif bound:
                 n_agv = len(tasks_in)

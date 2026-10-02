@@ -145,13 +145,15 @@ def test_machine_remaining_min_decreases_while_processing():
 
     样本取自 `run_gated` 的决策回调（MK01 种子 1 有 50 对"同工件、时间已推进"的连续样本，
     余量充足）；时间未推进的样本对不参与断言，触底为 0 的样本只要求保持 0。
+
+    ⚠️ P2 Task 5（F1）改了回调**形状**：`policy_l(snap, frm, to, oi, cand)`——快照由派工点
+    交给回调（此前是回调自己去 `w.snapshot()`），本测试的**断言未变**。
     """
     inst, w = _world()
     prev: dict[int, tuple[int, float, float]] = {}      # 机台 → (在制工件, now, 剩余)
     stat = {"strict": 0, "flat": 0}
 
-    def policy_l(feat):
-        snap = w.snapshot()
+    def policy_l(snap, frm, to, oi, cand):
         for m, ms in enumerate(snap.machines):
             cur = w._cur_op[m]                          # (工件, 工序时长, 上机时刻)
             if cur is None:                             # 机台空 → 无在制
