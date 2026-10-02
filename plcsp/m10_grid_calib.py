@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""网格环境下的 n_agv 重标与拥堵实测（P1a 验收）。
+"""网格环境下的 n_agv 标定（P1a 验收，2026-10-02 改版）。
 
-背景：spec §3.3 的拥堵数据（n_agv=4 等待占比 32%）是在**旧的 line 单环**上测的；
-换网格后 AGV 可绕行，该数会变，故 n_agv 必须重标（spec §6.3 已标注待重标）。
+⚠️ 判据已换：旧判据是"区段等待占比落在 15–35%"，但**拥堵机制已整条砍除**
+（实测通道争用 ≤0.07%，见 progress-log §十五）。物流的结构性瓶颈是**车辆数量**（任务排队）。
 
-标定口径（spec §6.3）：取"拥堵显著但系统未过饱和"的工况——
-**等待占比 15–35%，且 requeue ≈ 0**（不触发超时重试）。
+新判据：**makespan 对车辆数的边际收益拐点** —— 车辆数增加带来的改善开始饱和的那个点。
+再多加车只是浪费产能，不改善交付。
 
 用法：python -m plcsp.m10_grid_calib [--seeds 10]
 输出：stdout 表格（不写文件）
@@ -27,28 +27,26 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, default=10)
     args = ap.parse_args()
 
-    print("实例   n_agv  makespan      等待次数  等待总时长  等待占比  未释放  最长单次  requeue")
+    print("实例   n_agv  makespan(sd)        运输总时长  运输占比  相对上一档改善")
     for name in INSTANCES:
         inst = load_mk(name)
+        prev: float | None = None
         for na in AGV_GRID:
             cfg = SimConfig(n_agv=na)
-            ms, n_, tot, mx, rq = [], [], [], [], []
-            leak = 0
+            ms, tv = [], []
             for s in range(args.seeds):
                 r = rollout(inst, seed_chain=s, cfg=cfg)
                 if r["horizon_hit"] or r["jobs_done"] != inst.n_jobs:
                     continue
-                zw = r["zone_wait"]
-                ms.append(r["makespan"]); n_.append(zw["n"])
-                tot.append(zw["total"]); mx.append(zw["max"])
-                rq.append(r["dbg"].get("requeue", 0))
-                leak += 0 if r["zone_holders_free"] else 1
+                ms.append(r["makespan"]); tv.append(r["travel_time_total"])
             if not ms:
                 print(f"{name:6} {na:5}  （无有效样本）")
                 continue
-            m = st.mean(ms); t = st.mean(tot)
-            print(f"{name:6} {na:5}  {m:11.1f}  {st.mean(n_):9.1f}  {t:10.2f}  "
-                  f"{100*t/(m*na):7.2f}%  {leak:6d}  {st.mean(mx):8.2f}  {st.mean(rq):7.1f}")
+            m, sd, t = st.mean(ms), st.pstdev(ms), st.mean(tv)
+            imp = "—" if prev is None else f"{(prev - m) / prev * 100:+6.2f}%"
+            print(f"{name:6} {na:5}  {m:8.1f} ({sd:5.1f})  {t:10.2f}  {100*t/m:7.2f}%  {imp}")
+            prev = m
+        print()
 
 
 if __name__ == "__main__":

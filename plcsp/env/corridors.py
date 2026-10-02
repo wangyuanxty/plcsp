@@ -6,8 +6,8 @@
 与上一代的区别：旧版是"相邻 dock + 首尾闭环"的**单环**，且连线可能穿过机台；
 新版通道在格子**之间**、机台在格子**之内**，两问题同时消失（无需栅格 A*）。
 
-**路线是决策变量**（spec §1 边界声明 / §5.2）：`k_shortest_paths` 提供候选集，
-策略在其中选一条 → 可主动绕开拥堵。无策略时取候选集第 0 条（= 最短路）。
+⚠️ 2026-10-02：**路径查询函数已移除**——区段管制与路线决策整条砍除（progress-log §十五）。
+本模块只提供**格点图 + 距离矩阵**；AGV 按距离矩阵一次行驶到底，不逐段申请、不选路。
 """
 from __future__ import annotations
 
@@ -47,30 +47,3 @@ def dock_distance_matrix(g: nx.Graph) -> np.ndarray:
         for dst, dist in lengths.items():
             dm[idx[src], idx[dst]] = float(dist)
     return dm
-
-
-def shortest_node_path(g: nx.Graph, src: int, dst: int) -> list[int]:
-    """两节点间最短路的节点序列（含首尾）。
-
-    Review Focus #4：AGV 的逐段 zone 申请必须走**这条**路径——与距离矩阵同源，
-    否则拥堵模式会与距离口径矛盾。
-    """
-    return list(nx.dijkstra_path(g, src, dst, weight="weight"))
-
-
-def k_shortest_paths(g: nx.Graph, src: int, dst: int, k: int = 3) -> list[list[int]]:
-    """**候选路径集**（简单路径，按长度升序，最多 k 条）。
-
-    这是**路线决策的动作空间**（spec §1 边界声明："任务分配 + 路线走廊选择"）：
-    策略在 (frm, to) 的这 k 条候选里选一条 → 主动绕开拥堵。
-    网格上通常有多条（曼哈顿等长最短路 + 绕行路），故候选集天然非空且 >1。
-
-    注意：候选数可能 < k（图小或端点相邻时），此时返回实际条数。
-    第 0 条**必为最短路**（无策略时的默认路线，与 `dock_distance_matrix` 同口径）。
-    """
-    out: list[list[int]] = []
-    for p in nx.shortest_simple_paths(g, src, dst, weight="weight"):
-        out.append(list(p))
-        if len(out) >= k:
-            break
-    return out

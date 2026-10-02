@@ -2,8 +2,8 @@
 """SimPy DES 核心（《方法设计文档》§4.2：SimPy 单一后端，无物理库）。
 
 v0 边界（诚实声明）：
-- zone 管制 = 请求-分配 + 超时重试（策略：失败释放已持区段并退避——避免"持 A 等 B、持 B 等 A"的
-  循环等待死锁；真·等待环检测在 M1.1）。
+- **无区段管制**（2026-10-02 移除，见 progress-log §十五）：实测通道争用 ≤0.07%，物流瓶颈在车辆数
+  而非通道容量。AGV 一次行驶到底。
 - 每叶链独立扰动流：每 episode 一个 rng（seed_chain），对应理论骨架 A1。
 - 机器故障=泊松流：故障期间占用机台（中断-恢复），修复时长 repair_time。
 - 完成时刻以"末工序在机台加工完毕"为准（搬运回库不计入 makespan 口径——v0 简化，M1.1 对齐 BKS 口径）。
@@ -16,8 +16,6 @@ import simpy
 from .layout import Layout, MachinePad
 from .instances import Instance
 
-Zone = simpy.Resource   # 兼容旧引用；v1.1 起 AGV 区段由 ZoneManager 统一管理
-
 # ⚠️ 单位约定（2026-10-02 量纲对齐）：**仿真时间单位 = 分钟；布局坐标单位 = 米**。
 # 此前无单位换算，运输时间 = 距离（米）÷ 速度，导致 TDT/TPT ≈ 4–6 倍（物理上不成立，
 # 见 progress-log 与 spec §3.4）。此常量把 [m] / [m/s] 转成分钟。
@@ -27,21 +25,18 @@ SECONDS_PER_MIN = 60.0
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
             cfg: SimConfig | None = None, op_choices: list[list[int]] | None = None,
             machine_gap: float = 1.0, aisle_width: float = 1.5,
-            agv_phi: list[int] | None = None,
-            route_phi: list[int] | None = None) -> dict:
+            agv_phi: list[int] | None = None) -> dict:
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
     `layout_type` **保留但忽略**（旧调用方仍传）——计划 3 统一清理。
-    `route_phi[task_i]` = 第 task_i 个运输任务的**候选路径编号**（路线决策，spec §5.2）；
-    `None` → 全部取候选集第 0 条（= 最短路）。
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
     layout = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=aisle_width)
     g = build_corridor_graph(layout)
     dm = dock_distance_matrix(g)
-    return SimWorld(inst, layout, dm, cfg or SimConfig(), graph=g).run(
-        seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi, route_phi=route_phi)
+    return SimWorld(inst, layout, dm, cfg or SimConfig()).run(
+        seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
 
 
 def rollout_evaluate(inst: Instance, plan: list[int] | None, seed: int = 0,
@@ -127,159 +122,60 @@ class MachineSim:
             yield self.out_q.put((job, oi, op, is_last))            # 等待者立即放行 put（防 put→事件 顺序死锁）
 
 
-class ZoneManager:
-    """zone 请求-分配 + **资源等待环检测**（《方法设计文档》§4.2：死锁=资源等待环）。
+class AgvSim:
+    """AGV：取任务 → 按格点距离行驶 → 投递。
 
-    v1.1：替代 v0 的纯超时避让——请求前在等待图上 DFS 环检测：
-      边 a→b = "a 等待的区段被 b 持有"；若请求形成含本 AGV 的环 → 立即拒绝（调用方释放已持区段并重试）。
-      无环 → 阻塞等授权（保留限时兜底，但真环不再依赖超时）。
+    ⚠️ 2026-10-02：**区段管制（ZoneManager）已整条移除**。实测表明：在网格布局 + 现实车队规模下，
+    通道争用占比 ≤0.07%（对照：旧 line 单环上 MK01 n_agv=4 是 32%）。结论——
+    **物流的瓶颈是车辆数量（任务排队），不是通道容量（路口争用）**。
+    故 AGV 不再申请区段，一次行驶到底。见 progress-log §十五 与 spec §3.3。
     """
 
-    def __init__(self, env: simpy.Environment, n_nodes: int, wait_limit: float):
-        self.env, self.n, self.wait_limit = env, n_nodes, wait_limit
-        # ⚠️ 2026-10-02：**不再用 simpy.Resource**。旧实现里 `try_grant` 直接改 holder 而**不 request
-        # Resource**，随后的 `request()` 会因 Resource 空闲而**立刻授予**——既让等待时长恒为 0，
-        # 又让新来者静默覆盖旧持有者（互斥被破坏）。现以 `holder` 为唯一仲裁，用事件唤醒。
-        self.holder: dict[int, int | None] = {z: None for z in range(n_nodes)}   # z -> agv_id
-        self.pending: dict[int, int] = {}                                        # agv_id -> 等待的 z
-        self._ev: dict[int, simpy.Event] = {}                                    # z -> 释放唤醒事件
-        # 区段等待时长 [min]——判断"拥堵"是否真实存在的唯一度量。
-        self.waits: list[float] = []
-
-    def _wait_path_to(self, start: int, target: int) -> bool:
-        """从 start（等待者）沿 '等待→持有者' 边走，是否到达 target（DFS，带环保护）。"""
-        node, seen = start, set()
-        while node is not None and node != target:
-            if node in seen:
-                return False                     # 已访问过其它环（不含 target）
-            seen.add(node)
-            z = self.pending.get(node)
-            if z is None:
-                return False
-            node = self.holder.get(z)
-        return node == target
-
-    def would_cycle(self, agv: int, z: int) -> bool:
-        return self.holder.get(z) not in (None, agv) and self._wait_path_to(self.holder[z], agv)
-
-    def try_grant(self, agv: int, z: int) -> bool:
-        """非阻塞快检：区段空闲或已属本 AGV → 直接授予。**holder 是唯一仲裁。**"""
-        if self.holder[z] == agv:
-            return True
-        if self.holder[z] is not None:
-            return False
-        self.holder[z] = agv
-        return True
-
-    def wait_zone(self, agv: int, z: int, limit: float | None = None):
-        """阻塞等授权（无环假设下）。返回 (granted, cycle)。
-
-        唤醒机制：持有者 `release` 时触发该区段的 simpy 事件；等待者被唤醒后**再抢一次**
-        （谁先醒由 SimPy 事件序决定，天然先到先得）。
-        """
-        if self.try_grant(agv, z):
-            return True, False
-        if self.would_cycle(agv, z):
-            return False, True
-        self.pending[agv] = z
-        t0 = self.env.now
-        ev = self._ev.setdefault(z, simpy.Event(self.env))
-        yield ev | self.env.timeout(limit or self.wait_limit)
-        self.waits.append(self.env.now - t0)     # 区段等待时长（含超时未获授权的那次）
-        self.pending.pop(agv, None)
-        if self.try_grant(agv, z):
-            return True, False
-        return False, False                     # 超时兜底（无环也应极少发生）
-
-    def release(self, agv: int, z: int) -> None:
-        if self.holder.get(z) == agv:
-            self.holder[z] = None
-            ev = self._ev.get(z)
-            if ev is not None and not ev.triggered:
-                ev.succeed()                     # 唤醒等待该区段的 AGV
-            self._ev[z] = simpy.Event(self.env)  # 换新事件供下一次等待（旧事件已触发）
-        self.pending.pop(agv, None)
-
-
-class AgvSim:
-    """AGV：区段申请经 ZoneManager（环检测+授权）；环/超时→释放已持区段+退避重试。"""
-
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
-                 zm: ZoneManager, tasks_in, machines: list, graph, bound: bool = False):
+                 tasks_in, machines: list, bound: bool = False):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
-        self.stats, self.zm, self.tasks_in, self.machines = stats, zm, tasks_in, machines
-        self.g = graph              # 格点走廊图（k_shortest_paths 的来源，供 route 决策时用）
+        self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
 
     def run(self):
         q = self.tasks_in[self.aid] if self.bound else self.tasks_in
         while True:
-            frm, to, item, path = yield q.get()      # path = 策略选定的节点序列（含首尾）
+            frm, to, item = yield q.get()
             self.stats["tasks_get"] = self.stats.get("tasks_get", 0) + 1
-            # ① 先占住起点节点
-            granted, cycle = yield from self.zm.wait_zone(
-                self.aid, path[0], self.cfg.zone_hold_limit)
-            if cycle or not granted:
-                self.stats["requeue"] = self.stats.get("requeue", 0) + 1
-                q.put((frm, to, item, path))
-                continue
-            # ② 逐段推进：申请下一节点 → 成功后释放上一节点 → 走这一段
-            #    （AGV 任一时刻最多持 2 个节点：当前 + 已预约的下一节点）
-            prev = path[0]
-            ok = True
-            for prev_i, nxt in enumerate(path[1:]):
-                granted, cycle = yield from self.zm.wait_zone(
-                    self.aid, nxt, self.cfg.zone_hold_limit)
-                if cycle or not granted:
-                    ok = False
-                    break
-                seg_m = float(self.m_dm[path[prev_i], nxt])          # 上一节点 → 本节点 [m]
-                seg_min = seg_m / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN
-                self.zm.release(self.aid, prev)                       # 拿到下一段才放上一段
-                prev = nxt
-                yield self.env.timeout(seg_min)
-                self.stats["travel_time"] += seg_min
-                self.stats["moves"] += 1
-            if not ok:
-                self.zm.release(self.aid, prev)                       # 失败路径也必须释放（防泄漏）
-                yield self.env.timeout(self.cfg.zone_hold)
-                self.stats["requeue"] = self.stats.get("requeue", 0) + 1
-                q.put((frm, to, item, path))                          # 放回本队尾（退避后重试）
-                continue
-            self.zm.release(self.aid, prev)                           # 到达终点 → 释放最后一个
-            self.stats["agv_del"][self.aid] += 1          # L 层状态轨迹（负载差/最后位置）
+            a = self.machines[frm].pad.dock_node      # 距离矩阵按**通道节点**索引（非机台号）
+            b = self.machines[to].pad.dock_node
+            travel = (float(self.m_dm[a, b])
+                      / (self.cfg.eff_speed * self.cfg.agv_speed_mps) / SECONDS_PER_MIN)
+            yield self.env.timeout(travel)
+            self.stats["travel_time"] += travel
+            self.stats["moves"] += 1
+            self.stats["agv_del"][self.aid] += 1      # L 层状态轨迹（负载差/最后位置）
             self.stats["agv_pos"][self.aid] = to
-            # 有界输入缓冲投递：满则让步超时重试（与 zone 超时同构，防缓冲满阻塞拖累运输环）。
+            # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
             while len(self.machines[to].in_q.items) >= self.machines[to].in_q.capacity:
                 yield self.env.timeout(self.cfg.zone_hold)
             yield self.machines[to].in_q.put(item)
             self.stats["deliveries"] += 1
 
-
 class SimWorld:
     """一次 episode：1 布局 + 1 实例 + 1 条独立扰动流 → 指标 dict。"""
 
     def __init__(self, inst: Instance, layout: Layout, m_dm: np.ndarray,
-                 cfg: SimConfig | None = None, graph=None):
+                 cfg: SimConfig | None = None):
         self.inst, self.layout, self.m_dm = inst, layout, m_dm
         self.cfg = cfg or SimConfig()
-        self.g = graph              # 格点走廊图；None 时首个用它的方法会显式报错
-        self.n_zones = layout.grid.n_nodes   # zone 数 = 通道节点数（spec §3.2）
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         return {j: self.cfg.due_factor * sum(t for _, t in ops) for j, ops in plans.items()}
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-            agv_phi: list[int] | None = None,
-            route_phi: list[int] | None = None) -> dict:
+            agv_phi: list[int] | None = None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
 
         agv_phi[task_i] = 第 task_i 个运输任务的 AGV id（L 层决策的载体；None=旧 FIFO 规则）。
           task_i 按 transporter 生成序 0,1,2,...；未覆盖的采用轮询 (i % n_agv)（确定性兜底）。
           绑定模式：每台车一个任务队列（bound 路径）—— 与旧"空闲车接活"语义不同（基线数字仅
           None 路径口径，论文对照会注明）。
-        route_phi[task_i] = 第 task_i 个运输任务的**候选路径编号**（路线决策，spec §5.2）。
-          **必须与 agv_phi 用同一个 task_i 口径**（同为 transporter 生成序）。None → 全取第 0 条（最短路）。
         返回 metrics：makespan / energy / fail_events / tardy / moves / deliveries。
         """
         rng = np.random.default_rng(seed_chain)
@@ -296,7 +192,6 @@ class SimWorld:
             plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
-        zm = ZoneManager(env, self.n_zones, self.cfg.zone_hold_limit)
         events_q = simpy.Store(env)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q)
                     for i in range(inst.n_machines)]
@@ -308,8 +203,8 @@ class SimWorld:
         for m in machines:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
-            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, zm, tasks_in,
-                               machines, self.g, bound=bound).run())
+            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in,
+                               machines, bound=bound).run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
         inject_q: list = []
@@ -317,7 +212,7 @@ class SimWorld:
             m0, t0 = plans[j][0]
             env.process(self._release(env, machines[m0].in_q, (j, 0, OpLite(t0), len(plans[j]) == 1)))
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
-                                      bound=bound, agv_phi=agv_phi, route_phi=route_phi))
+                                      bound=bound, agv_phi=agv_phi))
         total_work = sum(t for ops in plans.values() for _, t in ops)
         horizon = float(total_work * 6 + 500)   # v0 护栏升格：B 层门控（cap=2）下运行可远长于
                                                 # 无门控（波形化串行）；3× 护栏曾把门控运行掐
@@ -338,14 +233,10 @@ class SimWorld:
                 "agv_load": stats.get("agv_load", []),
                 "dbg": {k: v for k, v in stats.items()
                         if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue")},
-                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
-                              "max": float(max(zm.waits)) if zm.waits else 0.0},
-                "zone_holders_free": all(v is None for v in zm.holder.values()),
-                "n_zones_used": zm.n,
-                "travel_time_total": float(stats["travel_time"])}   # 路线决策的效果可见
+                "travel_time_total": float(stats["travel_time"])}
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-                  policy_l=None, route_phi: list[int] | None = None) -> dict:
+                  policy_l=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** policy_l(feat)，
@@ -354,7 +245,7 @@ class SimWorld:
         policy_l=None → 等价 run 的轮询 bound 行为（agv_phi=None 时轮询兜底）。
         """
         if policy_l is None:
-            return self.run(seed_chain=seed_chain, op_choices=op_choices, route_phi=route_phi)
+            return self.run(seed_chain=seed_chain, op_choices=op_choices)
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -368,7 +259,6 @@ class SimWorld:
             plans[j] = [(job_ops[oi][plan[oi]][0], job_ops[oi][plan[oi]][1])
                         for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
-        zm = ZoneManager(env, self.n_zones, self.cfg.zone_hold_limit)
         events_q = simpy.Store(env)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes, events_q)
                     for i in range(inst.n_machines)]
@@ -376,8 +266,8 @@ class SimWorld:
         for m in machines:
             env.process(m.run())
         for a in range(self.cfg.n_agv):
-            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, zm, tasks_in, machines,
-                               self.g, bound=True).run())
+            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
+                               bound=True).run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
         for j in jkeys:
@@ -385,8 +275,7 @@ class SimWorld:
             env.process(self._release(env, machines[m0].in_q, (j, 0, OpLite(t0), len(plans[j]) == 1)))
         dec_log: list[tuple] = []
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
-                                      bound=True, policy_l=policy_l, dec_log=dec_log,
-                                      route_phi=route_phi))
+                                      bound=True, policy_l=policy_l, dec_log=dec_log))
         total_work = sum(t for ops in plans.values() for _, t in ops)
         horizon = float(total_work * 6 + 500)   # 同 run()：门控掐表护栏（原 3× 截断 9/10 假死）
         env.run(until=horizon)
@@ -402,10 +291,6 @@ class SimWorld:
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
-                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
-                              "max": float(max(zm.waits)) if zm.waits else 0.0},
-                "zone_holders_free": all(v is None for v in zm.holder.values()),
-                "n_zones_used": zm.n,
                 "travel_time_total": float(stats["travel_time"]),
                 "decision_log": dec_log}
 
@@ -415,28 +300,14 @@ class SimWorld:
 
     def _transporter(self, env, events_q, tasks_in, plans, machines, stats, inject_q,
                      bound: bool = False, agv_phi: list[int] | None = None,
-                     policy_l=None, dec_log: list | None = None,
-                     route_phi: list[int] | None = None):
+                     policy_l=None, dec_log: list | None = None):
         """机台完成事件：非末工序 → 从其输出缓冲取出 → 生成下一工序搬运任务（目标=下一工序机台）。
 
         输出缓冲满=阻塞源：out_q.put 在机台侧阻塞；此处 get 保证消费（阻塞语义=M1.1 消磨）。
         末工序 + 在途注入队列非空 → 注入下一作业（分批门控波次语义）。
         L 层（bound）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；超出补轮询。
         """
-        from .corridors import k_shortest_paths, shortest_node_path
-        K_PATHS = 3                       # 路线候选数上限（= 路线动作空间大小）
         task_i = 0
-        # 候选路径缓存：路径只取决于 (源节点, 目标节点)，每 episode 只算一次。
-        # 路线是**决策变量**（spec §1 边界声明 / §5.2），由 route_phi[task_i] 选定；
-        # route_phi 与 agv_phi **必须同用 task_i = 本函数生成序**，否则二者错配（Review Focus #6）。
-        path_cache: dict[tuple[int, int], list[list[int]]] = {}
-
-        def paths_for(a: int, b: int) -> list[list[int]]:
-            key = (a, b)
-            if key not in path_cache:
-                cand = k_shortest_paths(self.g, a, b, K_PATHS)
-                path_cache[key] = cand if cand else [shortest_node_path(self.g, a, b)]
-            return path_cache[key]
 
         while True:
             frm_idx, job, oi, op, is_last = yield events_q.get()
@@ -454,12 +325,7 @@ class SimWorld:
             yield machines[frm_idx].out_q.get()
             ops = plans[job]
             nxt_m, nxt_t = ops[oi + 1]
-            # 路线：候选集里按 route_phi 选定（缺省/越界 → 第 0 条 = 最短路）
-            cands = paths_for(machines[frm_idx].pad.dock_node, machines[nxt_m].pad.dock_node)
-            ri = route_phi[task_i] if (route_phi and task_i < len(route_phi)) else 0
-            ri = min(max(0, ri), len(cands) - 1)
-            task = (frm_idx, nxt_m,
-                    (job, oi + 1, OpLite(nxt_t), oi + 1 == len(ops) - 1), cands[ri])
+            task = (frm_idx, nxt_m, (job, oi + 1, OpLite(nxt_t), oi + 1 == len(ops) - 1))
             stats.setdefault("task_flow", []).append((job, oi + 1, frm_idx, nxt_m))  # L 层流导出
             stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
                                                      tuple(stats["agv_pos"])))       # 任务时点车状态

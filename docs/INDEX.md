@@ -77,6 +77,15 @@
 > 🔴 **P0 暴露的关键发现（P2 必须处理）**：旧的 `encode_state` 产出的 token 特征，**除 4 位静态几何外全是桩 0**——动态量（缓冲占用/负载/电量/等待/占道）**从未接入过**。几何一删，编码器输入**全零**。
 > **故 P2 不是"删掉几何就行"，而是必须重新设计 token 特征。**（已在 `nn/features.py`、`nn/state_emb.py` docstring 顶部写明。）
 
+## 5.6 P1a 空间基底（2026-10-02 完成）
+
+- **网格布局**：机位 `n_rows × n_cols`，通道为格线；**通道不穿过机台**（v0 缺陷消失，无需栅格 A*）。
+- **区段管制已整条砍除**（`ZoneManager` / 等待环检测 / 路线决策）：实测网格上通道争用 **≤0.07%**
+  （对照：旧 line 单环 32%）。**物流瓶颈是车辆数量（任务排队），不是通道容量（路口争用）。**
+- **`n_agv` 重标为 3**（判据换成"makespan 的边际收益拐点"）。
+- **约束 11 → 10**；`PolicyNet` 回到**两头**（mach / agv）。
+- 详见 `progress-log.md` §十五 与 spec §3.3.1。
+
 ## 6. 环境
 
 Windows 11｜Anaconda base（`D:\anaconda\python.exe`）｜Python 3.12.4｜**torch 2.14.0+cpu**（无 CUDA）｜simpy 4.1.2｜numpy 1.26.4｜matplotlib 3.11.0｜networkx 3.6.1
