@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 import numpy as np
 import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
@@ -22,6 +23,9 @@ from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
 from .corridors import shortest_node_path
 from .layout import Layout, MachinePad
 from .instances import Instance
+
+if TYPE_CHECKING:                       # 仅为标注；运行期在 `snapshot()` 里就地导入
+    from .snapshot import Snapshot
 
 # ⚠️ 单位约定（2026-10-02 量纲对齐）：**仿真时间单位 = 分钟；布局坐标单位 = 米**。
 # 此前无单位换算，运输时间 = 距离（米）÷ 速度，导致 TDT/TPT ≈ 4–6 倍（物理上不成立，
@@ -105,6 +109,23 @@ class OpLite:
         self.time = t
 
 
+class SimTrack:
+    """快照的跟踪量（P2 Task 1）：机台与车辆在运行流里**就地写**，`SimWorld.snapshot()` 只读。
+
+    机台/车辆的"作业进行到哪一步"只有运行流自己知道（SimPy 对象里查不出来），故单列一袋。
+    `MachineSim` / `AgvSim` 只拿这个袋子（不持 `SimWorld` 引用，避免环）；
+    `SimWorld` 把五个列表同时挂成 `_job_progress` 等属性，快照代码直接读属性。
+    """
+    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded")
+
+    def __init__(self, n_jobs: int, n_machines: int, n_agv: int) -> None:
+        self.job_progress = [0] * n_jobs                      # 已完成工序数
+        self.job_loc = [-1] * n_jobs                          # 当前所在机台；-1 = 不在机台上
+        self.job_agv = [-1] * n_jobs                          # 在途时所乘的车；-1 = 无
+        self.cur_op: list[tuple[int, float] | None] = [None] * n_machines   # (工件, 加工时长)
+        self.agv_loaded = [False] * n_agv                     # 车上是否载货（状态 2 的判据）
+
+
 # ══ 信息侧约束的纯函数（⑧ 交期），放在模块级以便单测直接调用 ══
 
 def compute_due_dates(n_jobs: int, tau: float, m_ref: float) -> dict[int, float]:
@@ -162,11 +183,12 @@ class MachineSim:
     """
 
     def __init__(self, env, pad: MachinePad, rng, cfg: SimConfig, stats: dict, completes: dict,
-                 events_q: simpy.Store, constraints):
+                 events_q: simpy.Store, constraints, track: SimTrack):
         self.env, self.pad, self.rng, self.cfg, self.stats = env, pad, rng, cfg, stats
         self.completes = completes
         self.events_q = events_q
         self.con = constraints
+        self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
         # SimPy 的 Store 不接受 capacity=None；无界用 inf（且下游的"缓冲满"检查须能识别 inf）
         cap_in = pad.in_cap if constraints.finite_buffer else float("inf")
         cap_out = pad.out_cap if constraints.finite_buffer else float("inf")
@@ -212,6 +234,9 @@ class MachineSim:
         while True:
             job, oi, op, is_last = yield self.in_q.get()
             self.stats["in_q_gets"] = self.stats.get("in_q_gets", 0) + 1
+            # 快照跟踪（P2 Task 1）：工件上机 → 记在制工序与所在地
+            self.track.cur_op[self.pad.id] = (job, op.time)
+            self.track.job_loc[job] = self.pad.id
             # ④ 返工：同件在本机**原地**重做（工件不离开机台，故不走运输）。
             # ⚠️ 必须原地——早期版本走 `in_q.put` 会**自锁**：本机是该缓冲的唯一消费者，
             # 缓冲满时 put 永久阻塞，而此时还占着加工槽 ⇒ 该机位连同工件一起卡死
@@ -222,6 +247,9 @@ class MachineSim:
                     self.stats["rework_events"] += 1
                     continue
                 break
+            # 快照跟踪（P2 Task 1）：工序加工完毕（返工不算进度）→ 清在制、推进度
+            self.track.cur_op[self.pad.id] = None
+            self.track.job_progress[job] = oi + 1
             self.stats["ops_done"] = self.stats.get("ops_done", 0) + 1
             if is_last:
                 self.completes[job] = self.env.now      # 末工序完成即出库（不进输出缓冲/无搬运）
@@ -333,9 +361,10 @@ class AgvSim:
 
     def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
                  tasks_in, machines: list, graph, zm, constraints, spec, rng,
-                 chargers=(), charger_res=(), bound: bool = False):
+                 track: SimTrack, chargers=(), charger_res=(), bound: bool = False):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
+        self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
         self.g, self.zm = graph, zm
         self.con = constraints              # ① congestion 等物流侧开关从这里读
         self.congestion = constraints.congestion    # ① 关 → 无区段管制
@@ -502,6 +531,7 @@ class AgvSim:
             # ⑩ 同向拼车：把队首连续的同 (取货点, 卸货点) 任务一并装走
             batch = yield from self._collect(q, frm, to, (frm, to, item, path))
             # ── 负载段：取货点 → 卸货点（整批一趟）──
+            self.track.agv_loaded[self.aid] = True   # 快照跟踪（P2 Task 1）：取货后负载行驶
             ok, self.pos_node = yield from self._drive(a, b, "loaded")
             if not ok:
                 yield self.env.timeout(self.cfg.zone_hold)
@@ -517,7 +547,9 @@ class AgvSim:
                 while len(self.machines[t2].in_q.items) >= self.machines[t2].in_q.capacity:
                     yield self.env.timeout(self.cfg.zone_hold)
                 yield self.machines[t2].in_q.put(_item2)
+                self.track.job_agv[_item2[0]] = -1       # 快照跟踪（P2 Task 1）：投递完成，工件离车
                 self.stats["deliveries"] += 1
+            self.track.agv_loaded[self.aid] = False      # 快照跟踪（P2 Task 1）：整批卸空
 
     def _drain_idle(self, minutes: float, idle_kw: float) -> None:
         """⑪ 待命耗电（与 `_drain` 同一口径，只是功率取待机值）。"""
@@ -546,6 +578,46 @@ class SimWorld:
             from .constraints import ConstraintConfig
             constraints = ConstraintConfig()
         self.constraints = constraints      # 十约束开关（spec §3.3）
+        self._cold_start()                  # t=0 快照骨架（P2 Task 1，run() 会整套换掉）
+
+    def _fleet(self) -> list:
+        """布局车队。⚠️ 与仿真车队不符 = 静默错误（布局车队 ≠ 仿真车队），直接报错。"""
+        fleet = self.layout.agvs or []
+        if len(fleet) != self.cfg.n_agv:
+            raise ValueError(
+                f"布局车队 {len(fleet)} 台 ≠ SimConfig.n_agv={self.cfg.n_agv}——"
+                "直接构造 SimWorld 时须传 sample_layout(..., n_agv=cfg.n_agv)")
+        return fleet
+
+    def _cold_start(self) -> None:
+        """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
+
+        `snapshot()` 必须在 `run()` 之前也可用（决策日志与特征层都可能要"初始状态"，
+        单测也直接取 t=0 快照），而 `w.machines[m].in_q` 这类活对象在 `run()` 前并不存在。
+        `run()` / `run_gated()` 用自己的 env/stats/车队整套重建，故此处只是"起点像"。
+        """
+        env = simpy.Environment()
+        fleet = self._fleet()
+        self.env = env
+        self.completes: dict[int, float] = {}
+        self.track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
+        self._job_progress = self.track.job_progress
+        self._job_loc = self.track.job_loc
+        self._job_agv = self.track.job_agv
+        self._cur_op = self.track.cur_op
+        self._agv_loaded = self.track.agv_loaded
+        self.machines = [MachineSim(env, self.layout.machines[i], np.random.default_rng(0),
+                                    self.cfg, {}, {}, simpy.Store(env), self.constraints,
+                                    self.track)
+                         for i in range(self.inst.n_machines)]
+        self.tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
+        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
+        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
+        self.agvs = [AgvSim(env, a, self.m_dm, self.cfg, {}, self.tasks_in, self.machines,
+                            self.g, zm, self.constraints, fleet[a],
+                            np.random.default_rng(0), self.track,
+                            chargers=self.layout.chargers, bound=True)
+                     for a in range(self.cfg.n_agv)]
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
         """⑧ 交期 `d_j = τ·M_ref`。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
@@ -598,6 +670,46 @@ class SimWorld:
                 "agv_states_min": {"idle": agv_idle, "empty": stats["agv_empty_min"],
                                    "loaded": stats["agv_loaded_min"]}}
 
+    def snapshot(self) -> "Snapshot":
+        """当时的活状态 → 纯数据快照（**只读**，不改变任何仿真状态）。
+
+        `_job_progress[j]` / `_job_loc[j]` / `_job_agv[j]` 由 `MachineSim` 与 `AgvSim` 维护
+        （见 `run()` 里的初始化），是"作业进行到哪一步"的唯一真相。
+        """
+        from .snapshot import JobState, MachineState, Snapshot, VehicleState
+        ms = []
+        for i, m in enumerate(self.machines):
+            q = m.in_q.items
+            cur = self._cur_op[i]
+            ms.append(MachineState(
+                backlog_min=float(sum(it[2].time for it in q)),
+                in_q_len=len(q), in_cap=float(m.in_q.capacity),
+                out_q_len=len(m.out_q.items), out_cap=float(m.out_q.capacity),
+                busy=bool(m.slot.count),
+                remaining_min=float(cur[1]) if cur else 0.0,
+                pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate),
+                prev_job=(-1 if m.prev_job is None else int(m.prev_job))))
+        js = []
+        for j, job_ops in enumerate(self.inst.jobs):
+            done = self._job_progress[j]
+            js.append(JobState(
+                done_ops=done, total_ops=len(job_ops),
+                remaining_min=float(sum(min(t for _m, t in op) for op in job_ops[done:])),
+                finished=done >= len(job_ops), at_machine=int(self._job_loc[j]),
+                in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j])))
+        vs = []
+        for a, agv in enumerate(self.agvs):
+            vs.append(VehicleState(
+                status=3 if agv.down else (2 if self._agv_loaded[a] else
+                                           (1 if agv.pos_node is not None else 0)),
+                node=int(agv.pos_node if agv.pos_node is not None else -1),
+                queued=len(self.tasks_in[a].items) if agv.bound else 0,
+                battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9)),
+                capacity=int(agv.capacity), speed_factor=float(agv.speed / self.cfg.agv_speed_mps)))
+        return Snapshot(now=float(self.env.now), machines=tuple(ms), jobs=tuple(js),
+                        vehicles=tuple(vs), n_done=len(self.completes),
+                        in_flight=sum(v.queued for v in vs))
+
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
@@ -636,8 +748,9 @@ class SimWorld:
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
+        track = SimTrack(inst.n_jobs, inst.n_machines, self.cfg.n_agv)   # 快照跟踪量（P2 Task 1）
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints)
+                               events_q, self.constraints, track)
                     for i in range(inst.n_machines)]
         bound = agv_phi is not None
         if bound:
@@ -647,17 +760,26 @@ class SimWorld:
         for m in machines:
             env.process(m.run())
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
-        fleet = self.layout.agvs or []
-        if len(fleet) != self.cfg.n_agv:      # 静默错误护栏：布局车队 ≠ 仿真车队
-            raise ValueError(
-                f"布局车队 {len(fleet)} 台 ≠ SimConfig.n_agv={self.cfg.n_agv}——"
-                "直接构造 SimWorld 时须传 sample_layout(..., n_agv=cfg.n_agv)")
-        for a in range(self.cfg.n_agv):
-            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                               self.g, zm, self.constraints, fleet[a],
-                               np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
-                               chargers=self.layout.chargers, charger_res=charger_res,
-                               bound=bound).run())
+        fleet = self._fleet()
+        # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
+        self.env = env
+        self.completes = completes
+        self.machines = machines
+        self.tasks_in = tasks_in
+        self.track = track
+        self._job_progress = track.job_progress
+        self._job_loc = track.job_loc
+        self._job_agv = track.job_agv
+        self._cur_op = track.cur_op
+        self._agv_loaded = track.agv_loaded
+        self.agvs = [AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
+                            self.g, zm, self.constraints, fleet[a],
+                            np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
+                            track, chargers=self.layout.chargers, charger_res=charger_res,
+                            bound=bound)
+                     for a in range(self.cfg.n_agv)]          # 原来是直接 env.process(…)
+        for agv in self.agvs:
+            env.process(agv.run())
         # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
         inject_q: list = []
@@ -741,24 +863,34 @@ class SimWorld:
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
+        track = SimTrack(inst.n_jobs, inst.n_machines, self.cfg.n_agv)   # 快照跟踪量（P2 Task 1）
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints)
+                               events_q, self.constraints, track)
                     for i in range(inst.n_machines)]
         tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]
         for m in machines:
             env.process(m.run())
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
-        fleet = self.layout.agvs or []
-        if len(fleet) != self.cfg.n_agv:
-            raise ValueError(
-                f"布局车队 {len(fleet)} 台 ≠ SimConfig.n_agv={self.cfg.n_agv}——"
-                "直接构造 SimWorld 时须传 sample_layout(..., n_agv=cfg.n_agv)")
-        for a in range(self.cfg.n_agv):
-            env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
-                               self.g, zm, self.constraints, fleet[a],
-                               np.random.default_rng([seed_chain, 1000 + a]),
-                               chargers=self.layout.chargers, charger_res=charger_res,
-                               bound=True).run())
+        fleet = self._fleet()
+        # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
+        self.env = env
+        self.completes = completes
+        self.machines = machines
+        self.tasks_in = tasks_in
+        self.track = track
+        self._job_progress = track.job_progress
+        self._job_loc = track.job_loc
+        self._job_agv = track.job_agv
+        self._cur_op = track.cur_op
+        self._agv_loaded = track.agv_loaded
+        self.agvs = [AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
+                            self.g, zm, self.constraints, fleet[a],
+                            np.random.default_rng([seed_chain, 1000 + a]),
+                            track, chargers=self.layout.chargers, charger_res=charger_res,
+                            bound=True)
+                     for a in range(self.cfg.n_agv)]          # 原来是直接 env.process(…)
+        for agv in self.agvs:
+            env.process(agv.run())
         jkeys = list(plans.keys())
         inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
         for j in jkeys:
@@ -853,6 +985,10 @@ class SimWorld:
                 agv = agv_phi[task_i] if (agv_phi and task_i < len(agv_phi)) else (task_i % n_agv)
                 yield tasks_in[agv].put(task)
             else:
+                agv = -1                        # FIFO 路径：此刻还没派车（车在取货时才定）
                 yield tasks_in.put(task)
+            # 快照跟踪（P2 Task 1）：工件已离机台；绑定路径此刻即知派了哪台车
+            self._job_loc[job] = -1
+            self._job_agv[job] = agv
             task_i += 1
             stats["tasks_put"] = stats.get("tasks_put", 0) + 1
