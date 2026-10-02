@@ -589,3 +589,28 @@ MK10 量级：~220 次运输 × 每程约 0.3 min ≈ **66 min 运输总工作�
 ### 15.3 待定（需用户裁定）
 
 ① 拥堵是否保留为约束？三条路：**(A)** 如实记录其不活跃、改写 spec §3.3/§10.2；**(B)** 改模型使其真实（拉长行程/缩小网格/降车速）；**(C)** 换机制（真实车间的拥堵发生在**共享主干道**，而非均匀网格的交叉口）。
+
+## 十六、P1a 评审发现（2026-10-02）
+
+### 16.1 已修（4 项 Important + 1 项上调）
+| # | 发现 | 修法 |
+|---|---|---|
+| I1 | `group_rel.py:182/253/315` 仍按旧签名调 `sample_layout` → **活训练模块被新签名打断** | 改 `sample_layout(n_m, seed=seed_layout)` |
+| I2 | `m1_smoke.py:11` 的 `n_zones=` kwarg 已删 → `TypeError` | 删该 kwarg |
+| I3 | `test_agv_travel.py` 的"匹配距离矩阵"测试**余量 3.7 倍**，把 `dock_node` 换成机台号**照样通过** | 换成对 `task_flow` 逐条重算的**精确等式**；**已验牙口**（注入 bug → 变红） |
+| I4 | spec 数字漂移：§6.2/§7/§11 仍写 11/12 约束；§6.3 **没有** `n_agv` 值；`§3.3.1` 被引 6 次却无编号 | 全部对齐；`SimConfig.n_agv` 默认 2→3 |
+| **M3→上调** | `rollout(aisle_width=…)` **只改几何、不改速度**（`eff_speed` 读 `cfg.aisle_width`）→ **窄道敏感性实验会静默失效** | `rollout` 在 `cfg is None` 时用 `SimConfig(aisle_width=…)`；已加测试 `test_narrow_aisle_slows_travel_down` |
+
+### 16.2 开放线索（**未修，留 P2/P3**）
+**Q2 — 跨臂对照不是共同随机数（CRN）**：所有 `MachineSim` 共享同一 `rng`（`np.random.default_rng(seed_chain)`），
+故障抽样按事件顺序交错消费 → **不同 `n_agv` 的两条对照臂拿到的是不同的故障实现流**。
+后果：跨臂比较噪声偏大，**`n_agv` 相关的一切结论（含 §6.3 的拐点、§10.2 的"现象消失"）都受影响**。
+评审旁证：HEAD 单种子 MK10 n_agv 3→342.2 / 6→404.9（+18%），而 10 种子均值 3→348.8 / 6→362.6（+4%）。
+**修法**：每台机派生独立子流（`seed_chain` + 机台号）。
+**已同步 spec §6.3 的局限声明。**
+
+### 16.3 Minor（留档未修）
+- `des.py` `zone_hold_limit` 死字段；`zone_hold` 语义已变（现只用于缓冲满退避），名字/注释仍是 zone 时代
+- `layout.py:6` docstring 仍提 `des.ZoneManager`
+- `des.py:77` `_try_acquire` 无调用者；dbg 过滤键仍留 `"requeue"`（永不写入）
+- `progress-log.md` §十五 表头"n_agv 1–8"与实际档位 (1,2,3,4,6,8) 不符

@@ -8,7 +8,7 @@ from .env.des import rollout, SimConfig
 
 def main() -> None:
     inst = load_mk("mk01")
-    cfg = SimConfig(n_agv=2, agv_speed_mps=20.0, zone_hold=0.3, n_zones=inst.n_machines)
+    cfg = SimConfig(n_agv=2, agv_speed_mps=20.0, zone_hold=0.3)
     opt = MK_OPTIMAL["mk01"]
     for ltype in ("line", "U", "island"):
         res = rollout(inst, layout_type=ltype, seed_layout=1, seed_chain=42, cfg=cfg)

@@ -32,21 +32,42 @@ def test_travel_time_is_small_fraction_of_makespan():
 
 
 @pytest.mark.unit
-def test_travel_time_matches_distance_matrix():
-    """单 AGV、单车任务时，行驶时长应等于格点最短路 ÷ 车速（单位换算见 bug#13）。"""
+def test_travel_time_equals_distance_matrix_exactly():
+    """行驶总时长必须**精确等于** Σ 距离矩阵最短路（Review Focus ④）。
+
+    这是防"索引用了机台号而非通道节点号"的唯一有效断言——旧版只断言上界，
+    实测余量 3.7 倍，把 `dock_node` 换成机台号**照样通过**（P1a 评审 I3）。
+    """
     # Arrange
     inst = load_mk("mk01")
     cfg = SimConfig(n_agv=1)
-    lay = sample_layout(inst.n_machines, seed=0)
+    lay = sample_layout(inst.n_machines, seed=0)          # 与 rollout 默认 seed_layout=0 一致
     dm = dock_distance_matrix(build_corridor_graph(lay))
 
     # Act
     r = rollout(inst, seed_chain=1, cfg=cfg)
-    n_transports = int(r["dbg"].get("trans_evt", 0))
 
-    # Assert：总行驶时间不应超过"每条任务走全网格最远两点"的上界
-    far = float(dm[dm < float("inf")].max()) / cfg.eff_speed / cfg.agv_speed_mps / 60.0
-    assert r["travel_time_total"] <= far * n_transports + 1e-9
+    # Assert：对每条搬运任务逐条重算，求和后必须逐位相等
+    expected = 0.0
+    for _job, _oi, frm_m, to_m in r["task_flow"]:
+        a = lay.machines[frm_m].dock_node
+        b = lay.machines[to_m].dock_node
+        expected += float(dm[a, b]) / cfg.eff_speed / cfg.agv_speed_mps / 60.0
+    assert len(r["task_flow"]) > 0, "本 episode 应有搬运任务"
+    assert r["travel_time_total"] == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.unit
+def test_narrow_aisle_slows_travel_down():
+    """窄通道必须真的降速（`eff_speed` 读 `cfg.aisle_width`）——否则窄道敏感性实验静默失效。
+
+    净效果 = 几何缩短（段长 cell_w+aisle_w 变小）× 速度倍率（0.4–1.0），故约 2.0×。
+    """
+    inst = load_mk("mk01")
+    wide = rollout(inst, seed_chain=1, aisle_width=1.5)   # 倍率 1.0
+    narrow = rollout(inst, seed_chain=1, aisle_width=0.6)  # 倍率 0.4（下限）
+    assert narrow["travel_time_total"] > wide["travel_time_total"] * 1.8, \
+        "窄道未降速 → aisle_width 没进 SimConfig"
 
 
 @pytest.mark.unit

@@ -179,7 +179,7 @@ def l_seq_step_gated(policy: PolicyNet, inst: Instance, seed: int, J: int = 4,
     from ..env.corridors import build_corridor_graph, dock_distance_matrix
     from ..env.layout import sample_layout
     n_m = inst.n_machines
-    layout = sample_layout(n_m, layout_type, seed_layout)
+    layout = sample_layout(n_m, seed=seed_layout)
     dm = dock_distance_matrix(build_corridor_graph(layout))
     world = SimWorld(inst, layout, dm, SimConfig(n_agv=n_agv))
     pl = sample_plan(inst, policy, t_max, enc_state)
@@ -250,7 +250,7 @@ def l_seq_step_grpo_full(policy: PolicyNet, inst: Instance, seed: int, J: int = 
     from ..env.corridors import build_corridor_graph, dock_distance_matrix
     from ..env.layout import sample_layout
     n_m = inst.n_machines
-    layout = sample_layout(n_m, layout_type, seed_layout)
+    layout = sample_layout(n_m, seed=seed_layout)
     dm = dock_distance_matrix(build_corridor_graph(layout))
     world = SimWorld(inst, layout, dm, SimConfig(n_agv=n_agv))
     ref = ref_policy if ref_policy is not None else copy.deepcopy(policy)
@@ -312,7 +312,7 @@ def l_seq_step_ppo(policy: PolicyNet, inst: Instance, seed: int, J: int = 4,
     from ..env.corridors import build_corridor_graph, dock_distance_matrix
     from ..env.layout import sample_layout
     n_m = inst.n_machines
-    layout = sample_layout(n_m, layout_type, seed_layout)
+    layout = sample_layout(n_m, seed=seed_layout)
     dm = dock_distance_matrix(build_corridor_graph(layout))
     world = SimWorld(inst, layout, dm, SimConfig(n_agv=n_agv))
     pl = sample_plan(inst, policy, t_max, enc_state)

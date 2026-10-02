@@ -35,7 +35,10 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     layout = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=aisle_width)
     g = build_corridor_graph(layout)
     dm = dock_distance_matrix(g)
-    return SimWorld(inst, layout, dm, cfg or SimConfig()).run(
+    # ⚠️ aisle_width 必须同时进 SimConfig——eff_speed 读的是 cfg.aisle_width（窄道降速）。
+    # 否则 `rollout(aisle_width=1.0)` 只改几何、不改速度，窄道敏感性实验**静默失效**。
+    eff_cfg = cfg if cfg is not None else SimConfig(aisle_width=aisle_width)
+    return SimWorld(inst, layout, dm, eff_cfg).run(
         seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
 
 
@@ -52,7 +55,7 @@ def rollout_evaluate(inst: Instance, plan: list[int] | None, seed: int = 0,
 
 @dataclass
 class SimConfig:
-    n_agv: int = 2
+    n_agv: int = 3          # spec §6.3 主实验值（网格上按边际收益拐点重标）
     agv_speed_mps: float = 1.0    # AGV 车速 [m/s]（布局坐标为米）
     zone_hold: float = 1.0        # 每区段名义通行时长 [min]（退避时长）
     zone_hold_limit: float = 8.0  # 区段申请等待上限（超时→释放重试）[min]
