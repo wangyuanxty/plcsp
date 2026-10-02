@@ -1,7 +1,6 @@
-"""策略网络（M3a 版——特征 MLP 策略；M2 编码器接入=M3c 计划）。
+"""策略网络——机台选择（S 层）+ AGV 派车（L 层）两个头。无 critic（组内相对优势见 group_rel.py）。
 
-S 层（机台选择候选分数）：π_S(·|x,b) 的设施——每工序候选机台打分。
-B/L 层（分批/AGV）在 M3b 加入同构头。无 critic（组内相对优势见 group_rel.py）。
+⚠️ 2026-10-02：**分批（B 层）头已删除**——分批环节整条砍除（`progress-log.md` §12.5）。
 """
 from __future__ import annotations
 
@@ -12,18 +11,16 @@ from ..nn.encoder import LayoutEncoder
 
 
 class PolicyNet(nn.Module):
-    """π = π_B(批模式) · π_S(机台候选)。B 层 3 模式头；无 critic。
+    """π = π_S(机台候选) · π_L(AGV 派车)；无 critic。
 
-    M3c：可选 enc=LayoutEncoder → s_head_tok 路由（mach_logits_emb）；
-    不传 enc 时行为与 M3a 完全一致（消融② 的"双轴 vs 全注意力"测试保留 MLP 开关路径）。
+    可选 enc=LayoutEncoder → s_head_tok 路由（mach_logits_emb）；
+    不传 enc 时走特征 MLP 路径。
     """
-    def __init__(self, feat_op: int = 3, feat_b: int = 4, n_modes: int = 3,
+    def __init__(self, feat_op: int = 3,
                  hidden: int = 64, enc: LayoutEncoder | None = None, n_agv: int = 2,
                  n_feat_l: int = 8):
         super().__init__()
         self.enc = enc
-        self.b_head = nn.Sequential(nn.Linear(feat_b, hidden), nn.GELU(),
-                                    nn.Linear(hidden, n_modes))
         self.s_head = nn.Sequential(nn.Linear(feat_op * 2, hidden), nn.GELU(),
                                     nn.Linear(hidden, 1))
         if enc is not None:
@@ -37,10 +34,6 @@ class PolicyNet(nn.Module):
     def v(self, feat_l: torch.Tensor) -> torch.Tensor:
         """(1,1,F_l) → (1,) 终局价值（critic 基线；PPO/基线策略用）。"""
         return self.v_head(feat_l).squeeze()
-
-    def batch_logits(self, feat_b: torch.Tensor) -> torch.Tensor:
-        """(B, feat_b) → (B, n_modes) 批模式 logits（软max 采样）。"""
-        return self.b_head(feat_b)
 
     def mach_logits(self, feat_op: torch.Tensor, feat_cand: torch.Tensor) -> torch.Tensor:
         """(B,1,F_op) × (B,Ncand,F_cand) → (B,1,Ncand) 候选分数。"""
@@ -62,9 +55,11 @@ class PolicyNet(nn.Module):
         return self.l_head(feat_l)
 
     def encode_state(self, enc_state) -> torch.Tensor | None:
-        """enc_state 特征 → 全序列 token 嵌入 (1,N,d)（带图供更新）；无编码器返回 None。"""
+        """enc_state 特征 → 全序列 token 嵌入 (1,N,d)（带图供更新）；无编码器返回 None。
+
+        2026-10-02：几何删除后 `EncState` 不再含 dist/conf，故只传 (tok_feat, seg)。
+        """
         if self.enc is None:
             return None
-        tok, _ = self.enc(enc_state.tok_feat, enc_state.seg,
-                          enc_state.dist, enc_state.conf)
+        tok, _ = self.enc(enc_state.tok_feat, enc_state.seg)
         return tok

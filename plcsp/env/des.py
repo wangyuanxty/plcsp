@@ -256,10 +256,9 @@ class SimWorld:
         return {j: self.cfg.due_factor * sum(t for _, t in ops) for j, ops in plans.items()}
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-            batch_cap: int | None = None, agv_phi: list[int] | None = None) -> dict:
+            agv_phi: list[int] | None = None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
 
-        batch_cap=同时在途作业数上限（分批门控：B 层决策的载体，见 §1.4 分批决策）。
         agv_phi[task_i] = 第 task_i 个运输任务的 AGV id（L 层决策的载体；None=旧 FIFO 规则）。
           task_i 按 transporter 生成序 0,1,2,...；未覆盖的采用轮询 (i % n_agv)（确定性兜底）。
           绑定模式：每台车一个任务队列（bound 路径）—— 与旧"空闲车接活"语义不同（基线数字仅
@@ -294,11 +293,10 @@ class SimWorld:
         for a in range(self.cfg.n_agv):
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, zm, tasks_in,
                                machines, bound=bound).run())
-        # 首批注入（分批门控 v0 波次语义：先入 batch_cap 个，每完成一个作业补一个）
+        # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
         jkeys = list(plans.keys())
-        first = jkeys[:batch_cap] if batch_cap else jkeys
-        inject_q = [j for j in jkeys if j not in first]
-        for j in first:
+        inject_q: list = []
+        for j in jkeys:
             m0, t0 = plans[j][0]
             env.process(self._release(env, machines[m0].in_q, (j, 0, OpLite(t0), len(plans[j]) == 1)))
         env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
@@ -327,7 +325,7 @@ class SimWorld:
                               "max": float(max(zm.waits)) if zm.waits else 0.0}}
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-                  batch_cap: int | None = None, policy_l=None) -> dict:
+                  policy_l=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** policy_l(feat)，
@@ -336,7 +334,7 @@ class SimWorld:
         policy_l=None → 等价 run 的轮询 bound 行为（agv_phi=None 时轮询兜底）。
         """
         if policy_l is None:
-            return self.run(seed_chain=seed_chain, op_choices=op_choices, batch_cap=batch_cap)
+            return self.run(seed_chain=seed_chain, op_choices=op_choices)
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -361,9 +359,8 @@ class SimWorld:
             env.process(AgvSim(env, a, self.m_dm, self.cfg, stats, zm, tasks_in, machines,
                                bound=True).run())
         jkeys = list(plans.keys())
-        first = jkeys[:batch_cap] if batch_cap else jkeys
-        inject_q = [j for j in jkeys if j not in first]
-        for j in first:
+        inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
+        for j in jkeys:
             m0, t0 = plans[j][0]
             env.process(self._release(env, machines[m0].in_q, (j, 0, OpLite(t0), len(plans[j]) == 1)))
         dec_log: list[tuple] = []

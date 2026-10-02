@@ -4,7 +4,7 @@
 中断必须可续（教训：fjsp-gnnrl MK01 训练首次中断于 Episode 2399/10k，无 ckpt → 只能重跑）。
 
 设计（KISS/工程层，不混淆理论）：
-- 每步仍调用纯函数（train_step / tree_step / local_tree_step），runner 只负责循环/保存/恢复；
+- 每步仍调用纯函数（train_step / local_tree_step），runner 只负责循环/保存/恢复；
 - ckpt = {"step": int, "model": state_dict, "best": float, "seed0": int}
   每 save_every 步写 checkpoints/<run_id>/ckpt.pt；metrics.ndjson 每步追加一行（增量，可断外部分析）；
 - 恢复：resume_training(run_dir) → (policy, ckpt, step)；step 序列续跑（不追求逐位复现：
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import torch
 
-from .group_rel import train_step, tree_step, local_tree_step
+from .group_rel import train_step, local_tree_step
 from .policy import PolicyNet
 from ..nn.encoder import LayoutEncoder
 from ..env.instances import Instance
@@ -88,12 +88,22 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
 def resume_training(run_dir: str) -> tuple[PolicyNet, dict, int]:
     """从 run_dir 恢复：返回 (policy(参数已加载), ckpt dict, step)。
 
-    ckpt 键含 enc.* → 自动构造 PolicyNet(enc=LayoutEncoder(feat_dim=10)) 恢复（M3c 版）。
+    ckpt 键含 enc.* → 自动构造 PolicyNet(enc=LayoutEncoder()) 恢复。
+
+    ⚠️ 2026-10-02：**P0 前的旧 checkpoint 全部作废**——`checkpoints/` 下 19 个 `.pt` 均含已删除的
+    `b_head.*`（分批头）键，且训练于 bug#12 的错误实例（非官方 Brandimarte）。加载会明确报错。
     """
     rd = Path(run_dir)
     ck = torch.load(rd / CKPT_NAME, map_location="cpu", weights_only=False)
-    pol = PolicyNet(enc=LayoutEncoder(feat_dim=10) if any(k.startswith("enc.") for k in ck["model"]) else None)
-    pol.load_state_dict(ck["model"])
+    pol = PolicyNet(enc=LayoutEncoder() if any(k.startswith("enc.") for k in ck["model"]) else None)
+    try:
+        pol.load_state_dict(ck["model"])
+    except RuntimeError as e:
+        raise RuntimeError(
+            "checkpoint 与当前 PolicyNet 不兼容（P0 已删除 batch 头 b_head.*）。"
+            "checkpoints/ 下 19 个旧 .pt 全部作废——它们训练于 bug#12 的错误实例，"
+            "且含已删除的 batch 头。请勿复用。"
+        ) from e
     return pol, ck, int(ck["step"])
 
 
