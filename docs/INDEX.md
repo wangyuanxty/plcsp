@@ -63,6 +63,18 @@
 
 **其余**：见 `progress-log.md` 开放线索 A–K。
 
+## 5.5 P0 地基（2026-10-02 完成）
+
+- **版本控制**：已 `git init` 并建仓（4 次提交）。`.gitignore` 排除 `third_party/`（1.5 G / 33 个嵌套 `.git`）、`references/`（410 M / 103 PDF）、`checkpoints/`（66 M）。**实际入库 71 个文件、`.git` 仅 805 K**。远程 `origin` = `https://github.com/wangyuanxty/plcsp.git`（**尚未 push**）。
+- **包名**：`geosched` → **`plcsp`**（原名的 `geo` 随几何线砍除而失真）。历史/指令性文档（`progress-log.md`、spec、plan）**保留旧名不改**，以免篡改历史。
+- **归档**（`plcsp/archive/`，**38 个文件**）：SA-GRPO 树 `standard_tree.py` + 6 个导入它的脚本 + `m5_*` 系列 + `m2/m3_smoke` + `m8_adv` + 全部 `*.jsonl`。**历史证据保留、不进论文**（spec §2）。
+- **删除**：编码器 `GeomBias` 与 `dist`/`conf` 参数、`features.py`/`state_emb.py` 的几何上游、`PolicyNet` 的 batch 头、`des.py` 的 `batch_cap` 门控、`group_rel.py` 的 `tree_step`/`_mode_feat`（B 层树训练器）。**`run_gated` 保留**（L 层决策接口）。
+- **旧 checkpoint**：`checkpoints/` 下 19 个 `.pt` **全部作废**（含已删的 `b_head.*`；且训练于 bug#12 的错误实例）。`resume_training` 已改为明确报错。
+- **回归门禁**：`plcsp/tests/test_instances.py` **42 项全绿**（改名前后一致）。
+
+> 🔴 **P0 暴露的关键发现（P2 必须处理）**：旧的 `encode_state` 产出的 token 特征，**除 4 位静态几何外全是桩 0**——动态量（缓冲占用/负载/电量/等待/占道）**从未接入过**。几何一删，编码器输入**全零**。
+> **故 P2 不是"删掉几何就行"，而是必须重新设计 token 特征。**（已在 `nn/features.py`、`nn/state_emb.py` docstring 顶部写明。）
+
 ## 6. 环境
 
 Windows 11｜Anaconda base（`D:\anaconda\python.exe`）｜Python 3.12.4｜**torch 2.14.0+cpu**（无 CUDA）｜simpy 4.1.2｜numpy 1.26.4｜matplotlib 3.11.0｜networkx 3.6.1
