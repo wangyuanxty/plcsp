@@ -161,29 +161,37 @@ def _instance_key(inst: Instance) -> tuple:
             tuple(tuple(min(t for _, t in op) for op in job) for job in inst.jobs))
 
 
-def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
-                       seed_layout: int = 0) -> float:
-    """⑧ 的 `M_ref` = **参考调度**（每工序取最短候选 + AGV 轮询派车）的 makespan。
+def reference_run(inst: Instance, cfg: SimConfig | None = None,
+                  seed_layout: int = 0) -> dict:
+    """参考调度（每工序取最短候选 + AGV 轮询派车）的**整份 metrics**——缓存 + 重入短路。
 
-    ⚠️ **绝不能取被优化的那次 episode 的 makespan**——否则交期随策略一起漂移，
+    ⚠️ **绝不能取被优化的那次 episode 的指标**——否则交期随策略一起漂移，
     目标退化（旧 `due_factor` 就是这么坏的：实测 MK01 tardy 恒为 10/10）。
     故单独跑一次并缓存；重入时 `_due` 会退化为"无交期"（见 `SimWorld._due`）。
+    ⚠️ 由此，参考运行自身的 `tardy` / `tardy_twt` **恒为 0**——取 f^ref 者须事后按
+    `d_j = τ·M_ref` 从同一次运行的 `completes` 重算 TWT（`reward.ReferenceObjectives.of`
+    就是这么做的；交期只影响 metric、不影响动力学，故事后算 = 交期开启时的值）。
     """
     key = _instance_key(inst) + (seed_layout,)
     if key in _MREF_CACHE:
         return _MREF_CACHE[key]
     global _MREF_BUSY
     if _MREF_BUSY:                   # 理论上被 `_due` 的短路挡住，此处兜底
-        raise RuntimeError("reference_makespan 重入")
+        raise RuntimeError("reference_run 重入")
     _MREF_BUSY = True
     try:
         r = rollout(inst, seed_layout=seed_layout, seed_chain=0,
                     cfg=cfg or SimConfig(), constraints=None)
     finally:
         _MREF_BUSY = False
-    val = float(r["makespan"])
-    _MREF_CACHE[key] = val
-    return val
+    _MREF_CACHE[key] = r
+    return r
+
+
+def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
+                       seed_layout: int = 0) -> float:
+    """⑧ 的 `M_ref` = 参考调度的 makespan——`reference_run` 的薄封装（既有调用点不变）。"""
+    return float(reference_run(inst, cfg, seed_layout)["makespan"])
 
 
 class MachineSim:
