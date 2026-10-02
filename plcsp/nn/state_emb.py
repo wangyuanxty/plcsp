@@ -38,7 +38,7 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_jobs, 8)。"""
+    """(n_jobs, 8)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。"""
     out = np.zeros((ctx.n_jobs, F_B), dtype=np.float32)
     for j, js in enumerate(snap.jobs):
         out[j] = (
@@ -58,16 +58,24 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_agv, 10)。"""
+    """(n_agv, 10)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。"""
     out = np.zeros((ctx.n_agv, F_V), dtype=np.float32)
     for a, v in enumerate(snap.vehicles):
         st = [0.0] * 4
         st[int(_safe(v.status, 0, 3))] = 1.0     # `status` ∈ {0,1,2,3} 独热；越界钳到 3（故障态）
-        # ⚠️ x/y 必须取自**节点坐标**，不能都用节点号（那等于丢掉了几何，只剩序号）
-        nx, ny = ctx.node_xy[max(v.node, 0)]
+        # ⚠️ x/y 必须取自**节点坐标**，不能都用节点号（那等于丢掉了几何，只剩序号）。
+        # ⚠️ `node == -1` 是**哨兵**（`des.py` 在"尚未出车"`pos_node is None` 时发 -1），
+        # **不是 0 号节点**：若按 0 号取坐标，每台未出车的车都会拿到**伪造的网格角落坐标**，
+        # 且与"真的停在 0 号节点"**无法区分**（Review F1）。故哨兵编成 (−1, −1)——
+        # 真实节点坐标归一后 ∈ [0,1)，−1 落在值域外，天然可区分。
+        if v.node >= 0:
+            nx, ny = ctx.node_xy[v.node]
+            x, y = nx / ctx.bbox_diag, ny / ctx.bbox_diag
+        else:
+            x, y = -1.0, -1.0
         out[a] = (*st,
-                  nx / ctx.bbox_diag,                                # 4 node_x
-                  ny / ctx.bbox_diag,                                # 5 node_y
+                  x,                                                 # 4 node_x
+                  y,                                                 # 5 node_y
                   _safe(v.queued / max(ctx.max_queued, 1), 0.0, 1.0),   # 6 queued
                   _safe(v.battery_frac, 0.0, 1.0),                   # 7 battery
                   v.capacity / max(ctx.max_capacity, 1),             # 8 capacity
@@ -76,7 +84,7 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def global_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(1, 3)。"""
+    """(1, 3)。顺序 = FEATURE_NAMES["G"]，**不得改序**（有测试按名核对）。"""
     return np.array([[
         _safe(snap.now / ctx.m_ref, 0.0, 4.0),                      # 0 time_progress
         snap.n_done / max(ctx.n_jobs, 1),                           # 1 done_frac

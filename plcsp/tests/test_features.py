@@ -8,8 +8,10 @@ from plcsp.env.des import SimConfig, SimWorld
 from plcsp.env.instances import load_mk
 from plcsp.env.layout import sample_layout
 from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
+from plcsp.env.snapshot import JobState, MachineState, Snapshot, VehicleState
 from plcsp.nn.features import F_B, F_G, F_M, F_MAX, F_V, FEATURE_NAMES, norm_context
-from plcsp.nn.state_emb import build_tok
+from plcsp.nn.state_emb import (build_tok, global_features, job_features,
+                                machine_features, vehicle_features)
 
 
 def _ctx_and_snap(name="mk01", done=False):
@@ -20,6 +22,20 @@ def _ctx_and_snap(name="mk01", done=False):
     if done:
         w.run(seed_chain=1)
     return inst, lay, w, norm_context(inst, lay, m_ref=100.0)
+
+
+def _snap(now=0.0, machines=(), jobs=(), vehicles=(), n_done=0, in_flight=0):
+    """手搓快照（**不碰仿真**）——供"按名核对列序"这类需要**指定值**的断言用。"""
+    return Snapshot(now=now, machines=tuple(machines), jobs=tuple(jobs),
+                    vehicles=tuple(vehicles), n_done=n_done, in_flight=in_flight)
+
+
+def _backlog_snap(inst, backlog_min):
+    """全机台同积压的合成快照（跨实例归一化断言用，不碰仿真）。"""
+    m = MachineState(backlog_min=float(backlog_min), in_q_len=0, in_cap=2.0, out_q_len=0,
+                     out_cap=2.0, busy=False, remaining_min=0.0, pm_used_min=0.0,
+                     fail_rate=0.0, prev_job=-1)
+    return _snap(machines=(m,) * inst.n_machines)
 
 
 @pytest.mark.unit
@@ -56,13 +72,26 @@ def test_features_are_finite_and_bounded():
 
 @pytest.mark.unit
 def test_backlog_feature_is_normalized_by_total_work():
-    """⚠️ Review Focus #1：积压维必须除以实例总工时——否则 MK01 与 MK10 差 12 倍。"""
+    """⚠️ Review Focus #1：积压维必须除以实例总工时——否则 MK01 与 MK10 差 12 倍。
+
+    ⚠️ Review F2：本条此前**只断言 `NormContext` 的量级**，从不穿过特征函数——把积压维
+    改回**绝对分钟**它照样全绿（假回归守卫）。故下面两条都补上：
+    ① `NormContext` 的标度值；② **真的调用 `machine_features`** 的跨实例断言。
+    """
     inst_s, _, ws, ctx_s = _ctx_and_snap("mk01")
     inst_l, _, wl, ctx_l = _ctx_and_snap("mk10")
     assert ctx_l.total_work_min > ctx_s.total_work_min * 10, "两实例总工时应有量级差"
-    # 同一物理积压量在两实例上应映到相近的归一化值
     assert ctx_s.total_work_min == pytest.approx(153.0, rel=0.05)
     assert ctx_l.total_work_min == pytest.approx(1847.0, rel=0.05)
+
+    # ② 穿过特征函数：相同的**相对**积压（各占总工时的 20%）必须映到**同一个**归一化值。
+    #    绝对分钟下二者会是 30.6 vs 369.4（差 12 倍），故这条能钉死"除以总工时"。
+    frac = 0.2
+    f_s = machine_features(_backlog_snap(inst_s, frac * ctx_s.total_work_min), ctx_s)
+    f_l = machine_features(_backlog_snap(inst_l, frac * ctx_l.total_work_min), ctx_l)
+    assert np.allclose(f_s[:, 0], frac, rtol=1e-6), f"MK01 积压维未按总工时归一：{f_s[0, 0]}"
+    assert np.allclose(f_l[:, 0], frac, rtol=1e-6), f"MK10 积压维未按总工时归一：{f_l[0, 0]}"
+    assert f_s[0, 0] == pytest.approx(f_l[0, 0], rel=1e-6), "同一相对积压在两实例上不同标度"
 
 
 @pytest.mark.unit
@@ -73,3 +102,77 @@ def test_seg_lengths_come_from_actual_rows_not_hardcoded():
     assert seg[0] == inst.n_machines == 15
     assert seg[1] == inst.n_jobs == 20
     assert tok.shape[0] == sum(seg)
+
+
+@pytest.mark.unit
+def test_undispatched_vehicle_node_sentinel_is_distinguishable():
+    """⚠️ Review F1：`node == -1`（尚未出车）**不是 0 号节点**。
+
+    `des.py` 在 `agv.pos_node is None` 时发哨兵 -1；新造世界里**每一台车**都是这个状态
+    （正是 `test_build_tok_is_one_padded_tensor` 用的那种快照）。若按 0 号节点取坐标，
+    就会发出**伪造的网格角落几何**，且与"真的停在 0 号节点"**无法区分**。
+    """
+    inst, lay, w, ctx = _ctx_and_snap()                  # 未 run：车队尚未出车
+    snap = w.snapshot()
+    assert all(v.node == -1 for v in snap.vehicles), "前提：新造世界的车都还没出车"
+    tok, seg = build_tok(snap, inst, lay, ctx)
+    n_m, n_b, n_v, _ = seg
+    xy = tok[n_m + n_b:n_m + n_b + n_v, 4:6]
+    assert np.all(xy == -1.0), f"哨兵应编成 (−1,−1)（真实坐标 ∈ [0,1)）：{xy.tolist()}"
+    # 与"真的停在 0 号节点"可区分——0 号节点是网格原点，归一后是 (0,0)
+    x0, y0 = ctx.node_xy[0]
+    assert not np.allclose(xy[0], (x0 / ctx.bbox_diag, y0 / ctx.bbox_diag)), "哨兵与 0 号节点同码"
+
+
+@pytest.mark.unit
+def test_feature_order_matches_feature_names():
+    """⚠️ Review F3：`FEATURE_NAMES` 的**顺序即列偏移**——错序 = 静默错配。
+
+    此前只有长度断言（`test_field_counts_match_declared_widths`），构造函数里的**列序**
+    其实无人守。此条手搓一个每维取值可辨认的快照，**逐名**核对「第 i 个名字的值落在第 i 列」。
+    （期望**值**按 spec 公式算，此条核对的是**位置**。）
+    """
+    inst, lay, w, ctx = _ctx_and_snap()
+    node = lay.grid.node_id(1, 1)                        # 非 0 号节点：x/y 都不为 0
+    nx, ny = ctx.node_xy[node]
+    snap = _snap(
+        now=1.5 * ctx.m_ref,                             # due_margin = 1.5 − 1 = 0.5
+        machines=(MachineState(backlog_min=0.30 * ctx.total_work_min, in_q_len=2, in_cap=4.0,
+                               out_q_len=1, out_cap=4.0, busy=True,
+                               remaining_min=0.40 * ctx.total_work_min,
+                               pm_used_min=0.10 * ctx.pm_interval,
+                               fail_rate=0.60 * ctx.max_fail_rate, prev_job=-1),
+                  ) * ctx.n_m,
+        jobs=(JobState(done_ops=1, total_ops=4, remaining_min=0.35 * ctx.total_work_min,
+                       finished=False, at_machine=1, in_transit=True, on_agv=2),
+              ) * ctx.n_jobs,
+        vehicles=(VehicleState(status=2, node=node, queued=1, battery_frac=0.7,
+                               capacity=min(2, ctx.max_capacity), speed_factor=1.1),
+                  ) * ctx.n_agv,
+        n_done=3, in_flight=2)
+
+    checks = (
+        ("M", machine_features(snap, ctx)[0], {
+            "backlog": 0.30, "in_fill": 2 / 4.0, "out_fill": 1 / 4.0, "busy": 1.0,
+            "remaining_frac": 0.40, "pm_left": 0.90,
+            "fail_rate": 0.60 * ctx.max_fail_rate / max(ctx.max_fail_rate, 1e-9)}),
+        ("B", job_features(snap, ctx)[0], {
+            "progress": 1 / 4, "remaining_work": 0.35, "due_margin": 0.5, "finished": 0.0,
+            "at_machine": 1 / max(ctx.n_m, 1), "in_transit": 1.0,
+            "on_agv": 2 / max(ctx.n_agv, 1), "weight": 1.0}),
+        ("V", vehicle_features(snap, ctx)[0], {
+            "st_idle": 0.0, "st_empty": 0.0, "st_loaded": 1.0, "st_down": 0.0,
+            "node_x": nx / ctx.bbox_diag, "node_y": ny / ctx.bbox_diag,
+            "queued": 1 / max(ctx.max_queued, 1), "battery": 0.7,
+            "capacity": min(2, ctx.max_capacity) / max(ctx.max_capacity, 1),
+            "speed_factor": 1.1}),
+        ("G", global_features(snap, ctx)[0], {
+            "time_progress": 1.5, "done_frac": 3 / max(ctx.n_jobs, 1),
+            "in_flight": 2 / max(ctx.max_queued, 1)}),
+    )
+    for key, row, expected in checks:
+        names = FEATURE_NAMES[key]
+        assert len(names) == len(row) == len(expected)
+        for col, name in enumerate(names):
+            assert row[col] == pytest.approx(expected[name], rel=1e-5, abs=1e-6), (
+                f"{key} 段第 {col} 列应是「{name}」={expected[name]}，实测 {row[col]}")
