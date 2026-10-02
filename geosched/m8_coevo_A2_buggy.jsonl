@@ -1,0 +1,28 @@
+{"arm": "co", "round": 1, "elapsed": 0.2, "cma_mean": [-0.168, 1.478, 0.634, 2.771], "cma_best_R": -1.4991, "cma_best": {"layout_type": "line", "aisle_width": 1.5470061488804372, "machine_gap": 0.8, "n_zones": 3}, "cma_best_mks": 483.12, "policy_on_default": 488.35}
+{"arm": "co", "round": 2, "elapsed": 478.2, "cma_mean": [-0.231, 1.388, 0.54, 2.416], "cma_best_R": -1.4731, "cma_best": {"layout_type": "line", "aisle_width": 1.5679568465762916, "machine_gap": 0.9801145364454763, "n_zones": 2}, "cma_best_mks": 464.99, "policy_on_default": 455.25}
+{"arm": "co", "round": 3, "elapsed": 1071.9, "cma_mean": [0.1, 1.361, 0.274, 1.764], "cma_best_R": -1.3052, "cma_best": {"layout_type": "line", "aisle_width": 1.3412170226105355, "machine_gap": 0.8, "n_zones": 1}, "cma_best_mks": 380.56, "policy_on_default": 395.06}
+{"arm": "co", "round": 4, "elapsed": 1649.9, "cma_mean": [0.625, 1.204, 0.109, 2.026], "cma_best_R": -1.2584, "cma_best": {"layout_type": "U", "aisle_width": 1.4711110001260332, "machine_gap": 0.8, "n_zones": 4}, "cma_best_mks": 328.53, "policy_on_default": 468.02}
+{"arm": "co", "round": 5, "elapsed": 2198.5, "cma_mean": [0.411, 1.425, -0.162, 0.191], "cma_best_R": -1.2587, "cma_best": {"layout_type": "U", "aisle_width": 1.5761225108421033, "machine_gap": 0.8, "n_zones": 1}, "cma_best_mks": 271.22, "policy_on_default": 312.53}
+{"arm": "co", "round": 6, "elapsed": 2769.9, "cma_mean": [0.976, 1.088, -0.102, -0.494], "cma_best_R": -1.2137, "cma_best": {"layout_type": "U", "aisle_width": 1.333952740935073, "machine_gap": 0.8, "n_zones": 1}, "cma_best_mks": 279.25, "policy_on_default": 319.75}
+{"arm": "rs", "round": 1, "elapsed": 3328.7, "rs_best_R": -1.5538, "rs_best": {"layout_type": "line", "aisle_width": 1.412564219339957, "machine_gap": 1.3318858451561273, "n_zones": 3}, "policy_on_default": 488.35}
+{"arm": "rs", "round": 2, "elapsed": 3898.3, "rs_best_R": -1.4111, "rs_best": {"layout_type": "line", "aisle_width": 1.6623764334144775, "machine_gap": 1.5496386459239644, "n_zones": 1}, "policy_on_default": 455.25}
+{"arm": "rs", "round": 3, "elapsed": 4451.8, "rs_best_R": -1.3629, "rs_best": {"layout_type": "U", "aisle_width": 1.7659295773460926, "machine_gap": 0.8666702486299984, "n_zones": 1}, "policy_on_default": 383.04}
+{"arm": "rs", "round": 4, "elapsed": 5034.0, "rs_best_R": -1.3629, "rs_best": {"layout_type": "U", "aisle_width": 1.7659295773460926, "machine_gap": 0.8666702486299984, "n_zones": 1}, "policy_on_default": 362.98}
+{"arm": "rs", "round": 5, "elapsed": 5792.7, "rs_best_R": -1.3629, "rs_best": {"layout_type": "U", "aisle_width": 1.7659295773460926, "machine_gap": 0.8666702486299984, "n_zones": 1}, "policy_on_default": 292.8}
+{"arm": "rs", "round": 6, "elapsed": 6456.6, "rs_best_R": -1.3629, "rs_best": {"layout_type": "U", "aisle_width": 1.7659295773460926, "machine_gap": 0.8666702486299984, "n_zones": 1}, "policy_on_default": 311.83}
+{"arm": "dr", "round": 1, "elapsed": 7032.0, "policy_on_default": 488.35}
+{"arm": "dr", "round": 2, "elapsed": 7609.3, "policy_on_default": 455.25}
+{"arm": "dr", "round": 3, "elapsed": 8181.3, "policy_on_default": 380.0}
+{"arm": "dr", "round": 4, "elapsed": 8756.9, "policy_on_default": 362.98}
+{"arm": "dr", "round": 5, "elapsed": 9331.6, "policy_on_default": 298.78}
+{"arm": "dr", "round": 6, "elapsed": 9899.8, "policy_on_default": 299.77}
+{"arm": "fixed", "round": 1, "elapsed": 10460.9, "policy_on_default": 488.35}
+{"arm": "fixed", "round": 2, "elapsed": 11029.1, "policy_on_default": 455.25}
+{"arm": "fixed", "round": 3, "elapsed": 11599.6, "policy_on_default": 389.06}
+{"arm": "fixed", "round": 4, "elapsed": 12177.5, "policy_on_default": 374.0}
+{"arm": "fixed", "round": 5, "elapsed": 12696.6, "policy_on_default": 301.44}
+{"arm": "fixed", "round": 6, "elapsed": 13144.3, "policy_on_default": 308.83}
+{"arm": "co", "final": true, "eval": {"default": 316.89, "co_final": 330.45, "rs_final": 261.68, "uni0": 394.31, "uni1": 337.93, "uni2": 333.63, "uni3": 332.32, "uni4": 343.22, "uni5": 326.63, "uni6": 338.15, "uni7": 351.87}, "own": 330.45, "uni_mean": 344.76, "elapsed": 13743.7}
+{"arm": "rs", "final": true, "eval": {"default": 309.39, "co_final": 329.35, "rs_final": 261.74, "uni0": 380.51, "uni1": 330.82, "uni2": 353.79, "uni3": 340.32, "uni4": 316.87, "uni5": 325.29, "uni6": 330.67, "uni7": 335.9}, "own": 261.74, "uni_mean": 339.27, "elapsed": 13760.3}
+{"arm": "dr", "final": true, "eval": {"default": 303.72, "co_final": 297.52, "rs_final": 261.26, "uni0": 398.67, "uni1": 334.56, "uni2": 327.34, "uni3": 339.64, "uni4": 370.33, "uni5": 308.21, "uni6": 327.95, "uni7": 369.28}, "own": 303.72, "uni_mean": 347.0, "elapsed": 13773.3}
+{"arm": "fixed", "final": true, "eval": {"default": 305.89, "co_final": 314.28, "rs_final": 246.1, "uni0": 405.8, "uni1": 359.29, "uni2": 324.76, "uni3": 346.87, "uni4": 338.39, "uni5": 310.84, "uni6": 335.15, "uni7": 335.05}, "own": 305.89, "uni_mean": 344.52, "elapsed": 13794.3}

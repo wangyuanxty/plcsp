@@ -1,0 +1,14 @@
+{"exp": "A", "cfg": "bias", "step": 50, "greedy_mean": 310.87, "elapsed": 65.2}
+{"exp": "A", "cfg": "bias", "step": 100, "greedy_mean": 310.87, "elapsed": 129.3}
+{"exp": "A", "cfg": "bias", "step": 150, "greedy_mean": 310.87, "elapsed": 193.2}
+{"exp": "A", "cfg": "bias", "step": 200, "greedy_mean": 310.87, "elapsed": 254.6}
+{"exp": "B", "cfg": "bias", "step": 200, "layout": "line2", "greedy_mean": 311.54, "elapsed": 254.8}
+{"exp": "B", "cfg": "bias", "step": 200, "layout": "U1", "greedy_mean": 263.6, "elapsed": 255.0}
+{"exp": "B", "cfg": "bias", "step": 200, "layout": "island1", "greedy_mean": 375.91, "elapsed": 255.1}
+{"exp": "A", "cfg": "noBias", "step": 50, "greedy_mean": 324.92, "elapsed": 320.3}
+{"exp": "A", "cfg": "noBias", "step": 100, "greedy_mean": 310.87, "elapsed": 384.8}
+{"exp": "A", "cfg": "noBias", "step": 150, "greedy_mean": 310.87, "elapsed": 449.6}
+{"exp": "A", "cfg": "noBias", "step": 200, "greedy_mean": 310.87, "elapsed": 514.9}
+{"exp": "B", "cfg": "noBias", "step": 200, "layout": "line2", "greedy_mean": 311.54, "elapsed": 515.0}
+{"exp": "B", "cfg": "noBias", "step": 200, "layout": "U1", "greedy_mean": 328.57, "elapsed": 515.2}
+{"exp": "B", "cfg": "noBias", "step": 200, "layout": "island1", "greedy_mean": 375.91, "elapsed": 515.3}

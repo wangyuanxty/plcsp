@@ -1,0 +1,27 @@
+# ── 外部资源：体积 + 版权 + 嵌套 .git（33 个克隆各有自己的 .git）──
+third_party/
+references/
+checkpoints/
+
+# ── 生成物 ──
+geosched/figs/
+plcsp/figs/
+__pycache__/
+*.pyc
+*.pyo
+
+# ── 运行日志（可重生成）──
+*_run.log
+*_run*.log
+
+# ── superpowers skill 工作区（ledger / brief / review 包，git-ignored scratch）──
+.superpowers/
+
+# ── Claude Code：提交项目共享配置，忽略机器本地配置 ──
+.claude/settings.local.json
+
+# ── 编辑器/系统 ──
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

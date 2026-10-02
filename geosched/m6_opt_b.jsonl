@@ -1,0 +1,10 @@
+{"variant": "b", "step": 100, "r": 0.0, "g_stok": 0.0088, "g_l": 0.0289, "eval_mean3": 560.58, "elapsed": 918.4}
+{"variant": "b", "step": 200, "r": 0.0, "g_stok": 0.0446, "g_l": 0.017, "eval_mean3": 357.01, "elapsed": 1583.3}
+{"variant": "b", "step": 300, "r": 0.0, "g_stok": 0.0132, "g_l": 0.047, "eval_mean3": 446.68, "elapsed": 2191.1}
+{"variant": "b", "step": 400, "r": 0.0, "g_stok": 0.0365, "g_l": 0.032, "eval_mean3": 368.29, "elapsed": 3353.3}
+{"variant": "b", "step": 500, "r": 0.0, "g_stok": 0.0665, "g_l": 0.0193, "eval_mean3": 384.48, "elapsed": 3843.8}
+{"variant": "b", "step": 500, "r": -0.0, "g_stok": 0.0339, "g_l": 0.0639, "eval_mean3": 379.86, "elapsed": 879.3}
+{"variant": "b", "step": 600, "r": -0.0, "g_stok": 0.0085, "g_l": 0.0086, "eval_mean3": 381.72, "elapsed": 2332.6}
+{"variant": "b", "step": 700, "r": -0.0, "g_stok": 0.0302, "g_l": 0.0223, "eval_mean3": 378.72, "elapsed": 3201.8}
+{"variant": "b", "step": 800, "r": 0.0, "g_stok": 0.0, "g_l": 0.033, "eval_mean3": 395.2, "elapsed": 4243.2}
+{"variant": "b", "step": 800, "eval_30seeds": {"mean": 372.2, "median": 370.72, "min": 370.72, "max": 380.58}, "elapsed": 4245.0}

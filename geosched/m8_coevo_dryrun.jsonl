@@ -1,0 +1,2 @@
+{"arm": "co", "round": 1, "elapsed": 21.0, "policy_on_default": 486.35, "cma_mean": [-0.511, 0.97, 0.627, 2.945], "cma_best_R": -1.2537, "cma_best": {"layout_type": "line", "aisle_width": 0.8672892644769737, "machine_gap": 0.6883627687313238, "n_zones": 3}, "cma_best_mks": 430.66}
+{"arm": "co", "final": true, "eval": {"default": 486.35, "co_final": 434.49, "uni0": 583.63, "uni1": 560.25, "uni2": 513.55, "uni3": 542.67, "uni4": 587.6, "uni5": 481.34, "uni6": 550.57, "uni7": 504.25}, "uni_mean": 540.48, "elapsed": 32.0}

@@ -1,0 +1,8 @@
+{"step": 100, "eval": {"mean": 553.04, "median": 553.04, "min": 553.04, "max": 553.04, "n_seeds": 3}, "elapsed": 91.3}
+{"step": 200, "eval": {"mean": 537.13, "median": 537.13, "min": 537.13, "max": 537.13, "n_seeds": 3}, "elapsed": 180.4}
+{"step": 300, "eval": {"mean": 491.13, "median": 491.13, "min": 491.13, "max": 491.13, "n_seeds": 3}, "elapsed": 337.3}
+{"step": 400, "eval": {"mean": 567.02, "median": 574.67, "min": 551.73, "max": 574.67, "n_seeds": 3}, "elapsed": 494.5}
+{"step": 500, "eval": {"mean": 511.13, "median": 502.58, "min": 502.58, "max": 528.24, "n_seeds": 3}, "elapsed": 650.8}
+{"step": 600, "eval": {"mean": 529.53, "median": 529.53, "min": 529.53, "max": 529.53, "n_seeds": 3}, "elapsed": 784.8}
+{"step": 700, "eval": {"mean": 521.63, "median": 515.01, "min": 515.01, "max": 534.87, "n_seeds": 3}, "elapsed": 871.4}
+{"step": 800, "eval": {"mean": 478.81, "median": 478.81, "min": 478.81, "max": 478.81, "n_seeds": 3}, "elapsed": 958.0}
