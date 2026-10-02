@@ -21,7 +21,7 @@
 | 文件 | 内容 | 谁在用 |
 |---|---|---|
 | **INDEX.md** | 本文件——索引入口 | 新会话第一站 |
-| ⭐ **`superpowers/specs/2026-10-02-plcsp-rebuild-design.md`** | **权威设计（当前方案）**——问题定义、11 约束、目标与奖励、骨架、实验设计、实施分期 | **写论文的唯一依据** |
+| ⭐ **`superpowers/specs/2026-10-02-plcsp-rebuild-design.md`** | **权威设计（当前方案）**——问题定义、10 约束、目标与奖励、骨架、实验设计、实施分期 | **写论文的唯一依据** |
 | `superpowers/plans/2026-10-02-p0-foundation.md` | P0 地基实施计划（建仓/改名/归档） | 已执行完毕 |
 | ~~`method-design.md`~~ | **已取代**（旧的"三环节 + 几何感知 + SA-GRPO"方案整批作废）——仅作历史参考，重写见 spec §12#7 | ⚫ 勿依据 |
 | ~~`feasibility-report.md`~~ | **已作废**（"国际首次""空位"类表述整批失效）——重写见 spec §12#7 | ⚫ 勿依据 |
@@ -31,7 +31,7 @@
 | `literature-plcsp-drl.md` | **PLCSP+DRL 全量清单**（核心 40 + 弱相关 24 + 缺口 19 篇 P0–P3 分级） | 找对位/找缺口 |
 | `citation-cards.md` | **精读事实卡**（含公式、数字、自认局限、与我方逐点对比） | 写 related work / 找 gap |
 | `progress-log.md` | 实验数字、bug 清单、负例、**开放线索 A–K**、术语纪律 | 断点续接 |
-| `references/` | 63 篇 PDF + 2 个手动下载清单 | 精读 |
+| `references/` | 103 篇 PDF | 精读 |
 
 ## 3. 当前阶段（学术 pipeline）
 
