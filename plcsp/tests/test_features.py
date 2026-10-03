@@ -281,3 +281,52 @@ def test_due_margin_is_redundant_with_global_time_progress():
     expected = float(np.clip(SimConfig().tau - gl[0], -2.0, 2.0))
     assert b[0, 2] == pytest.approx(expected, abs=1e-6)
     assert expected == pytest.approx(SimConfig().tau - 1.2, abs=1e-6)   # 取值未触边界
+
+
+@pytest.mark.unit
+def test_fail_rate_feature_is_silent_when_machine_failure_off():
+    """⚠️ R1a（F2 同类残留）：③ 关闭时 `fail_rate` 维必须恒 0——不得留下"这台机会坏"的假信号。
+
+    仿真侧：`MachineSim._process` 在 ③ 关时直接一次跑完（`fail_events` 恒 0）；特征侧此前
+    照报 `pad.fail_rate / max_fail_rate` ⟹ 策略读到一个**动力学里不存在**的量（真阴性变假阳性，
+    与 ⑤/⑩ 已修的 F2 同型）。
+    判据双向：全开档必须非零（否则"关时恒 0"恒真、抓不住任何东西），关掉档必须全 0。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, _dm = build_layout_and_dm(inst, cfg)
+    m = MachineState(backlog_min=0.0, in_q_len=0, in_cap=2.0, out_q_len=0, out_cap=2.0,
+                     busy=False, remaining_min=0.0, pm_used_min=0.0, fail_rate=0.01,
+                     prev_job=-1)
+    snap = _snap(machines=(m,) * inst.n_machines)
+    full = ConstraintConfig()
+    off = full.with_off("machine_failure")
+    col = lambda cons: machine_features(                            # noqa: E731
+        snap, build_ctx_for_unit_test(inst, lay, constraints=cons))[:, 6]
+    assert col(full).max() > 0.0, "全开档 fail_rate 维恒 0——判据失去意义"
+    assert np.all(col(off) == 0.0), (
+        f"③ 关时 fail_rate 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
+
+
+@pytest.mark.unit
+def test_due_margin_feature_is_silent_when_due_dates_off():
+    """⚠️ R1b（F2 同类残留）：⑧ 关闭时 `due_margin` 维必须恒 0——不得留下"有交期"的假信号。
+
+    仿真侧：`SimWorld._due_map` 在 ⑧ 关时返回 `{}`，快照 `JobState.due` 落 0.0 哨兵；
+    特征侧此前照算 `(0 − now)/M_ref`（不是 0，长 episode 会饱和到 −2）⟹ 策略读到一个
+    **并不存在**的交期紧迫度。故即便快照里带着 `due` 值，开关关掉也必须静默。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, _dm = build_layout_and_dm(inst, cfg)
+    m_ref = 100.0
+    job = JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
+                   due=SimConfig().tau * m_ref, at_machine=-1, in_transit=True, on_agv=0)
+    snap = _snap(now=0.5 * m_ref, jobs=(job,) * inst.n_jobs)
+    full = ConstraintConfig()
+    off = full.with_off("due_dates")
+    col = lambda cons: job_features(                                # noqa: E731
+        snap, build_ctx_for_unit_test(inst, lay, m_ref, constraints=cons))[:, 2]
+    assert col(full).max() > 0.0, "全开档 due_margin 维恒 0——判据失去意义"
+    assert np.all(col(off) == 0.0), (
+        f"⑧ 关时 due_margin 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")

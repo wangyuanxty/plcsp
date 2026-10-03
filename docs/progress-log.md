@@ -942,7 +942,15 @@ MK01 上 ~25 步即饱和**。完整读数与 25 步一桶的轨迹见 18.4。
 3. **`norm_context` 把 `pm_interval` 硬编码 120.0**，注释却自称"与 `SimConfig` 同源"——**并不同源**。非默认值下 `pm_left` 会被 clip 到 0 而静默死掉。
 4. **setup 路径未把 `cfg.aisle_width` / `max_agv_capacity` 传进 `sample_layout`**（`rollout()` 有传、`SimWorld` 只挡 `n_agv`）⟹ 窄道扫描会**几何与动力学错配且无报错**。
 
-另：**`ReferenceObjectives.matches()` 已实现但未接进训练路径**（评审明的 P4 项）——P4 扫 `n_agv` 时仍可能沿用旧 `w`。
+另（**2026-10-03 更新**）：`ReferenceObjectives.matches()` **已接进训练路径**（f13925d，F5）——`joint_chain_step` 入口校验 ref 指纹，不同源**直接报错**，且 `w` 由 ref 派生（不存在"w 与 ref 不同源"的空隙）。**旧陈述"已实现但未接进训练路径"作废**。同波次 F1–F4 把上面四条前置项全部处理：① 约束透传（F1）② 特征读开关 ⑤/⑩（F2）③ `pm_interval` 接 `cfg`（F3）④ `build_setup` 收敛（F4）。
+
+**✅ 2026-10-03 残留回填（R1a/R1b/R2）**：上面第 ② 条的同类残留（③/⑧）也已修，且「**关掉的约束在特征层留假信号**」这个**缺陷类已系统性清理完毕**：
+
+- **R1a（③ `machine_failure`）**：`machine_features` 第 6 维（`fail_rate`）在 ③ 关时固定 **0.0**——仿真里故障事件恒 0，原实现照报 `pad.fail_rate` 是"这台机会坏"的假信号；
+- **R1b（⑧ `due_dates`）**：`job_features` 的 `due_margin` 维在 ⑧ 关时固定 **0.0**——原实现读 `due=0.0` 哨兵得到 `−now/M_ref`（长 episode 饱和到 −2），是"有交期"的假信号；
+- **同源机制**：约束开关存进 `NormContext.constraints`（唯一构造入口 `norm_context`），特征静默读它；`joint_chain_step` 入口校验 `ctx.constraints` 与传入 `constraints` **同源**，不同源即显式报错（R2 守卫）。
+- **R2（接线）**：`m13_train_a.build_training_setup` 的 `constraints` 原样随 `ctx` 返回，`main` 把它一路送进 `step_kwargs` 与评估回调——不再有"传了也没用"的形参（旧状：钩子在邀请 ctx/动力学静默错配）。
+- 至此 F2 缺陷类的四处（⑤ 换型 / ⑩ 载量 / ③ 故障 / ⑧ 交期）全部按"关掉 ⇒ 特征静默"处理，且每处都有**双向判据**（全开档必须非零 + 关掉档必须恒常量）。
 
 ### 19.5 ⭐ 本计划查出的四类**系统性**问题（值得带进 P4）
 
@@ -955,7 +963,7 @@ MK01 上 ~25 步即饱和**。完整读数与 25 步一桶的轨迹见 18.4。
 
 - 🔴 **P4 开始前必须处理的四条**（见 18.4）
 - 🟠 **`roll_chain`/`joint_chain_step` 的可复现性**：修复波后 `--seed` 已同时锁定 ① 初始化 ② 仿真扰动流 ③ 动作采样（`Generator().manual_seed(seed0+s)` 透传），**同 seed 同调用序列已可复现**（两次独立进程读数逐位相同）。边界：同机同 torch 版本；`--resume` 续跑例外。
-- 🟠 **消融表脚注**：⑧ 关闭时 B 段 `due_margin` 维不是 0 而是 `−now/M_ref`（长 episode 会饱和到 −2）——读者别按"关掉=该维为 0"理解。
+- ~~🟠 **消融表脚注**：⑧ 关闭时 B 段 `due_margin` 维不是 0 而是 `−now/M_ref`（长 episode 会饱和到 −2）——读者别按"关掉=该维为 0"理解。~~ **已修（R1b，2026-10-03）**：⑧ 关时 `due_margin` 恒 0（③ 关时 `fail_rate` 同）——消融表按"关掉 ⇒ 该维静默"读即可（见 §19.4 残留回填）。
 - 🟡 **`des.py` 已 1112 行**（超本仓 800 行指引），`SimWorld` 职责膨胀——**建议与 P4 加 `constraints` 参数时一起做职责切分**，现在裸拆会与 P4 的接口改动打架。
 - 🟡 **门禁成本上移**：全套 `plcsp/tests` 独占约 **5 分钟**（`test_end_to_end_a.py` 占 4.2–4.5 min，模块级 fixture）。CI 若挂每次改动需知情。
 - 🟡 设计级：**B 段的 `due_margin` 维在我们的共同交期设计下是冗余维**（= `τ − time_progress`，与 Global token 线性等价）。裁定按 spec 保留（字段表是用户复核过的）+ 代码注释留痕 + 登记于此。**若将来改逐作业交期，此维才有区分度。**

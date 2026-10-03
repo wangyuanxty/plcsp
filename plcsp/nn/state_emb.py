@@ -22,7 +22,13 @@ def _safe(x: float, lo: float, hi: float) -> float:
 
 
 def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_m, 7)。顺序 = FEATURE_NAMES["M"]，**不得改序**（有测试按名核对）。"""
+    """(n_m, 7)。顺序 = FEATURE_NAMES["M"]，**不得改序**（有测试按名核对）。
+
+    ⚠️ **第 6 维（fail_rate）在 ③ `machine_failure` 关闭时恒 0**（R1a，F2 同型残留）：
+    仿真里 `MachineSim._process` ③ 关时一次跑完、`fail_events` 恒 0，特征若照报
+    `pad.fail_rate / max_fail_rate`，策略就看到一个**动力学里不存在**的故障风险（假信号）。
+    恒 0 是"不会坏"的**真值**（不是哨兵）；维宽/列序不随配置变（spec §5.3.1 字段表 + ckpt 兼容）。
+    """
     out = np.zeros((ctx.n_m, F_M), dtype=np.float32)
     for i, m in enumerate(snap.machines):
         out[i] = (
@@ -32,13 +38,20 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             1.0 if m.busy else 0.0,                                 # 3 busy
             m.remaining_min / max(ctx.total_work_min, 1e-9),        # 4 remaining_frac
             _safe(1.0 - m.pm_used_min / max(ctx.pm_interval, 1e-9), 0.0, 1.0),  # 5 pm_left
-            m.fail_rate / max(ctx.max_fail_rate, 1e-9),             # 6 fail_rate
+            (m.fail_rate / max(ctx.max_fail_rate, 1e-9)
+             if ctx.constraints.machine_failure else 0.0),          # 6 fail_rate（③ 关恒 0）
         )
     return out
 
 
 def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_jobs, 8)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。"""
+    """(n_jobs, 8)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。
+
+    ⚠️ **第 2 维（due_margin）在 ⑧ `due_dates` 关闭时恒 0**（R1b，F2 同型残留）：⑧ 关意味着
+    该实例**无交期**（`_due_map` 返回 `{}`，快照 `due` 落 0.0 哨兵）；照读哨兵会得到
+    `(0 − now)/M_ref`（不是 0，长 episode 饱和到 −2），等于报出一个不存在的交期紧迫度。
+    恒 0 = "无交期信息"；维宽/列序不随配置变。
+    """
     out = np.zeros((ctx.n_jobs, F_B), dtype=np.float32)
     for j, js in enumerate(snap.jobs):
         out[j] = (
@@ -50,7 +63,8 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             # 无新信息；旧占位 `now/M_ref − 1` 与它仿射等价 → "解占位"在信息量上是零变化）。
             # 保留：spec §5.3.1 的字段表经用户复核，且它是**将来换逐作业交期**的天然插口
             # （§3.5 的 TWK 系）——那时此维才有区分度。
-            _safe((js.due - snap.now) / ctx.m_ref, -2.0, 2.0),
+            (_safe((js.due - snap.now) / ctx.m_ref, -2.0, 2.0)
+             if ctx.constraints.due_dates else 0.0),                # 2 due_margin（⑧ 关恒 0）
             1.0 if js.finished else 0.0,                            # 3 finished
             _safe(js.at_machine / max(ctx.n_m, 1), -1.0, 1.0),      # 4 at_machine
             1.0 if js.in_transit else 0.0,                          # 5 in_transit

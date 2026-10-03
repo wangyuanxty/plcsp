@@ -85,9 +85,16 @@ def assert_eval_seed_isolated(seed0: int, steps: int) -> None:
 
 def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
                          constraints: ConstraintConfig | None = None):
-    """(inst, layout, dm, cfg, ctx, policy)——在共享 `algo.setup.build_setup` 之上再补两件事：
-    加载实例、构造策略网络。环境三件套的口径（布局 seed=0 / 真实参考 makespan / `cfg` 的
-    几何+车队参数 / `constraints` 同源）**全部**由 `build_setup` 定死（评审 F4 收敛）。
+    """(inst, layout, dm, cfg, ctx, policy, constraints)——在共享 `algo.setup.build_setup`
+    之上再补两件事：加载实例、构造策略网络。环境三件套的口径（布局 seed=0 / 真实参考
+    makespan / `cfg` 的几何+车队参数 / `constraints` 同源）**全部**由 `build_setup` 定死
+    （评审 F4 收敛）。
+
+    ⚠️ **`constraints` 原样返回**（R2）：`ctx` 是按它建的（③/⑧ 的特征静默读 `ctx.constraints`），
+    调用方拿到的就是"ctx 是按哪组约束建的"那一份，**不需要凭记忆把同一份再传给
+    `joint_chain_step`**——`joint_chain_step` 入口还会校验两者同源，不同源直接报错。
+    旧状（R2 前）：形参存在但 `main` 从不传、也不进 `step_kwargs` ⟹ 钩子在邀请
+    "ctx 按 A 组约束建、训练跑全开"的静默错配（F2 要消灭的正是这一类）。`None` = 十约束全开。
 
     ⚠️ 布局 seed 必须为 0：奖励权重取自 `ReferenceObjectives.of`（固定用 seed_layout=0 的参考
     运行），而 `SimWorld._due_map` 用**该布局**的 seed 取 `M_ref`——两者同源才有一致的口径
@@ -95,16 +102,23 @@ def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
     """
     inst = load_mk(inst_name)
     c = cfg or SimConfig()
-    lay, dm, ctx = build_setup(inst, c, constraints=constraints)
+    cons = constraints or ConstraintConfig()    # None = 十约束全开（与 SimWorld 的语义一致）
+    lay, dm, ctx = build_setup(inst, c, constraints=cons)
     pol = PolicyNet(enc=LayoutEncoder())        # 车队规模由 seg 定，网络无 n_agv 形参（M-4）
-    return inst, lay, dm, c, ctx, pol
+    return inst, lay, dm, c, ctx, pol, cons
 
 
-def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float):
-    """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。"""
+def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
+                  constraints: ConstraintConfig | None = None):
+    """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。
+
+    ⚠️ `constraints` 必须与训练同一份（R2）：评估跑的是训练后的策略，动力学口径不一致
+    （如训练 ③ 关、评估全开）会让读数对不上训练环境，且**静默**。
+    """
     def eval_fn(policy) -> dict:
         ms = [float(roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
-                               ctx=ctx, sample=False)[1]["makespan"]) for s in range(seeds)]
+                               ctx=ctx, sample=False, constraints=constraints)[1]["makespan"])
+              for s in range(seeds)]
         return {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                 "rule_makespan": rule}
     return eval_fn
@@ -139,9 +153,11 @@ def main() -> None:
     # ⚠️ 必须在 build_training_setup **之前**：`PolicyNet` 的初始化吃全局 torch RNG。
     #    动作采样自评审 I-3 起由 `seed0+s` 派生的 `torch.Generator` 负责，与本流互不干扰。
     torch.manual_seed(args.seed)
-    inst, lay, dm, cfg, ctx, pol = build_training_setup(args.inst)
+    inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst)
     ref = ReferenceObjectives.of(inst, cfg)     # ref 进训练入口（评审 F5：w 由 ref 派生）
     w = reward_weights(ref.as_tuple())          # 仅为日志打印
+    # ⚠️ rule 与 f^ref 都锚在**全约束**参考运行（`reference_run` 的既定语义，des.py），
+    #    不随 constraints 走；随 constraints 走的是训练/评估的动力学（ctx + step_kwargs + eval_fn）。
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}")
@@ -152,10 +168,12 @@ def main() -> None:
 
     run_training(pol, inst, steps=args.steps,
                  step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref,
+                                  constraints=constraints,   # R2：与 ctx 同一份（入口校验同源）
                                   G=args.G, lr=args.lr),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
-                 eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule)
+                 eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule,
+                                        constraints=constraints)
                           if args.eval_every > 0 else None),
                  eval_every=(args.eval_every or None))
     print(f"[m13] 完成：{run_dir / 'metrics.ndjson'}（每步一行）｜{run_dir / 'ckpt.pt'}")

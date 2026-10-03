@@ -282,6 +282,21 @@ def test_joint_step_rejects_reference_from_other_cfg():
 
 
 @pytest.mark.unit
+def test_joint_step_rejects_ctx_from_other_constraints():
+    """⚠️ R2：`ctx` 的约束与训练的约束必须同源——不同源**显式报错**，不得静默给假信号。
+
+    症状（F2 同型）：`build_training_setup(constraints=off)` 建的 ctx 与训练实际跑的动力学
+    分属两组开关时，③/⑧ 的特征静默读的是 `ctx`（R1），仿真读的是 `constraints` ⟹ 特征报
+    "不会坏 / 无交期"而仿真照坏照交期——策略收到一个动力学里不存在的信号。
+    入口指纹不符即报错（同 `ref.matches` 的 F5 守卫形状）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    with pytest.raises(ValueError, match="约束"):
+        joint_chain_step(pol, inst, lay, dm, cfg, ctx, _ref(inst, cfg), seed=0, G=2,
+                         constraints=ConstraintConfig().with_off("machine_failure"))
+
+
+@pytest.mark.unit
 def test_joint_step_uses_adam_and_returns_diagnostics():
     inst, lay, dm, cfg, ctx, pol = _setup()
     r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=4, cfg=cfg, ctx=ctx,

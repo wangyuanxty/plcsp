@@ -41,7 +41,12 @@ FEATURE_NAMES: dict[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class NormContext:
-    """归一化用的**实例静态量**（仿真前即可算出，不随 episode 变）。"""
+    """归一化用的**实例静态量**（仿真前即可算出，不随 episode 变）。
+
+    ⚠️ `constraints` 不是标度，但**必须与仿真同一份**：特征里"约束关掉就不存在的量"
+    （③ fail_rate、⑧ due_margin）要据此静默，否则会给策略假信号（F2 缺陷类：③/⑧ 残留 R1）。
+    存整份 `ConstraintConfig`（而非零散 bool）是刻意的——将来再有开关进特征层，不必改构造签名。
+    """
     total_work_min: float
     m_ref: float
     n_m: int
@@ -53,6 +58,7 @@ class NormContext:
     max_capacity: int
     max_queued: int
     node_xy: tuple[tuple[float, float], ...]   # 通道节点坐标（V 段 x/y 用）
+    constraints: ConstraintConfig              # 建它的那一份约束（与仿真同源）
 
 
 def norm_context(inst: Instance, layout: Layout, m_ref: float,
@@ -70,8 +76,11 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float,
     - `constraints`（评审 F2）：约束开关会改变仿真的**有效范围**（⑩ 关 → 车队容量全退化为 1），
       归一标度若不跟着退化，特征就报出一个仿真里不存在的值（MK01 实测：⑩ 关时载量维报
       1/2 = 0.5，而仿真里每台车都是满容量 1）。`None` = 十约束全开（向后兼容）。
+      **整份约束同时存进 `NormContext.constraints`**（R1）：③ 关时 `fail_rate`、⑧ 关时
+      `due_margin` 必须静默为常量 0，特征函数据它判断——ctx 与仿真不同源即假信号。
     """
     c = cfg or SimConfig()
+    cons = constraints or ConstraintConfig()    # None = 十约束全开（与 SimWorld 的语义一致）
     total_work = sum(min(t for _m, t in op) for job in inst.jobs for op in job)
     spec = layout.grid
     diag = float(np.hypot(spec.n_rows * (spec.cell_h + spec.aisle_w),
@@ -83,6 +92,7 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float,
         max_fail_rate=max((m.fail_rate for m in layout.machines), default=1e-9),
         pm_interval=float(c.pm_interval),   # 与 SimConfig.pm_interval 同源（评审 F3）
         max_capacity=(max((a.capacity for a in (layout.agvs or [])), default=1)
-                      if (constraints is None or constraints.heterogeneous_fleet) else 1),
+                      if cons.heterogeneous_fleet else 1),
         max_queued=max(1, int(np.ceil(np.sqrt(max(inst.n_jobs, 1))))),
-        node_xy=tuple(spec.node_xy(*spec.node_rc(i)) for i in range(spec.n_nodes)))
+        node_xy=tuple(spec.node_xy(*spec.node_rc(i)) for i in range(spec.n_nodes)),
+        constraints=cons)

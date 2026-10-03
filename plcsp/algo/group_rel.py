@@ -172,6 +172,9 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
      ⚠️ **`constraints` 必须透传进 `SimWorld`**（评审 F1）：省略 = 十约束全开，而 spec §6.2 的
         5 组消融正是靠这个形参区分——不透传时 5 组跑出**完全相同**的链且零报错（"约束不重要"
         的假阴性）。`None` = `ConstraintConfig()`（全开，与 `SimWorld` 的 None 语义一致）。
+     ⚠️ **`ctx` 应按同一份 constraints 建**（R1/R2）：③ 的 `fail_rate` 维与 ⑧ 的 `due_margin`
+        维在约束关掉时静默读 `ctx.constraints`。`joint_chain_step` 入口校验两者同源；直接调用
+        本函数（如消融探针）时由调用方负责配对。
     返回 (决策序列, `run_gated` 的 metrics)。
     """
     decisions: list[Decision] = []
@@ -299,6 +302,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
 
     ⚠️ **`constraints` 必须透传**（评审 F1）：`None` = 十约束全开（向后兼容），其余按消融组
     传入——不透传时 spec §6.2 的 5 组消融跑出完全相同的链（假阴性，见 `roll_chain`）。
+    ⚠️ **且必须与 `ctx` 同一份**（R2）：③/⑧ 的特征静默读 `ctx.constraints`，入口校验两者
+    相等，不同源**显式报错**（否则特征报"不会坏/无交期"而仿真照坏照交期，静默假信号）。
 
     返回 (组内 r 均值, 诊断 dict：loss / ratio / clipped_frac / grad_norm / r 均值与 std / 优势 std)。
     `ratio` / `clipped_frac` 只在裁剪路径被真算（无裁剪时报 1.0 / 0.0，= 不适用）。`loss` 在裁剪
@@ -316,6 +321,16 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             "算出的，'按参考调度归一化'会在这条扫描轴上**静默**不成立（P4 扫 n_agv / 车速 / "
             "通道宽时最易踩），落在哪个 Pareto 点也就错了。请用 "
             "ReferenceObjectives.of(inst, cfg) 取当前 cfg 的参考值。")
+    # ⚠️ R2：ctx 与训练的约束必须同源。③/⑧ 的特征静默读 `ctx.constraints`（R1），而仿真读
+    #    这里的 `constraints`——不同源时特征会报出动力学里不存在的量（如"不会坏"而仿真照坏），
+    #    与 F2 消灭的是同一类静默错配。`None` = 全开（与 `NormContext` 的构造语义一致）。
+    cons = constraints or ConstraintConfig()
+    if cons != ctx.constraints:
+        raise ValueError(
+            "ctx 的约束与训练的 constraints 不同源——ctx 由 build_setup/build_ctx_for_unit_test "
+            "按另一组约束构造（③/⑧ 的特征静默读 ctx.constraints），仿真却按本组跑：特征会给"
+            "策略一个动力学里不存在的信号，且静默。请把**同一份** ConstraintConfig 同时交给 "
+            "ctx 的构造与 joint_chain_step（build_training_setup 返回的即该份）。")
     w = reward_weights(ref.as_tuple())          # w 由 ref 派生（评审 F5：单一来源）
     if epochs > 1 and clip_eps is None:
         raise ValueError("epochs>1 必须配 clip_eps：无裁剪时同一批数据重复计算，"
@@ -342,7 +357,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     gen = torch.Generator().manual_seed(seed)
     for g in range(G):
         dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
-                              sample=True, generator=gen, constraints=constraints)
+                              sample=True, generator=gen, constraints=cons)
         chains.append(dec)
         rewards.append(scalar_reward(objective_vector(met), w))
 
