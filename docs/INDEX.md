@@ -241,7 +241,7 @@
   +8 `test_two_tier_report.py`）；`ruff check plcsp/` clean。
   ⚠️ **墙钟 2524 s（42 min）**——`test_end_to_end_a` 的训练 fixture 独占 **1751 s**
   （它自己 docstring 记 4.2–4.5 min 的 6.5 倍，本机当前 torch 状态所致，与本批改动无关；
-  其余 343 项合计约 773 s）。**后续批次按 ~42 min 排墙钟，不要按旧的 6–8 min 估。**
+  其余 343 项合计约 773 s）。⚠️ **该 42 min 是假象**（2026-10-03 复查）：那批实现者自己并发跑活造成争抢，实测同一份代码独占时约 8–9 min。**随后已修**（见下条），现行门禁 **351 项 / 4 min 19 s**。
 - 详见 `progress-log.md` §二十二。计划：`superpowers/plans/2026-10-03-p4b-mkt-transport-integration.md`。
 
 ## 6. 环境
