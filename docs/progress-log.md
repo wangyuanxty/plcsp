@@ -971,6 +971,41 @@ MK01 上 ~25 步即饱和**。完整读数与 25 步一桶的轨迹见 18.4。
 3. **评估种子与训练流相撞**（Task 8 评审抓）：训练第 `s` 步用流 `s*1000+g`，评估从 `10000` 起——**5/5 或 4/10 重叠**。已修（评估基改 10⁶ + 运行时报错）。
 4. **PPO 裁剪的两级退化**：`epochs=1` 时 `ratio ≡ 1` ⟹ 裁剪空转（我裁出）；更根本地，**链级 logp 是求和** ⟹ 一次更新就推过 `log(1.2)` ⟹ `epochs>1` 时梯度恒 0（实现者实测 `grad_norm=0.0000`）。默认路径 `clip_eps=None`（纯 REINFORCE）不受影响。**要真信任域须按链长放大 `clip_eps` 或改分决策裁剪——属研究口径，未擅自改。**
 
+### 19.7c 第 4 项基线的筛选结果（2026-10-03，三路侦察完毕）
+
+**严格三关（够档次 + 真 FJSP 有工序路由 + 真 AGV 派车 + 有代码跑得动）下，短名单是空的**——
+四关从不同时成立：
+
+| 满足 | 候选 | 缺什么 |
+|---|---|---|
+| 顶刊 + 真 FJSP + **真派车** | **HGS**（JMS 77:356, 2024）、**HGA-MPPO**（SWEVO 102:102331, 2026）、**HA-DQN**（CIS 11:210, 2025）| **都无代码**（HGS/HGA-MPPO 无仓库；HA-DQN "available on request"）|
+| 有代码 + MIT + 问题对得上 | `E2E-MAPPO-for-MT-FJSP`（IoT-J 2025）| **无车队无派车**（原文 "TMs at each edge are adequate"）；运输只是固定 m×m 矩阵 |
+| 本机原生能跑 | `jsspt-coordination-gap`（**IEEE CASE 2026**）| **档次不够顶会**，且是 **JSSP 固定工艺路线、无机器柔性** |
+
+⭐ **最重要的一条发现**：**所有在 MK 上报告过数字的方法，用的都是 MK 的「运输改造版」**——
+**Homayouni & Fontes 2021 的 FJSPT 口径（MKT01–MKT10）**。即：
+- **HGS** 报 MKT01–10 平均 gap 3%（Table IV），点名 MKT06/MKT08/MKT01/MKT09
+- **HA-DQN** 报 MK07 比 LAHC 减 14.15%、MKT07 上 HGS 348 → HA-DQN 213
+- **HGA-MPPO** 报 **MK01 = 151**（Gurobi 176，gap 69.89%）、**MK05 = 318**（Gurobi 336）
+
+⟹ **若我们把实例口径对齐到 MKT（= MK + 运输时间，按 Homayouni & Fontes 的定义），
+这三篇顶刊的数字就【可直接比】**——"没有基线能对拍"这个问题可能就此解开。
+⚠️ **前提待查**：Homayouni & Fontes 2021 的运输时间定义是否公开且可复现。
+
+**唯一能对拍「移植保真度」的**是 `E2E-MAPPO`（随库实例 + per-instance 结果 CSV + Gurobi 逐实例参照
++ 预训练权重），但它证明的是"我们移植对了"，**不是"我们在我们的实例上比它好"**。
+
+**侦查中确认的三处易踩坑**：
+1. `E2E-MAPPO` 的 `results/test_results/Real_MK_*.csv` 里的 **"MK" 是 makespan 的缩写，不是 Brandimarte**
+   （同列还有 PT/TT/IT = 加工能耗/运输/空闲）——**极易误读成"它跑了 Brandimarte"**。
+2. `DFJSP-WAC-MILP-model` 的 `FJSSPinstances/MK/instance1–7.txt` **不是 Brandimarte**，是自建分布式小算例（≤6 工件/3 工厂）。
+3. `third_party/FJSP-DRL`（TNNLS 2023）与 `Neural_MO_CO_FJSP`（ICLR 2026）**同源**（后者 README 明写 build upon 前者）。
+4. `jobshoplab`（CASE 2025，CC BY 4.0）`requires-python >=3.12` **与本机完全吻合**，有 per-instance 表 + 完整事件日志——
+   若日后要一个"能跑的 JSSP+AGV 联合仿真"做**语义对照**，它比 `jsspt` 更完整。
+
+**待定**：(a) 从零实现 HGS（顶刊+真派车，但无代码无对拍）(b) **先查 MKT 口径能否复现**（可能解锁整条线）
+(c) E2E-MAPPO（能对拍保真度但无车队）。
+
 ### 19.7b 基线候选的两条筛选规则（2026-10-03，用户定）
 
 1. **不够档次的不要**——按 `docs/literature.md` 的档次分级；**MDPI Applied Sciences 不算顶刊**
