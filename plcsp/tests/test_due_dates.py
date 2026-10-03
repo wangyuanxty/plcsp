@@ -1,10 +1,9 @@
 """TF/RDD 交期口径的测试（⑧ 重设计 Task 1）。"""
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
-from plcsp.env.instances import Instance, gen_random, load_mk
+from plcsp.env.instances import Instance, load_mk
 
 
 @pytest.mark.unit
@@ -69,3 +68,19 @@ def test_due_dates_are_strictly_positive(name: str):
     d = due_dates_for(load_mk(name))
     bad = {j: round(v, 2) for j, v in d.items() if v <= 0.0}
     assert not bad, f"{name} 出现非正数交期：{bad}"
+
+
+@pytest.mark.unit
+def test_negative_or_zero_tau_is_rejected():
+    """⚠️ `tau` 与 `due_range` 一样是**覆盖开关**（敏感性扫描入口），同样不许非正。
+
+    `d_j = LB·τ·(1+R(2ρ−1))` 对 `τ < 0` 会整体翻号 ⟹ **负交期**（"在时间原点之前到期"）：
+    实测 mk04、τ=−1.0、R=0.5 时最短作业 `d_j = −60.75`。这与 `R > 1` 是**同一类静默缺陷**，
+    故 guard 必须与 `due_range` 那条**同强度**——否则 τ 扫描（文档推荐的用法）会静默出负交期。
+    """
+    from plcsp.env.due_dates import tf_rdd_due_dates
+
+    inst = load_mk("mk04")
+    for bad_tau in (-1.0, 0.0):
+        with pytest.raises(ValueError):
+            tf_rdd_due_dates(inst, tau=bad_tau, due_range=0.5)

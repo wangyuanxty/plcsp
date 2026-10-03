@@ -256,8 +256,9 @@ def test_due_margin_distinguishes_jobs():
     新口径 `d_j = LB·τ·(1 + R·(2ρ_j − 1))`（`due_dates.tf_rdd_due_dates`）**逐作业** ⟹ 有区分度。
 
     判据双向：① 交期本身逐作业取不同值（前提）；② `job_features` 的第 2 维对不同作业**不同**
-    ——即不再是"全等于 clip(τ − time_progress)"那种共同交期形状。取 R>0 才有跨度（mk01 的
-    冻结表 R=0.0 是**共同交期**的特例，故此处显式取 R=0.8，与 Task 1 的同类判据一致）。
+    ——即不再是"全等于 clip(τ − time_progress)"那种共同交期形状。此处显式取 `due_range=0.8`
+    （跨度最宽），与 Task 1 的同类判据一致；冻结表的 R 下限 0.20 已保证任意实例都有跨度
+    （`test_due_wiring.test_due_margin_is_no_longer_redundant` 用真实表值钉 mk01/mk08）。
     """
     from plcsp.env.due_dates import tf_rdd_due_dates
 

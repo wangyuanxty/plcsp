@@ -46,11 +46,16 @@ def test_twt_is_positive_after_improvement(name: str):
 
 @pytest.mark.unit
 def test_uncalibrated_instance_raises():
-    """⚠️ Review Focus #3：没标定的实例必须**显式报错**，不得静默取默认值。"""
+    """⚠️ Review Focus #3：没标定的实例必须**显式报错**，不得静默取默认值。
+
+    ⚠️ 只收 **`ValueError`**（原写作 `(KeyError, ValueError)`）：`KeyError` 会让本测试在
+    "显式报错退化成深处的字典 KeyError"时**照样绿**——而那正是 Review Focus #3 明令禁止的形态。
+    收窄后，任何把显式报错改回裸 `TF_RDD[key]` 的改动都会在这里变红。
+    """
     from plcsp.env.due_dates import due_dates_for
     from plcsp.env.instances import gen_random
 
-    with pytest.raises((KeyError, ValueError)):
+    with pytest.raises(ValueError, match="未标定"):
         due_dates_for(gen_random(4, 3, seed=0))
 
 

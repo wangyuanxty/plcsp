@@ -84,3 +84,27 @@ def test_end_to_end_reward_on_real_rollout():
     r = rollout(inst, seed_chain=1, cfg=SimConfig())
     got = scalar_reward(objective_vector(r), w)
     assert got < 0.0, "奖励应为负（三项都是'越小越好'）"
+
+
+@pytest.mark.unit
+def test_reference_weights_are_pinned_to_the_due_date_caliber():
+    """⚠️ **本测试把 `f^ref` / `w` 钉在交期口径上**——口径一改它就红，逼改的人同步更新文档。
+
+    实测（TF/RDD 冻结表，mk01，`SimConfig()`）：
+      `f^ref = (103.42, 7.73, **124.05**)` → `w = (0.066, 0.880, 0.055)`（TWT 占 **5.5%**）。
+    **为什么它与交期绑定**：`wᵢ = (1/fᵢ^ref)/Σ`，而 TWT 是**事后按当前交期**从参考运行的
+    `completes` 算的 —— 交期变 ⟹ `f^ref` 的第三分量变 ⟹ w 变。
+    旧口径（`d_j = τ·M_ref`）下是 `f^ref = (103.42, 7.73, 19.51)` → `w = (0.051, 0.680, 0.269)`
+    （TWT 占 **26.9%**）：⑧ 从死目标复活后 TWT 从 19.51 涨到 124.05，**TWT 的奖励份额因此从
+    27% 掉到 5.5%、energy 升到 88%**——这是口径重设计的**直接后果**，不是笔误。
+    ⚠️ **改口径的人必须同时改**：本测试、`spec §5.3.3`、`INDEX §5.8`、`progress-log` 里引用
+    `f^ref`/`w` 的地方（权重失衡是**研究决定**，不在本测试的处置范围内）。
+    """
+    from plcsp.env.reward import ReferenceObjectives, reward_weights
+
+    ref = ReferenceObjectives.of(load_mk("mk01"), SimConfig())
+    f = ref.as_tuple()
+    w = reward_weights(f)
+    assert f == pytest.approx((103.42, 7.73, 124.05), rel=1e-3)
+    assert w == pytest.approx((0.0657, 0.8795, 0.0548), rel=1e-3)
+    assert w[2] == pytest.approx(0.055, abs=5e-3), "TWT 的奖励份额（复活后应约 5.5%）"

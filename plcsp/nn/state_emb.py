@@ -59,10 +59,9 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             js.remaining_min / ctx.total_work_min,                  # 1 remaining_work
             # 2 due_margin = (due_j − now)/M_ref（spec §5.3.1，交期 `due` 见 `JobState`）。
             # ⚠️ **不再是共同交期形状**（2026-10-03 ⑧ 重设计后）：交期改为**逐作业**的 TF/RDD
-            # 口径 `d_j = LB·τ·(1+R(2ρ_j−1))`，R>0 的实例上此维随作业不同、含新信息。
-            # （旧口径 `d_j = τ·M_ref` 对所有作业同值，那时它 ≡ τ − Global[0]，确为冗余维；
-            #  ⚠️ R=0.0 的实例——标定结果里的 mk01/mk04——仍是**共同交期**，此维在那两个实例上
-            #  依旧无作业间区分度，这是标定产物而非接线漏了。）
+            # 口径 `d_j = LB·τ·(1+R(2ρ_j−1))`，冻结表的 R 下限 0.20 保证**10/10 实例**的 d_j
+            # 互不相同 ⟹ 此维在任意实例上都随作业不同、含新信息。
+            # （旧口径 `d_j = τ·M_ref` 对所有作业同值，那时它 ≡ τ − Global[0]，确为冗余维。）
             (_safe((js.due - snap.now) / ctx.m_ref, -2.0, 2.0)
              if ctx.constraints.due_dates else 0.0),                # 2 due_margin（⑧ 关恒 0）
             1.0 if js.finished else 0.0,                            # 3 finished

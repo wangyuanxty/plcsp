@@ -211,7 +211,12 @@ def reference_run(inst: Instance, cfg: SimConfig | None = None,
 
 def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
                        seed_layout: int = 0) -> float:
-    """⑧ 的 `M_ref` = 参考调度的 makespan——`reference_run` 的薄封装（既有调用点不变）。"""
+    """参考调度的 makespan —— `reference_run` 的薄封装（既有调用点不变）。
+
+    ⚠️ 用途**只剩两个**（2026-10-03 ⑧ 重设计后）：① 特征归一化的 `m_ref`（`build_setup` 取它）；
+    ② 奖励侧参考运行/权重口径的**同源守卫**（`joint_chain_step` 的 `layout_seed=0` 前提）。
+    ⑧ 交期**不再由它导出**——交期是外生的 TF/RDD（见 `due_dates.py`），与 `M_ref` 无关。
+    """
     return float(reference_run(inst, cfg, seed_layout)["makespan"])
 
 

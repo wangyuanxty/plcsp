@@ -316,7 +316,7 @@ d_j  = LB · τ · ( 1 + R · (2ρ_j − 1) )     # 逐作业、外生、有跨�
 ```
 
 - **外生**：只读实例数据（签名里没有 cfg）——换车队规模/车速/通道宽**不再改变任何 `d_j`**（`test_due_dates_do_not_depend_on_fleet_size` 钉）。
-- **⑧ 只进目标读数，不进仿真时序**：makespan 在任何 (τ, R) 下**逐位相同**（`test_makespan_is_unchanged_by_due_date_caliber` 钉 mk01；实施者对 10 实例 × 5 组 (τ,R) 实测全等，同期 TWT 取 4–5 个互异值）。
+- **⑧ 只进目标读数，不进仿真时序**（⚠️ **限"固定派工策略"**）：在**规则派工**（每工序最短候选 + AGV 轮询；`rollout` / `reference_run` / 消融对照都用它）下，makespan 在任何 (τ, R) 下**逐位相同**（`test_makespan_is_unchanged_by_due_date_caliber` 钉 mk01；实施者对 10 实例 × 5 组 (τ,R) 实测全等，同期 TWT 取 4–5 个互异值）。⚠️ **学到的策略不在此列**：`due_margin` 是编码器输入 ⟹ 换 (τ,R) 就换策略输入 ⟹ **同一 checkpoint 的 makespan 也会变**（评审实测：同一 checkpoint 在 (2.45,0.2) 下 80.31、(1.55,0.2) 下 89.67）。这条区别必须写进论文——否则"⑧ 不动时序"会被误当成对训练后策略也成立。
 - 实现：`plcsp/env/due_dates.py`（`due_dates_for` / `tf_rdd_due_dates` / `TF_RDD`）。
 
 **冻结的 (τ, R) 表**（`TF_RDD`；由 `plcsp/m16_due_calib.py` 在网格上选出，**不是手抄魔数**——`test_frozen_table_is_reproduced_by_the_calibration_script` 逐实例对拍脚本输出）：
@@ -336,6 +336,13 @@ d_j  = LB · τ · ( 1 + R · (2ρ_j − 1) )     # 逐作业、外生、有跨�
 
 ⚠️ 本表由**固定网格**（τ 步长 0.05、R 步长 0.10）选出。实测：网格细分一倍后 **9/10 实例**诱导出的两个误期率不变，只有 mk04 会挪到 (4.125, 0.55)（评分略低、改进后误期率 .40→.33）——**表的科学内容基本网格不敏感，但不是逐实例全等**；论文以冻结表为准并说明其网格（见 `progress-log §21.7`）。
 
+⚠️ **上表的误期率是 `cfg` 条件的**（**不是实例的固有属性**）：标定脚本把 cfg 写死为 `SimConfig()`（n_agv=3、车速 0.5、通道 1.5 m），故"两率落带"只对**默认 cfg** 成立。两件事必须分开说：
+
+- **`d_j` 本身外生**——与 cfg 无关（`test_due_dates_do_not_depend_on_fleet_size` 钉住），换车队规模交期**不变**；
+- **但"误期率落带"会随 cfg 变**——换 cfg 就换参考调度的 `completes`，同一个 `d_j` 下的误期率随之变。评审实测 mk01 在 **n_agv=1**：参考误期率 **1.00**、改进 12% 后 **0.80**，**双双出带**。
+
+⟹ **P4 计划的 `n_agv` 1/3/5 扫描必须先在新 cfg 下重跑标定**（`m16_due_calib` 接受 `--instances`），或至少如实报告哪些点出带；**不得把本表的默认-cfg 保证外推**。
+
 **标定规则**（`m16_due_calib.calibrate`，规则原文 + 常数见该脚本 docstring）：在 (τ, R) 网格上求满足
 
 - `0.20 ≤ 参考策略误期率 ≤ 0.75`，且
@@ -352,7 +359,7 @@ d_j  = LB · τ · ( 1 + R · (2ρ_j − 1) )     # 逐作业、外生、有跨�
 
 **跨实例 τ 差 3.6 倍（1.55–5.60）**是 TWK 类口径的固有代价，**论文必须如实写**——交期紧度本身就随实例变，不能报一个统一的 τ。
 
-**书目**：TWK 类交期已引证：**《Real-time scheduling for production-logistics collaborative environment using multi-agent deep reinforcement learning》**，Advanced Engineering Informatics（Elsevier），Vol. 65, 2025, Article 103216，DOI 10.1016/j.aei.2025.103216（其式 3 为含物流因素的 Total Work Content 形式）。**TF/RDD 参数组合 (τ, R) 的出处待核**——未取得原文，不编造；登记为开放项。
+**书目**：TWK 类交期已引证：**《Real-time scheduling for production-logistics collaborative environment using multi-agent deep reinforcement learning》**，Advanced Engineering Informatics（Elsevier），Vol. 65, 2025, Article 103216，DOI 10.1016/j.aei.2025.103216（其式 3 为含物流因素的 Total Work Content 形式）。⚠️ **「TF/RDD」这组命名与参数组合 (τ, R) 的出处待核**——本节的生成式是**基于工时的排名的展开**，**不是**已核文献里的标准 TF/RDD 交期生成器（常见形式是 `d_j = 到达时刻 + TF × 某工时量` 之类）；三个词各自在文献里有明确所指，但**本项目的这个组合方式**未见于已核文献，**不得反过来当作"文献标准做法"引用**。未取得原文，不编造；登记为开放项。
 
 **⚠️ 适用边界（实测，论文必须写明）**：交期是**绝对**阈值——策略一旦好过**最早**的那个 `d_j`，TWT 仍会恒 0。标定规则里的"改进 12% 不退化"只把饱和点钉在**参考附近**。实测 mk01：`Full`/`−物流` 两消融组（Cmax 83.6/81.4）TWT 非零，而 `−生产` 组 Cmax 47.8 **低于最早交期 49.98** ⟹ 整组 TWT ≡ 0（⑧ 开着，不是定义使然）。见 `progress-log §21.5`。
 
@@ -587,7 +594,8 @@ wᵢ = (1/fᵢ^ref) / Σⱼ(1/fⱼ^ref)          fᵢ^ref = 参考调度下的�
 - **现状** ✅ **已解决（2026-10-03，Task 6）**：`env/reward.py` 的 `objective_vector` /
   `reward_weights` / `scalar_reward` / `ReferenceObjectives.of` 实现全部三目标与权重口径
   （`f^ref` 与 `M_ref` 同一次参考运行；TWT 事后按 **TF/RDD 交期**（`due_dates.due_dates_for`）从同一次运行的 `completes` 算）。
-  MK01 实测 `f^ref = (103.42, 7.73, 19.51)` → `w = (0.051, 0.680, 0.269)`。
+  MK01 实测（**2026-10-03 ⑧ 重设计后重测**）`f^ref = (103.42, 7.73, 124.05)` → `w = (0.066, 0.880, 0.055)`。
+  ⚠️ **旧值已作废**：`f^ref = (103.42, 7.73, 19.51)` → `w = (0.051, 0.680, 0.269)` 是**旧交期口径**（`d_j = τ·M_ref` 把 TWT 压死）下的读数。交期换成 TF/RDD 后 TWT 从 **19.51 涨到 124.05**，因为 `wᵢ = (1/fᵢ^ref)/Σ`，**TWT 的奖励份额从 26.9% 掉到 5.5%、energy 升到 88.0%**——这是"让 TWT 复活"的**直接后果**，不是笔误。⚠️ **该失衡是否需要重新配平是研究决定，另行处理**；本节只记录事实。由 `test_reference_weights_are_pinned_to_the_due_date_caliber` 钉住，口径再变即红。
   **改前**：`rollout_evaluate` 只返回 `−makespan`；三目标与权重口径**均未实现**。
 
 #### 5.3.4 训练：**联合链 GRPO**（Q1(a)）

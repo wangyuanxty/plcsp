@@ -31,7 +31,11 @@ TWK 类交期在本项目已有引证（完整题录，核对自 `docs/citation-
 **《Real-time scheduling for production-logistics collaborative environment using multi-agent
 deep reinforcement learning》**，Advanced Engineering Informatics（Elsevier），Vol. 65, 2025,
 Article 103216，DOI 10.1016/j.aei.2025.103216（其式 3 为含物流因素的 Total Work Content 形式）。
-**TF/RDD 参数组合 (τ, R) 的完整书目待核**——本模块不作书目裁定，也不得据此编造出处。
+⚠️ **「TF/RDD」这组命名与参数组合的完整书目待核**——本模块的生成式是**基于工时的排名的展开**
+（`LB·τ·(1+R(2ρ_j−1))`），**不是**已核文献里的标准 TF/RDD 交期生成器（常见形式是
+`d_j = 到达时刻 + TF × 某工时量` 之类）。用 TWK / TF / RDD 这三个词是因为它们各自在文献里有
+明确所指，但**本项目的这个组合方式**未见于已核文献——**不得反过来当作"文献标准做法"引用**，
+也不得据此编造出处。本模块不作书目裁定。
 """
 from __future__ import annotations
 
@@ -88,7 +92,12 @@ def tf_rdd_due_dates(inst: Instance, tau: float, due_range: float) -> dict[int, 
     ⚠️ `tau` / `due_range` 由调用方给出（`due_dates_for` 负责查表或覆盖）。
     ⚠️ **`due_range > 1` 不合法**：最低倍率 `1 − R` 越过零点会产出**负交期**（实测 mk04 在
        R=1.2 下最短作业交期 −35.2）。守卫在此**显式报错**，不静默发出——标定网格改了也不会漏。
+    ⚠️ **`tau ≤ 0` 同样不合法**（同一类静默缺陷，guard 同强度）：`τ < 0` 让整个式子翻号
+       （实测 mk04 在 τ=−1.0、R=0.5 下最短交期 **−60.75**），`τ = 0` 则让所有交期塌成 0。
+       `tau` 是文档推荐的**敏感性扫描覆盖开关**，更不能静默产出负交期。
     """
+    if tau <= 0.0:
+        raise ValueError(f"tau 必须 > 0，收到 {tau}——非正 τ 会让 d_j 翻号（负交期）或塌成 0")
     if not 0.0 <= due_range <= 1.0:
         raise ValueError(f"due_range 必须在 [0, 1]，收到 {due_range}——超过 1 会产出负交期")
     w = total_work_content(inst)
