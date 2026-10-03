@@ -58,11 +58,11 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             js.done_ops / max(js.total_ops, 1),                     # 0 progress
             js.remaining_min / ctx.total_work_min,                  # 1 remaining_work
             # 2 due_margin = (due_j − now)/M_ref（spec §5.3.1，交期 `due` 见 `JobState`）。
-            # ⚠️ **冗余维**（Task 6 实测）：共同交期 `d_j = τ·M_ref` 使此维在同一快照内
-            # **对所有作业 token 相同**，且 ≡ τ − Global[0] 的 time_progress（线性重编码，
-            # 无新信息；旧占位 `now/M_ref − 1` 与它仿射等价 → "解占位"在信息量上是零变化）。
-            # 保留：spec §5.3.1 的字段表经用户复核，且它是**将来换逐作业交期**的天然插口
-            # （§3.5 的 TWK 系）——那时此维才有区分度。
+            # ⚠️ **不再是共同交期形状**（2026-10-03 ⑧ 重设计后）：交期改为**逐作业**的 TF/RDD
+            # 口径 `d_j = LB·τ·(1+R(2ρ_j−1))`，R>0 的实例上此维随作业不同、含新信息。
+            # （旧口径 `d_j = τ·M_ref` 对所有作业同值，那时它 ≡ τ − Global[0]，确为冗余维；
+            #  ⚠️ R=0.0 的实例——标定结果里的 mk01/mk04——仍是**共同交期**，此维在那两个实例上
+            #  依旧无作业间区分度，这是标定产物而非接线漏了。）
             (_safe((js.due - snap.now) / ctx.m_ref, -2.0, 2.0)
              if ctx.constraints.due_dates else 0.0),                # 2 due_margin（⑧ 关恒 0）
             1.0 if js.finished else 0.0,                            # 3 finished

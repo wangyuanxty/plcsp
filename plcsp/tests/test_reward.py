@@ -60,8 +60,8 @@ def test_reference_objectives_fingerprint_covers_cfg():
 
     失败场景：P4 扫 `n_agv`（1/3/5）时沿用默认 cfg 算出的 w；指纹若只挡实例，M_ref 已变
     （实测 mk01：n_agv=1/3/5 → 109.95/103.42/97.24；车速 0.5/1.0 → 103.42/106.38）而 w 未变
-    ——"按参考调度归一化"在这条扫描轴上**静默**不成立、零报错。τ 同理：TWT 分量按
-    `d_j = τ·M_ref` 事后算，τ 一变 TWT（进而 w）跟着变。
+    ——"按参考调度归一化"在这条扫描轴上**静默**不成立、零报错。交期覆盖开关 `tau` / `due_range`
+    同理（⑧ 重设计后是两个字段）：TWT 分量按 TF/RDD 交期事后算，任一变化 TWT（进而 w）跟着变。
     """
     inst = load_mk("mk01")
     ref3 = ReferenceObjectives.of(inst, SimConfig(n_agv=3))
@@ -71,6 +71,7 @@ def test_reference_objectives_fingerprint_covers_cfg():
     assert not ref3.matches(inst, SimConfig(n_agv=5)), "换了车队规模旧参考值仍 matches——指纹漏 cfg"
     assert not ref5.matches(inst, SimConfig(n_agv=3))
     assert not ref3.matches(inst, SimConfig(n_agv=3, tau=0.50)), "τ 变了仍 matches——指纹漏 τ"
+    assert not ref3.matches(inst, SimConfig(n_agv=3, due_range=0.50)), "R 变了仍 matches——指纹漏 R"
     # `None` = 默认 cfg（与 `of` / `reference_run` 的 None 语义一致），**不是**"跳过 cfg 检查"
     assert ref3.matches(inst, SimConfig()) and not ref5.matches(inst, None)
 

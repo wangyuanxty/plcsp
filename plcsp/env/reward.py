@@ -40,16 +40,17 @@ def scalar_reward(f: tuple[float, float, float], w: tuple[float, float, float],
 
 
 def _ref_cfg_key(cfg) -> tuple:
-    """`ReferenceObjectives` 的 cfg 指纹 = `des._cfg_key` + **tau**（字段枚举复用同一份，不另写）。
+    """`ReferenceObjectives` 的 cfg 指纹 = `des._cfg_key` + **(tau, due_range)**。
 
-    ⚠️ 与 `_cfg_key`（`reference_run` 的缓存键）差一项 **tau**：参考运行的动力学与交期无关
-    （故缓存键跳过 τ，免得 τ 扫描反复重跑），但 f^ref 的 **TWT 分量按 `d_j = τ·M_ref` 事后算**
-    （见 `of`）——τ 一变 TWT 就变，w 跟着变。故此处把 τ 补回；其余字段（n_agv / 车速 / 通道宽…）
-    直接复用 `_cfg_key` 的枚举，新增 cfg 字段默认进键（失效安全）。
+    ⚠️ 与 `_cfg_key`（`reference_run` 的缓存键）差**两项**：参考运行的动力学与交期无关
+    （故缓存键跳过 τ / R，免得敏感性扫描反复重跑），但 f^ref 的 **TWT 分量按新的 TF/RDD
+    交期事后算**（见 `of`）——交期口径一变 TWT 就变，w 跟着变。两个**都要**补回：只补 τ
+    会漏掉 R（同样改 d_j）。其余字段（n_agv / 车速 / 通道宽…）直接复用 `_cfg_key` 的枚举，
+    新增 cfg 字段默认进键（失效安全）。
     """
     from .des import SimConfig, _cfg_key
     c = cfg or SimConfig()                  # None = 默认 cfg（同 `of` / `reference_run` 的语义）
-    return _cfg_key(c) + (("tau", c.tau),)
+    return _cfg_key(c) + (("tau", c.tau), ("due_range", c.due_range))
 
 
 @dataclass(frozen=True)
@@ -84,17 +85,19 @@ class ReferenceObjectives:
     def of(inst, cfg) -> "ReferenceObjectives":
         """跑一次参考调度（每工序取最短候选 + AGV 轮询）并缓存。
 
-        ⚠️ TWT 必须**事后**按 `d_j = τ·M_ref` 从**同一次运行**的 `completes` 算出：
-        参考运行内 `_due()` 被 `_MREF_BUSY` 短路（防"求 M_ref 要跑 run、run 又要 M_ref"的
-        递归），故 `r["tardy_twt"]` **恒为 0**——直接取它 f^ref 就不是"实测值"，
-        且 `reward_weights` 会对 0 显式报错。交期只影响 metric、不影响仿真动力学，
-        故事后算 = 交期开启时的值。
+        ⚠️ TWT 必须**事后**按 **TF/RDD 交期**从**同一次运行**的 `completes` 算出：
+        参考运行内 `_due()` 被 `_MREF_BUSY` 短路（参考运行的指标口径把 ⑧ 当关——旧口径下
+        求交期要跑参考运行、跑参考运行又要求交期，会递归），故 `r["tardy_twt"]` **恒为 0**
+        ——直接取它 f^ref 就不是"实测值"，且 `reward_weights` 会对 0 显式报错。交期只影响
+        metric、不影响仿真动力学，故事后算 = 交期开启时的值。
+        ⚠️ 交期入口与仿真**同源**（`compute_due_dates` → `due_dates.due_dates_for`）：
+        两边各写一份口径就会静默错位（Review Focus #5）。
         """
         from .des import (_instance_key, SimConfig, compute_due_dates, reference_run,
                           weighted_tardiness)
         r = reference_run(inst, cfg)
         c = cfg or SimConfig()
-        due = compute_due_dates(inst.n_jobs, c.tau, float(r["makespan"]))
+        due = compute_due_dates(inst, c.tau, c.due_range)
         weights = dict.fromkeys(range(inst.n_jobs), 1.0)   # 等权，口径同 `SimWorld._tardy`
         twt = weighted_tardiness(r["completes"], due, weights)
         return ReferenceObjectives(float(r["makespan"]), float(r["energy"]), float(twt),

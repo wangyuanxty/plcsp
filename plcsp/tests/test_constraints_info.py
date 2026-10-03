@@ -1,13 +1,13 @@
-"""信息侧约束（⑧ 交期 τ）的测试（P1b Task 6）。
+"""信息侧约束（⑧ 交期 TF/RDD）的测试。
 
 > **⑥ 模糊加工已砍**（2026-10-03，用户指令）：模糊加工在本平台上实测**两档都不 binding**
 > （关态 +1.83%/+0.98%，极端档 +0.51%/+3.32%，均不过噪声），且与 ① 拥堵同属"重复表达不确定性"
 > 一类。实现（三角模糊数）已整体移除，不再有死开关。原 binding 读数保留在 `spec §3.3.3`。
 
-**⑧ 交期口径**：`d_j = τ · M_ref`（spec §3.5，**τ=0.90**，P1b 后重标），`M_ref` = **参考调度**的
-makespan（每工序取最短候选 + AGV 轮询派车）。**M_ref 不能取被优化的那次 episode 的 makespan**——
-否则交期随策略一起漂移，目标退化（旧 `due_factor` 就是这么坏的：
-实测 MK01 tardy 恒为 10/10，见 progress-log）。
+**⑧ 交期口径**（2026-10-03 重设计，见 `plcsp/env/due_dates.py`）：**逐作业**、**外生**，
+`d_j = LB·τ·(1 + R·(2ρ_j − 1))`（TWK 的作业工时 + TF/RDD 参数）。旧口径 `d_j = τ·M_ref`
+（共同交期、锚在参考调度上）已废：它内生（换车队规模就换交期），且 τ=0.90 只对**参考策略**
+标定，训练后策略改进 12–14% 就把 TWT 清零（旧 `due_factor` 更是实测 MK01 tardy 恒为 10/10）。
 """
 from __future__ import annotations
 
@@ -15,20 +15,28 @@ import pytest
 
 from plcsp.env.constraints import ConstraintConfig
 from plcsp.env.des import SimConfig, rollout
-from plcsp.env.instances import load_mk
+from plcsp.env.instances import Instance, load_mk
 
 SEEDS = (0, 1, 2)
-TAU = 0.90
 
 
 @pytest.mark.unit
-def test_due_dates_use_tau_times_m_ref():
-    """⑧ 交期 = τ·M_ref（同一实例所有作业同值），不再是旧的 due_factor×工时。"""
+def test_due_dates_use_tf_rdd_formula():
+    """⑧ 交期 = `LB·τ·(1 + R·(2ρ_j − 1))` 的**逐作业具体值**（不再收 n_jobs/m_ref）。
+
+    手搓实例使 W_j / LB / ρ 都可手算：
+    各作业最短工时 = [1, 2, 3, 4] ⟹ ΣW = 10、m = 2 ⟹ **LB = max(10/2, 4) = 5**；
+    升序排名 ρ = [0, 1/3, 2/3, 1]。取 τ=2.0、R=0.5 ⟹
+    `d_j = 5·2·(1 + 0.5·(2ρ_j − 1))` = **[5, 25/3, 35/3, 15]**——四值**互不相同**。
+    """
     from plcsp.env.des import compute_due_dates
 
-    due = compute_due_dates(n_jobs=10, tau=TAU, m_ref=400.0)
-    assert len(due) == 10
-    assert all(d == pytest.approx(360.0) for d in due.values())
+    inst = Instance(n_jobs=4, n_machines=2,
+                    jobs=[[[(0, 1.0)]], [[(0, 2.0)]], [[(0, 3.0)]], [[(0, 4.0)]]],
+                    source="handmade")
+    due = compute_due_dates(inst, tau=2.0, due_range=0.5)
+    assert due == pytest.approx({0: 5.0, 1: 25.0 / 3, 2: 35.0 / 3, 3: 15.0})
+    assert len(set(round(v, 6) for v in due.values())) == 4, "退化成共同交期了"
 
 
 @pytest.mark.unit
@@ -76,6 +84,8 @@ def test_reference_cache_key_covers_dynamics_cfg():
     assert reference_makespan(inst, SimConfig(n_agv=3)) == m3    # 同 cfg 仍命中缓存
     assert reference_makespan(inst, SimConfig(n_agv=1)) == m1
     assert reference_makespan(inst, SimConfig(tau=0.50)) == m3   # τ 与参考运行无关
+    # ⑧ 重设计后交期多了一个覆盖字段：两者都只进交期、都不进参考运行的缓存键（Review Focus #2）
+    assert reference_makespan(inst, SimConfig(due_range=0.50)) == m3
 
 
 @pytest.mark.unit
@@ -83,9 +93,9 @@ def test_reference_cache_key_covers_dynamics_cfg():
 def test_due_dates_are_binding_not_degenerate(name):
     """⑧ 必须**有信号**：不能 0% 误期（目标恒零）也不能 100% 误期（无区分度）。
 
-    实测（τ=0.90，参考调度）：mk01 20% / mk07 28% / mk10 48%——三者都非退化。
-    ⚠️ 三实例**共用同一个 τ**，但紧度天然不同；没有单一 τ 能让三者同时落进 20–40%，
-       这要如实报告（见 spec §3.5）。
+    实测（⑧ 重设计后的 TF/RDD 口径，种子 0/1/2）：mk01 50%/50%/60%，mk07 45%/50%/45%，
+    mk10 45%/60%/60%——三者都非退化，且**逐实例标定**后不再有"单一 τ 迁就所有实例"的问题
+    （旧口径 τ=0.90 的 20%/28%/48% 是拿参考 makespan 当锚测的，训练后即失效）。
     """
     inst = load_mk(name)
     rates = []

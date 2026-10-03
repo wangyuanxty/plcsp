@@ -21,6 +21,7 @@ import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
                       machine_energy_kwh, machine_params_for, total_energy_kwh)
 from .corridors import shortest_node_path
+from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
 
@@ -79,11 +80,17 @@ class SimConfig:
     battery_low: float = 0.20     # ⑪ 低电阈值（占容量比）
     battery_high: float = 0.80    # ⑪ 充电目标（占容量比）
     charge_kw: float = 3.0        # ⑪ 充电功率 [kW]
-    # ⑧ 交期系数 d_j = τ·M_ref。**2026-10-02 由 0.85 重标为 0.90**：0.85 是在 P1b 之前
-    # 标定的，此后空载段/生产三约束/异构车队都改了 makespan，误期率漂到 26%/44%/65%。
-    # 重扫结果：τ=0.90 → 20%/28%/48%，**三个实例都非退化**。
-    # ⚠️ 没有任何单一 τ 能让三实例同时落进 20–40%——交期紧度本身就随实例变，这要如实报告。
-    tau: float = 0.90
+    # ⑧ 交期**覆盖开关**：`None` = 用 `due_dates.TF_RDD` 里**逐实例标定**的 (τ, R)。
+    # 2026-10-03 ⑧ 口径重设计（TF/RDD，见 `docs/superpowers/plans/2026-10-03-due-date-redesign.md`）
+    # 后，tau 从"唯一标定值"降级为**覆盖**：默认 None，只在敏感性扫描/新实例标定时显式传。
+    # 旧口径 `d_j = τ·M_ref` 已废，两条死因：① 锚在**自己的**参考调度上（内生——换车队规模
+    # 就换 M_ref：mk01 在 n_agv=1/3 下 109.95/103.42，交期跟着漂）；② τ=0.90 只对**参考策略**
+    # 标定，而训练后策略改进 12–14%，一次性把 TWT 清零（实测 makespan 89.5 < d_j=93.08 ⟹
+    # TWT ≡ 0 是恒等式）。新口径只读实例数据，与 cfg 无关。
+    tau: float | None = None
+    # 交期跨度（due-date range, RDD）——与 tau 同进退的覆盖开关（None = 查标定表）。
+    # 两者**要么都显式传、要么都不传**：只传一个时另一个仍查表，未标定实例会显式报错。
+    due_range: float | None = None
 
     @property
     def eff_speed(self) -> float:
@@ -128,9 +135,16 @@ class SimTrack:
 
 # ══ 信息侧约束的纯函数（⑧ 交期），放在模块级以便单测直接调用 ══
 
-def compute_due_dates(n_jobs: int, tau: float, m_ref: float) -> dict[int, float]:
-    """⑧ 交期 `d_j = τ · M_ref`（spec §3.5）——同一实例所有作业**同值**（共同交期形）。"""
-    return dict.fromkeys(range(n_jobs), tau * m_ref)
+def compute_due_dates(inst: Instance, tau: float | None = None,
+                      due_range: float | None = None) -> dict[int, float]:
+    """⑧ 交期（TF/RDD 口径）——转调 `due_dates.due_dates_for`。
+
+    ⚠️ **签名变了**（2026-10-03 ⑧ 重设计）：不再收 `(n_jobs, tau, m_ref)`——旧口径
+    `d_j = τ·M_ref` 是共同交期且锚在参考调度上（内生），新口径 `d_j = LB·τ·(1+R(2ρ_j−1))`
+    **逐作业、只读实例数据**。口径、生成式与书目见 `plcsp/env/due_dates.py` 的模块 docstring。
+    `tau` / `due_range` 为 None 时查 `due_dates.TF_RDD` 的逐实例标定表（未标定实例显式报错）。
+    """
+    return due_dates_for(inst, tau, due_range)
 
 
 def weighted_tardiness(completes: dict[int, float], due: dict[int, float],
@@ -142,10 +156,10 @@ def weighted_tardiness(completes: dict[int, float], due: dict[int, float],
 
 _MREF_CACHE: dict = {}
 _MREF_BUSY = False
-# 参考运行**不依赖**的 cfg 字段：`tau` 只进 `compute_due_dates`（交期是 metric，且参考运行内
-# 被 `_MREF_BUSY` 短路）——实测 τ=0.9 与 0.5 的参考 makespan **逐位相同**。故不进键：
-# 否则 τ 扫描会把同一份参考运行反复重跑。
-_CFG_KEY_SKIP = ("tau",)
+# 参考运行**不依赖**的 cfg 字段：`tau` / `due_range` 只进交期（交期是 metric、不进仿真时序，
+# 且参考运行内被 `_MREF_BUSY` 短路）——实测换 τ 的参考 makespan **逐位相同**。故两个都不进键：
+# 否则 τ 扫描（⑧ 敏感性实验）会把同一份参考运行反复重跑。
+_CFG_KEY_SKIP = ("tau", "due_range")
 
 
 def _instance_key(inst: Instance) -> tuple:
@@ -174,10 +188,10 @@ def reference_run(inst: Instance, cfg: SimConfig | None = None,
     ⚠️ **绝不能取被优化的那次 episode 的指标**——否则交期随策略一起漂移，
     目标退化（旧 `due_factor` 就是这么坏的：实测 MK01 tardy 恒为 10/10）。
     故单独跑一次并缓存；重入时 `_due` 会退化为"无交期"（见 `SimWorld._due`）。
-    ⚠️ 由此，参考运行自身的 `tardy` / `tardy_twt` **恒为 0**——取 f^ref 者须事后按
-    `d_j = τ·M_ref` 从同一次运行的 `completes` 重算 TWT（`reward.ReferenceObjectives.of`
-    就是这么做的；交期只影响 metric、不影响动力学，故事后算 = 交期开启时的值）。
-    缓存键 = 实例指纹 + `seed_layout` + **影响结果的 cfg 字段**（`_cfg_key`；`tau` 除外）。
+    ⚠️ 由此，参考运行自身的 `tardy` / `tardy_twt` **恒为 0**——取 f^ref 者须事后按 **TF/RDD
+    交期**从同一次运行的 `completes` 重算 TWT（`reward.ReferenceObjectives.of` 就是这么做的；
+    交期只影响 metric、不影响动力学，故事后算 = 交期开启时的值）。
+    缓存键 = 实例指纹 + `seed_layout` + **影响结果的 cfg 字段**（`_cfg_key`；`tau` / `due_range` 除外）。
     """
     c = cfg or SimConfig()
     key = _instance_key(inst) + (seed_layout,) + _cfg_key(c)
@@ -682,23 +696,28 @@ class SimWorld:
         self._build_entities(simpy.Environment(), {}, {}, np.random.default_rng(0), bound=True)
 
     def _due(self, plans: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
-        """⑧ 交期 `d_j = τ·M_ref`。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
+        """⑧ 交期（TF/RDD 口径，逐作业）。**开关关闭 → 返回空 dict**（该实例无交期，目标无拖期项）。
 
         旧口径 `due_factor × Σ工时` **已废弃**（spec §3.5：完全没算排队/运输/争用，
-        实测 tardy 恒为 100%）。旧字段 `due_factor` / `energy_power` 已随 P1b 清理删除。
+        实测 tardy 恒为 100%）。τ·M_ref 的旧口径亦已废弃（2026-10-03 ⑧ 重设计：内生且
+        改进后退化）。旧字段 `due_factor` / `energy_power` 已随 P1b 清理删除。
         """
-        return self._due_map(len(plans))
+        return self._due_map()
 
-    def _due_map(self, n_jobs: int) -> dict[int, float]:
-        """交期表（只需作业数）——`_due` 与 `snapshot()` **共用此一处**，防两处口径漂。
+    def _due_map(self) -> dict[int, float]:
+        """交期表（只读 `self.inst` / `self.cfg`）——`_due` 与 `snapshot()` **共用此一处**，防口径漂。
 
-        ⚠️ `_MREF_BUSY` 短路必须留着：参考调度自身的运行里**不得**递归求 M_ref（那会
-        `RuntimeError`），故参考运行内本函数返回 `{}`（快照里对应 `JobState.due = 0.0`）。
+        ⚠️ 无参数：交期**外生**，不随布局/车队规模/参考调度变（旧签名收 `n_jobs` 并由内部
+        取 `M_ref`——那正是"交期随我们的配置漂"的病根）。
+        ⚠️ `_MREF_BUSY` 短路必须留着：参考调度自身的运行里**不得**算交期——参考运行的指标
+        口径把 ⑧ 当关（f^ref 的 TWT 由 `reward.ReferenceObjectives.of` 事后从**同一次运行**的
+        `completes` 重算，两边同源正是 Review Focus #5 的要求）。故参考运行内本函数返回 `{}`
+        （快照里对应 `JobState.due = 0.0`）。旧口径下它还是递归护栏（求交期要参考运行、
+        参考运行又要求交期）；新口径已不可能递归，但"参考运行无交期"的语义要保留。
         """
         if not self.constraints.due_dates or _MREF_BUSY:
-            return {}                    # 参考调度自身运行时不递归求 M_ref
-        m_ref = reference_makespan(self.inst, self.cfg, self.layout.layout_seed)
-        return compute_due_dates(n_jobs, self.cfg.tau, m_ref)
+            return {}                    # 参考调度自身运行时不递归求交期
+        return compute_due_dates(self.inst, self.cfg.tau, self.cfg.due_range)
 
     def _tardy(self, plans, completes, due) -> tuple[int, float]:
         """(误期作业数, 加权总拖期 TWT)。无交期时两者恒为 0。"""
@@ -767,9 +786,9 @@ class SimWorld:
                 pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate),
                 prev_job=(-1 if m.prev_job is None else int(m.prev_job))))
         js = []
-        # ⑧ 交期与 run() **同口径**（`_due_map`）：未 run 的 t=0 快照也取（首次会触发一次
-        # 参考运行——有缓存，mk01 冷启 <0.02 s）；参考运行自身运行时返回 {}（0.0 哨兵）。
-        due = self._due_map(len(self.inst.jobs))
+        # ⑧ 交期与 run() **同口径**（`_due_map`）：未 run 的 t=0 快照也取（交期是纯实例数据的
+        # 查询，无墙钟开销）；参考运行自身运行时返回 {}（0.0 哨兵）。
+        due = self._due_map()
         for j, job_ops in enumerate(self.inst.jobs):
             done = self._job_progress[j]
             js.append(JobState(

@@ -40,8 +40,7 @@ import numpy as np
 
 from .env.constraints import ConstraintConfig
 from .env.des import SimConfig, rollout
-from .env.due_dates import total_work_content, workload_lower_bound
-from .env.due_dates import tf_rdd_due_dates
+from .env.due_dates import tf_rdd_due_dates, workload_lower_bound
 from .env.instances import Instance, load_mk
 
 TAU_LO, TAU_HI, TAU_STEP = 0.50, 6.00, 0.05
@@ -106,7 +105,6 @@ def calibrate_report(inst: Instance, *, target_ref: float = 0.45, improve: float
             f"{lo} ≤ 两个误期率 ≤ {hi} 太紧，或参考策略的完成时刻分布太窄/太宽。"
             "请放宽 lo/hi 或扩大网格。")
     best["lb"] = workload_lower_bound(inst)
-    best["w"] = total_work_content(inst)
     return best
 
 

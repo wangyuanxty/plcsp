@@ -248,39 +248,33 @@ def test_pm_interval_scale_comes_from_cfg():
 
 
 @pytest.mark.unit
-def test_due_margin_is_redundant_with_global_time_progress():
-    """⚠️ **spec 级发现的特征化测试**（Task 6）：共同交期使 due_margin 维对作业间零区分度。
+def test_due_margin_distinguishes_jobs():
+    """⚠️ Review Focus #4（**改写**自旧特征化测试"due_margin 是冗余维"，⑧ 重设计 Task 3）。
 
-    交期是 `d_j = τ·M_ref`（**同一实例所有作业同值**，`des.compute_due_dates`），故
-    `due_margin = (d_j − now)/M_ref = τ − time_progress`——同一快照内**所有**作业 token
-    取值相同，且只是 Global[0] 的线性重编码（无新信息）。旧占位 `now/M_ref − 1` 与它
-    仿射等价，故"解占位"在信息量上是零变化。
-    ⚠️ 若将来改用**逐作业**交期（§3.5 的 TWK 系），本测试会红——**红是信号**：那时该维
-    才有区分度，请连同 `state_emb.job_features` 的注释一并复核。
+    旧口径（共同交期 `d_j = τ·M_ref`）下 `due_margin = (d_j − now)/M_ref = τ − time_progress`：
+    同一快照内**所有**作业 token 同值 ⟹ 对"作业之间"零区分度（旧测试断言的就是这个）。
+    新口径 `d_j = LB·τ·(1 + R·(2ρ_j − 1))`（`due_dates.tf_rdd_due_dates`）**逐作业** ⟹ 有区分度。
+
+    判据双向：① 交期本身逐作业取不同值（前提）；② `job_features` 的第 2 维对不同作业**不同**
+    ——即不再是"全等于 clip(τ − time_progress)"那种共同交期形状。取 R>0 才有跨度（mk01 的
+    冻结表 R=0.0 是**共同交期**的特例，故此处显式取 R=0.8，与 Task 1 的同类判据一致）。
     """
-    from plcsp.env.des import reference_makespan
+    from plcsp.env.due_dates import tf_rdd_due_dates
 
     inst, lay, _w, _ctx = _ctx_and_snap()
-    m_ref = reference_makespan(inst, SimConfig(), lay.layout_seed)   # 与交期同源
-    ctx = norm_context(inst, lay, m_ref)
-    due = SimConfig().tau * m_ref                                    # 共同交期：全作业同值
-    done_job = JobState(done_ops=4, total_ops=4, remaining_min=0.0, finished=True,
-                        due=due, at_machine=0, in_transit=False, on_agv=-1)
-    todo_job = JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
-                        due=due, at_machine=-1, in_transit=True, on_agv=0)
-    snap = _snap(now=1.2 * m_ref, jobs=(done_job, todo_job) * (inst.n_jobs // 2))
-    tok, seg = build_tok(snap, inst, lay, ctx)
-    n_m, n_b = seg[0], seg[1]
-    b, gl = tok[n_m:n_m + n_b], tok[-1]
-    assert n_b == inst.n_jobs
-    # 前提：完工与未完工作业**各半**——故下面"取值相同"不是平凡成立（特判 finished 会红）
-    assert set(np.unique(b[:, 3]).tolist()) == {0.0, 1.0}
-    # ① 同一快照内**所有作业**该维相同（含已完工者）→ 对"作业之间"零区分度
-    assert np.allclose(b[:, 2], b[0, 2]), "due_margin 出现逐作业差异——交期已改成逐作业？"
-    # ② 且 ≡ clip(τ − time_progress)（Global[0]）——线性重编码，不增信息
-    expected = float(np.clip(SimConfig().tau - gl[0], -2.0, 2.0))
-    assert b[0, 2] == pytest.approx(expected, abs=1e-6)
-    assert expected == pytest.approx(SimConfig().tau - 1.2, abs=1e-6)   # 取值未触边界
+    m_ref = 100.0                                   # 本文件惯例：占位 m_ref（纯特征层单测）
+    ctx = build_ctx_for_unit_test(inst, lay, m_ref)
+    due = tf_rdd_due_dates(inst, tau=2.5, due_range=0.8)
+    assert len(set(round(v, 6) for v in due.values())) > 1, "前提不成立：交期还是共同交期"
+    jobs = [JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
+                     due=due[j], at_machine=-1, in_transit=True, on_agv=0)
+            for j in range(inst.n_jobs)]
+    snap = _snap(now=1.0 * m_ref, jobs=jobs)
+    col = job_features(snap, ctx)[:, 2]
+    # 未触 [-2,2] 裁剪边界（否则"不同"会被 clip 抹平，判据空过）
+    assert np.abs(col).max() < 2.0, "due_margin 撞上裁剪边界，本判据在此取值下不成立"
+    assert len(np.unique(np.round(col, 6))) > 1, \
+        "due_margin 对所有作业同值——又退回共同交期了（该维仍是冗余维）"
 
 
 @pytest.mark.unit
@@ -320,8 +314,10 @@ def test_due_margin_feature_is_silent_when_due_dates_off():
     cfg = SimConfig()
     lay, _dm = build_layout_and_dm(inst, cfg)
     m_ref = 100.0
+    # ⚠️ ⑧ 重设计后 `SimConfig().tau` 是 None（覆盖开关）——此处要的是"一个非零交期"，直接用
+    # 标定值量级的具体数（本测试随后显式关掉 ⑧，交期数值本身不参与断言）。
     job = JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
-                   due=SimConfig().tau * m_ref, at_machine=-1, in_transit=True, on_agv=0)
+                   due=2.5 * m_ref, at_machine=-1, in_transit=True, on_agv=0)
     snap = _snap(now=0.5 * m_ref, jobs=(job,) * inst.n_jobs)
     full = ConstraintConfig()
     off = full.with_off("due_dates")

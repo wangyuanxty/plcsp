@@ -27,10 +27,11 @@
 
 书目
 ----
-TWK 类交期在本项目已有引证：**Advanced Engineering Informatics, Vol. 65, 2025,
-Article 103216, DOI 10.1016/j.aei.2025.103216**（式 3，含物流因素的 Total Work Content
-形式；卡片见 `docs/citation-cards.md`）。**TF/RDD 参数组合 (τ, R) 的完整书目待核**——
-本模块不作书目裁定，也不得据此编造出处。
+TWK 类交期在本项目已有引证（完整题录，核对自 `docs/citation-cards.md`）：
+**《Real-time scheduling for production-logistics collaborative environment using multi-agent
+deep reinforcement learning》**，Advanced Engineering Informatics（Elsevier），Vol. 65, 2025,
+Article 103216，DOI 10.1016/j.aei.2025.103216（其式 3 为含物流因素的 Total Work Content 形式）。
+**TF/RDD 参数组合 (τ, R) 的完整书目待核**——本模块不作书目裁定，也不得据此编造出处。
 """
 from __future__ import annotations
 
