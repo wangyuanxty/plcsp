@@ -75,6 +75,25 @@ D:/anaconda/python.exe -c "import numpy as np; t=np.loadtxt('plcsp/data/mkt/layo
 
 ---
 
+### 哪些实例用哪份布局（**布局按机台数命名，不按实例名**）
+
+Brandimarte MK 的 10 个实例只用到 **6 种**机台数，其余 6 份布局是给该仓 `large_instances/` 那套用的：
+
+| 机台数 | 布局文件 | 用到它的 MK 实例 |
+|---|---|---|
+| 4 | `4_machine_layout.txt` | mk05 |
+| 5 | `5_machine_layout.txt` | mk07 |
+| 6 | `6_machine_layout.txt` | mk01、mk02 |
+| 8 | `8_machine_layout.txt` | mk03、mk04 |
+| 10 | `10_machine_layout.txt` | mk08、mk09 |
+| 15 | `15_machine_layout.txt` | **mk06、mk10** |
+| 11/12/13/16/17/18 | 同名 | （MK 系列用不到） |
+
+⚠️ **mk06 也是 15 机**（10 工件 × 15 机台），与 mk10 **共用同一份 15 机布局**——
+所以"MKT06 与 MKT10 的行程时间是同一张表"，这不是 bug。
+
+---
+
 ## 3. 三条存疑点（逐字引自 `progress-log §19.7d`，**必须写进论文，不得隐瞒**）
 
 1. **"行程时间随机 2–10"与公开布局矩阵矛盾**——网站文字与 HGS 正文都写 2–10，但实发文件值域到 **17**（6 机）/ **15**（15 机）。HGS 的代码用的是**矩阵**。两者不可能同时为真。
