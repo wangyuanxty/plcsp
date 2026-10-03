@@ -414,7 +414,7 @@
 
 ## 十三、负例补记（2026-09-29 补登 · 违反"搁置线索必须登记"的补救）
 
-> **补登原因**：以下两个变体已在 M6 阶段实跑并入库（`geosched/m6_opt_a.jsonl` / `geosched/m6_opt_b.jsonl`），但**当时未写进本记录**——只体现在代码 docstring 与 jsonl 里。按 INDEX.md §0 工作规则 4（"搁置的线索必须登记"）补登于此。
+> **补登原因**：以下两个变体已在 M6 阶段实跑并入库（`geosched/m6_opt_a.jsonl` / `geosched/m6_opt_b.jsonl`），但**当时未写进本记录**——只体现在代码 docstring 与 jsonl 里。按 `CLAUDE.md` 硬性规则 4（"搁置的线索必须登记"）补登于此。
 > **统一口径**：MK01、布局 seed=1、n_agv=2、30 种子、同评估协议（`sample_plan` + L=argmax），对照 **flat GRPO = 371.05**（m6_flat，800 步）。代码见 `geosched/m6_opt.py`；checkpoint 见 `checkpoints/m6_opt_a.pt` / `m6_opt_b.pt`。
 
 > 🔴 **污染警告（2026-10-02 补）**：本节**全部数字产生于 bug#12 未修复期**——当时 `load_mk()` 读的是错位的 `.npy`，解的**不是官方 Brandimarte MK01**（逐工序 54/55 不符，见 §二 bug#12）。故：
