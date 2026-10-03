@@ -14,12 +14,14 @@
 用法：
     run_id = f"{algo}-G{G}-s{seed}"
     run_training(policy, inst, steps=200, step_fn=joint_chain_step, seed0=0,
-                 step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=8),
+                 step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref, G=8),
                  run_dir="checkpoints/" + run_id)
     policy, ck, _ = resume_training("checkpoints/" + run_id)
 
 ⚠️ `step_fn` 默认已是联合链（`joint_chain_step`）——它的**环境参数**（布局 / 距离矩阵 /
-`SimConfig` / `NormContext` / 奖励权重 `w`）一律经 `step_kwargs` 传入（runner 不自己造环境）。
+`SimConfig` / `NormContext` / 参考三目标 `ref`）一律经 `step_kwargs` 传入（runner 不自己造环境）。
+⚠️ `ref` 必须是 `ReferenceObjectives.of(inst, cfg)`（与当前 cfg 同源）——`joint_chain_step`
+入口校验指纹，不同源直接报错（评审 F5）。
 ⚠️ 训练用的 `PolicyNet` **必须带编码器**（`enc=LayoutEncoder()`）：两个打分头只在
 `enc is not None` 时存在，无编码器的 policy 调 `joint_chain_step` 会 AttributeError。
 """
@@ -116,20 +118,16 @@ if __name__ == "__main__":
     # 自检：跑 5 步 → ckpt；模拟恢复进程 → 续 3 步（验证保存/恢复管线）
     import shutil
     import tempfile
-    from ..env.corridors import build_corridor_graph, dock_distance_matrix
+    from .setup import build_setup
     from ..env.des import SimConfig
     from ..env.instances import gen_random
-    from ..env.layout import sample_layout
-    from ..env.reward import ReferenceObjectives, reward_weights
-    from ..nn.state_emb import norm_context
+    from ..env.reward import ReferenceObjectives
     inst = gen_random(4, 3, seed=0)
     cfg = SimConfig()
-    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)   # ⚠️ 车队数须与 cfg 一致
-    dm = dock_distance_matrix(build_corridor_graph(lay))
-    ctx = norm_context(inst, lay, m_ref=100.0)
-    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    lay, dm, ctx = build_setup(inst, cfg)   # ⚠️ 环境三件套唯一入口（评审 F4）
+    ref = ReferenceObjectives.of(inst, cfg)  # ref 进训练入口（评审 F5：w 由 ref 派生）
     pol = PolicyNet(enc=LayoutEncoder())                           # 训练必须带编码器
-    kw = dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=4)
+    kw = dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref, G=4)
     d = Path(tempfile.mkdtemp()) / "run_selfcheck"
     run_training(pol, inst, steps=5, step_fn=joint_chain_step, step_kwargs=kw,
                  seed0=0, run_dir=str(d), save_every=2)

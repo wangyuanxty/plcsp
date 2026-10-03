@@ -2,41 +2,44 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 
+import numpy as np
 import torch
 import pytest
 
 from plcsp.algo.group_rel import chain_logp, joint_chain_step, roll_chain
 from plcsp.algo.policy import PolicyNet
+from plcsp.algo.setup import build_layout_and_dm, build_setup
+from plcsp.env.constraints import ABLATION_GROUPS, ConstraintConfig
 from plcsp.env.des import SimConfig
 from plcsp.env.instances import load_mk
-from plcsp.env.layout import sample_layout
-from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
-from plcsp.env.reward import ReferenceObjectives, reward_weights
+from plcsp.env.reward import ReferenceObjectives
 from plcsp.nn.encoder import LayoutEncoder
 
 
 def _setup(name="mk01"):
     """返回 (inst, layout, dm, cfg, ctx, policy)——**六个**，与 roll_chain 的签名对齐。
 
-    ⚠️ 布局 seed 固定 0：`SimWorld._due_map` 用**该布局**的 seed 取参考 makespan，而奖励侧
+    ⚠️ 环境三件套一律走 `algo.setup.build_setup`（评审 F4 收敛：此前本处用 `m_ref=100.0`
+    占位，且 `sample_layout` 漏传 `aisle_w` / `max_agv_capacity`）。布局 seed 固定 0：
+    `SimWorld._due_map` 用**该布局**的 seed 取参考 makespan，而奖励侧
     `ReferenceObjectives.of` 固定用 seed_layout=0 的参考运行——两者同源才有一致的目标口径。
     """
-    from plcsp.nn.state_emb import norm_context
     inst = load_mk(name)
     cfg = SimConfig()
-    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
-    g = build_corridor_graph(lay)
+    lay, dm, ctx = build_setup(inst, cfg)
     pol = PolicyNet(enc=LayoutEncoder())
-    return inst, lay, dock_distance_matrix(g), cfg, norm_context(inst, lay, m_ref=100.0), pol
+    return inst, lay, dm, cfg, ctx, pol
 
 
-def _weights(inst, cfg):
-    """三目标权重 wᵢ = (1/fᵢ^ref)/Σ(1/fⱼ^ref)（spec §5.3.3）。
+def _ref(inst, cfg):
+    """参考调度三目标 f^ref——`joint_chain_step` 的 `ref` 形参（`w` 由它内部派生，评审 F5）。
 
-    ⚠️ brief 的测试片段里 `w` **未定义**（`joint_chain_step` 直接引用了它）——此处补上。
+    ⚠️ 旧签名收裸 `w`：测试自己算 `reward_weights(...)` 再传进去，P4 扫 `n_agv` 时沿用旧 cfg
+    的 w 是**静默**的（`ReferenceObjectives.matches` 当时零生产调用点）。
     """
-    return reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    return ReferenceObjectives.of(inst, cfg)
 
 
 @pytest.mark.unit
@@ -80,6 +83,56 @@ def test_different_seeds_give_different_actions():
     sig_a = [(d.kind, d.cand, d.action) for d in a]
     sig_c = [(d.kind, d.cand, d.action) for d in c]
     assert sig_a != sig_c, "换 seed 动作序列不变——seed 没接进动作采样"
+
+
+@pytest.mark.unit
+def test_ablation_groups_produce_different_chains():
+    """⚠️ F1（评审裁定）：训练路径必须把 `ConstraintConfig` 透传进 `SimWorld`。
+
+    症状：`roll_chain` 直接 `SimWorld(...)` 构造（不传 constraints）⇒ 十约束默认全开，
+    spec §6.2 的 5 组消融（Full/−物流/−生产/−信息/None）跑出**完全相同**的链且**零报错**
+    ——最自然的解读会变成"约束不重要"，**假阴性会让人砍掉本来重要的约束**。
+
+    判据：5 组在同一 `(inst, seed)` 下产生**互不相同**的链。链 = 决策序列（`Decision`），
+    故签名取 `(makespan, len(decisions), 决策内容哈希)`：
+    - 四个改变动力学的组（Full/−物流/−生产/None）在 makespan 上就分开；
+    - **−信息**（只关 ⑧ 交期）按设计**不改动力学**（交期只进 metric 与特征，见
+      `SimWorld._due`），它的区分度只能来自决策内容（快照 due 维 → B 段特征）——
+      只比 makespan 会把它误判成"无差异"，那正是"关掉的开关没接线"的形状。
+    """
+    inst, _lay, _dm, cfg, _ctx, pol = _setup()
+    sigs = {}
+    for name, cons in ABLATION_GROUPS.items():
+        # 每组用**该组口径**的 ctx（⑩ 关 → 载量标度退化；评审 F2）——spec §6.2 的正确用法。
+        lay, dm, ctx = build_setup(inst, cfg, constraints=cons)
+        dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, constraints=cons)
+        digest = hashlib.sha256(b"".join(
+            d.tok.tobytes() + d.feat.tobytes() + d.cand_feat.tobytes()
+            + np.asarray([d.action], dtype=np.int64).tobytes() for d in dec)).hexdigest()[:16]
+        sigs[name] = (round(float(met["makespan"]), 6), len(dec), digest)
+    assert len(set(sigs.values())) == len(sigs), (
+        f"消融组跑出相同的链——constraints 没有进 SimWorld：{sigs}")
+
+
+@pytest.mark.unit
+def test_chain_setup_features_are_silent_when_constraint_off():
+    """⚠️ F2（评审裁定）：约束在**特征构造链**里不得留下假信号——⑤ 关时换型维必须恒 0。
+
+    `roll_chain` 把 constraints 透传进 `_mach_cand_feat`（S 头候选特征）与 `task_feat`
+    （L 头任务特征第 4 维）**两条**通路；只看 `setup_flag` 单函数盖不住"回调里没传下去"。
+    全开档必须有非零（否则判据恒真，抓不住任何东西）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    full = ConstraintConfig()
+    dec_on, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, constraints=full)
+    dec_off, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx,
+                            constraints=full.with_off("setup_time"))
+    s_on = np.array([float(d.cand_feat.max()) for d in dec_on if d.kind == "S"])
+    s_off = np.array([float(d.cand_feat.max()) for d in dec_off if d.kind == "S"])
+    assert s_on.max() > 0.0, "全开档没有换型信号——判据失去意义"
+    assert s_off.max() == 0.0, f"⑤ 关时 S 头换型特征仍报 {s_off.max()}——没读约束开关"
+    l_off = np.array([float(d.feat[3]) for d in dec_off if d.kind == "L"])
+    assert l_off.max() == 0.0, f"⑤ 关时 L 头任务特征第 4 维仍报 {l_off.max()}"
 
 
 @pytest.mark.unit
@@ -153,12 +206,12 @@ def test_clip_epoch_combinations_are_guarded():
     `ratio≡1` ⇒ `clamp` 恒等（纯空转）。两种无意义组合必须**显式报错**，不得静默空转/浪费。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
-    w = _weights(inst, cfg)
+    ref = _ref(inst, cfg)
     with pytest.raises(ValueError, match="空转"):
-        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx, w=w,
+        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx, ref=ref,
                          epochs=1, clip_eps=0.2)
     with pytest.raises(ValueError, match="epochs>1"):
-        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx, w=w,
+        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx, ref=ref,
                          epochs=3, clip_eps=None)
 
 
@@ -179,7 +232,7 @@ def test_clipped_path_ratio_uses_sampling_time_logp():
     # 免得测试输出带噪；警告本身由 `test_multi_epoch_clip_warns_about_saturation` 负责钉。
     with pytest.warns(UserWarning, match="链级"):
         r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
-                                   w=_weights(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
+                                   ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
     assert -1e9 < r < 0.0, "裁剪路径的组均值奖励不有限"
     assert diag["ratio"] == pytest.approx(1.0, abs=1e-6), "old 与 new 不同源——省法算错了"
     assert diag["clipped_frac"] == 0.0, "参数没动却报出界——clipped_frac 口径错"
@@ -196,7 +249,7 @@ def test_multi_epoch_clip_warns_about_saturation():
     inst, lay, dm, cfg, ctx, pol = _setup()
     with pytest.warns(UserWarning, match="链级"):
         joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
-                         w=_weights(inst, cfg), epochs=2, clip_eps=0.2, lr=1e-6)
+                         ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=1e-6)
 
 
 @pytest.mark.unit
@@ -205,18 +258,34 @@ def test_nonzero_layout_seed_is_rejected():
     （`SimWorld._due_map` 用**布局**种子）必须同源——非 0 布局种子**显式报错**，
     不得让目标口径与权重口径静默错位。"""
     inst, lay, dm, cfg, ctx, pol = _setup()
-    lay1 = sample_layout(inst.n_machines, seed=1, n_agv=cfg.n_agv)
-    dm1 = dock_distance_matrix(build_corridor_graph(lay1))
+    lay1, dm1 = build_layout_and_dm(inst, cfg, seed_layout=1)
     with pytest.raises(ValueError, match="seed"):
         joint_chain_step(pol, inst, lay1, dm1, seed=0, G=2, cfg=cfg, ctx=ctx,
-                         w=_weights(inst, cfg))
+                         ref=_ref(inst, cfg))
+
+
+@pytest.mark.unit
+def test_joint_step_rejects_reference_from_other_cfg():
+    """⚠️ F5（评审裁定）：`ReferenceObjectives.matches()` 必须进训练路径。
+
+    症状：它此前**只被测试调用**（`grep '.matches('` 仅命中测试），而 P4 扫 `n_agv` 时极易
+    沿用**按旧 cfg 算出的 w**——`w` 决定落在哪个 Pareto 点，"按参考归一化"在这条扫描轴上
+    静默不成立。故 `joint_chain_step` 直接收 `ReferenceObjectives`（不再收裸 `w`）：
+    指纹不匹配即显式报错，且权重由 ref **派生**（不存在"w 与 ref 不同源"的空隙）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    stale = ReferenceObjectives.of(inst, SimConfig(n_agv=3))        # 旧 cfg 的参考值
+    assert stale.matches(inst, SimConfig(n_agv=3))
+    with pytest.raises(ValueError, match="指纹|不同源"):
+        joint_chain_step(pol, inst, lay, dm, SimConfig(n_agv=3, tau=0.5), ctx, stale,
+                         seed=0, G=2)
 
 
 @pytest.mark.unit
 def test_joint_step_uses_adam_and_returns_diagnostics():
     inst, lay, dm, cfg, ctx, pol = _setup()
     r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=4, cfg=cfg, ctx=ctx,
-                               w=_weights(inst, cfg))
+                               ref=_ref(inst, cfg))
     assert isinstance(pol.optim, torch.optim.Adam), "优化器应为 Adam（spec §5.3.4 第 4 条）"
     assert set(diag) >= {"loss", "ratio", "clipped_frac", "grad_norm", "r_mean", "r_std", "A_std"}
     assert r == pytest.approx(diag["r_mean"])
@@ -235,10 +304,10 @@ def test_joint_step_bitwise_reproducible_given_seed():
     断了照样"看起来可复现"）。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
-    w = _weights(inst, cfg)
+    ref = _ref(inst, cfg)
     pa, pb = copy.deepcopy(pol), copy.deepcopy(pol)      # 同起点（深拷贝前共享同一份初始权重）
-    ra, da = joint_chain_step(pa, inst, lay, dm, cfg, ctx, w, seed=3, G=2)
-    rb, db = joint_chain_step(pb, inst, lay, dm, cfg, ctx, w, seed=3, G=2)
+    ra, da = joint_chain_step(pa, inst, lay, dm, cfg, ctx, ref, seed=3, G=2)
+    rb, db = joint_chain_step(pb, inst, lay, dm, cfg, ctx, ref, seed=3, G=2)
     assert (ra, da["r_std"], da["grad_norm"]) == (rb, db["r_std"], db["grad_norm"]), (
         f"同 seed 同起点的两步训练读数不同：r={ra} vs {rb}"
         f"（r_std {da['r_std']} vs {db['r_std']}，grad_norm {da['grad_norm']} vs {db['grad_norm']}）"

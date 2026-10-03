@@ -30,11 +30,13 @@ import numpy as np
 import torch
 
 from .policy import PolicyNet
+from ..env.constraints import ConstraintConfig
 from ..env.corridors import build_corridor_graph
 from ..env.des import SimConfig, SimWorld
 from ..env.instances import Instance
 from ..env.layout import Layout
-from ..env.reward import objective_vector, scalar_reward
+from ..env.reward import (ReferenceObjectives, objective_vector, reward_weights,
+                          scalar_reward)
 from ..nn.features import NormContext
 from ..nn.state_emb import build_tok
 
@@ -66,16 +68,24 @@ def op_feat(inst: Instance, job: int, oi: int, layout: Layout | None = None) -> 
     return [oi / n_ref, 1.0 - oi / n_ref, (len(inst.jobs[job]) - oi) / n_ref]
 
 
-def setup_flag(snap, machine: int, job: int) -> float:
+def setup_flag(snap, machine: int, job: int,
+               constraints: ConstraintConfig | None = None) -> float:
     """该机台为该作业加工**是否需换型**（1.0 = 需要）——⑤ 进网的取值。
 
     判据同 `des.MachineSim._process`：与本机**上一件**加工的作业不同才换型（`prev_job`
     为 -1 = 该机还没加工过，同样不换）。这是 S 头候选特征的语义（spec §5.3.1②）。
+
+    ⚠️ **⑤ 关闭时恒 0**（评审 F2）：仿真里换型时长就是 0（`MachineSim._process` 读的是同一个
+    开关），特征若不读它，消融档（−生产 / None）会报出"这里要换型"的**假信号**。
+    `constraints=None` = 十约束全开（与 `SimWorld` 的 None 语义一致，向后兼容）。
     """
+    if constraints is not None and not constraints.setup_time:
+        return 0.0
     return 0.0 if snap.machines[machine].prev_job in (-1, job) else 1.0
 
 
-def task_feat(inst: Instance, snap, frm: int, to: int, oi: int, job: int) -> list[float]:
+def task_feat(inst: Instance, snap, frm: int, to: int, oi: int, job: int,
+              constraints: ConstraintConfig | None = None) -> list[float]:
     """L 头的**任务特征**（4 维）：起送机台 / 目标机台 / 目标工序序号(归一) / 该机是否需换型。
 
     ⚠️ 第 4 维需要**作业号**（`setup_flag(snap, to, job)`）——故 `des.run_gated` 的
@@ -84,12 +94,13 @@ def task_feat(inst: Instance, snap, frm: int, to: int, oi: int, job: int) -> lis
     """
     n_ref = max(max(len(j) for j in inst.jobs), 1)
     n_m = max(inst.n_machines, 1)
-    return [frm / n_m, to / n_m, oi / n_ref, setup_flag(snap, to, job)]
+    return [frm / n_m, to / n_m, oi / n_ref, setup_flag(snap, to, job, constraints)]
 
 
-def _mach_cand_feat(snap, cand: tuple[int, ...], job: int) -> np.ndarray:
+def _mach_cand_feat(snap, cand: tuple[int, ...], job: int,
+                    constraints: ConstraintConfig | None = None) -> np.ndarray:
     """S 头**逐候选**特征 `(n_cand, 1)`：该机台为本作业加工是否需换型（⑤ / spec §5.3.1②）。"""
-    return np.array([[setup_flag(snap, m, job)] for m in cand], dtype=np.float32)
+    return np.array([[setup_flag(snap, m, job, constraints)] for m in cand], dtype=np.float32)
 
 
 def _agv_cand_feat(snap, layout: Layout, dm: np.ndarray, ctx: NormContext,
@@ -140,7 +151,8 @@ class Decision:
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                policy: PolicyNet, seed: int, ctx: NormContext,
                sample: bool = True,
-               generator: torch.Generator | None = None) -> tuple[list[Decision], dict]:
+               generator: torch.Generator | None = None,
+               constraints: ConstraintConfig | None = None) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
     ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
@@ -157,11 +169,15 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
      ⚠️ **动作采样流**（评审 I-3）：`generator=None` ⇒ 按 `torch.Generator().manual_seed(seed)`
         现建——同 seed 同调用序列的动作**逐位相同**；显式传入者自备种子（`joint_chain_step`
         自建一条并透传，组内 G 条链顺序共享）。`sample=False`（argmax）不消费该流。
+     ⚠️ **`constraints` 必须透传进 `SimWorld`**（评审 F1）：省略 = 十约束全开，而 spec §6.2 的
+        5 组消融正是靠这个形参区分——不透传时 5 组跑出**完全相同**的链且零报错（"约束不重要"
+        的假阴性）。`None` = `ConstraintConfig()`（全开，与 `SimWorld` 的 None 语义一致）。
     返回 (决策序列, `run_gated` 的 metrics)。
     """
     decisions: list[Decision] = []
     gen = generator if generator is not None else torch.Generator().manual_seed(seed)
-    world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout))
+    world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout),
+                     constraints=constraints)
 
     def _act(kind: str, snap, feat: list[float], cand_feat: np.ndarray,
              cand: tuple[int, ...]) -> int:
@@ -189,11 +205,11 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
     def policy_s(snap, job, oi, cand):
         cand = tuple(int(c) for c in cand)
         return _act("S", snap, op_feat(inst, job, oi, layout),
-                    _mach_cand_feat(snap, cand, job), cand)
+                    _mach_cand_feat(snap, cand, job, constraints), cand)
 
     def policy_l(snap, job, frm, to, oi, cand):
         cand = tuple(int(c) for c in cand)
-        return _act("L", snap, task_feat(inst, snap, frm, to, oi, job),
+        return _act("L", snap, task_feat(inst, snap, frm, to, oi, job, constraints),
                     _agv_cand_feat(snap, layout, dm, ctx, cand, frm), cand)
 
     metrics = world.run_gated(seed_chain=seed, online_s=True,
@@ -236,15 +252,24 @@ def sampled_logp(decisions: list[Decision]) -> torch.Tensor:
 
 
 def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.ndarray,
-                     cfg: SimConfig, ctx: NormContext, w: tuple[float, float, float],
+                     cfg: SimConfig, ctx: NormContext, ref: ReferenceObjectives,
                      seed: int, G: int = 8, lr: float = 1e-3,
                      clip_eps: float | None = None,
-                     epochs: int = 1) -> tuple[float, dict]:
+                     epochs: int = 1,
+                     constraints: ConstraintConfig | None = None) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
     `reward.scalar_reward`）→ **组内 z 化**（`_z`，一个优势，不按头分层）→ 组内更新。
     优化器 = Adam（`policy.optim` 惰性创建：约定 4；不再手写 SGD + 逐元素 clamp）。
+
+    ⚠️ **`ref` 而非裸 `w`**（评审 F5）：`w = (1/f^ref)/Σ(1/f^ref)` 只在**同一 (inst, cfg)**
+    内有意义（实测 mk01 的 M_ref：n_agv=1/3/5 → 109.95/103.42/97.24；车速 0.5/1.0 →
+    103.42/106.38）。旧签名收裸 `w`，P4 扫 `n_agv` 时沿用按旧 cfg 算出的 w 会**静默**落在
+    错误的 Pareto 点（`ReferenceObjectives.matches` 当时零调用点）。故此处直接收
+    `ReferenceObjectives`：入口校验 `ref.matches(inst, cfg)`（不匹配**显式报错**），
+    `w` 由 ref **派生**——不存在"w 与 ref 不同源"的空隙。取 ref 用
+    `ReferenceObjectives.of(inst, cfg)`（有缓存）。
 
     ⚠️ **可复现性**（评审 I-3）：动作采样由 `seed` 派生的 `torch.Generator` 锁定 ⇒ **同 seed
     同调用序列逐位可复现**（跨进程亦然：CPU 的 torch RNG 由 seed 完全确定）；`seed` 同时是
@@ -272,6 +297,9 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     布局**的 seed 取 M_ref（连交期本身都随之变）——两者不同源则目标口径与权重口径**静默错位**
     （Fact F）。如需非 0 布局种子，须先让 `ReferenceObjectives` 记录其种子再放宽此守卫。
 
+    ⚠️ **`constraints` 必须透传**（评审 F1）：`None` = 十约束全开（向后兼容），其余按消融组
+    传入——不透传时 spec §6.2 的 5 组消融跑出完全相同的链（假阴性，见 `roll_chain`）。
+
     返回 (组内 r 均值, 诊断 dict：loss / ratio / clipped_frac / grad_norm / r 均值与 std / 优势 std)。
     `ratio` / `clipped_frac` 只在裁剪路径被真算（无裁剪时报 1.0 / 0.0，= 不适用）。`loss` 在裁剪
     路径的首轮**结构性为 0**（`ratio=1` ⇒ `obj=A` ⇒ `-mean(A)=0`，A 是 z 化量），故诊断另给
@@ -282,6 +310,13 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             f"layout_seed={layout.layout_seed} ≠ 0：奖励权重（ReferenceObjectives.of 固定 "
             "seed_layout=0）与交期 M_ref（_due_map 用布局种子）会不同源，目标口径静默错位。"
             "请传 seed=0 的布局；确需非 0 种子，先扩展 ReferenceObjectives 记录它。")
+    if not ref.matches(inst, cfg):
+        raise ValueError(
+            "ReferenceObjectives 与当前 (inst, cfg) 不同源（cfg 指纹不符）——w 是按**旧** cfg "
+            "算出的，'按参考调度归一化'会在这条扫描轴上**静默**不成立（P4 扫 n_agv / 车速 / "
+            "通道宽时最易踩），落在哪个 Pareto 点也就错了。请用 "
+            "ReferenceObjectives.of(inst, cfg) 取当前 cfg 的参考值。")
+    w = reward_weights(ref.as_tuple())          # w 由 ref 派生（评审 F5：单一来源）
     if epochs > 1 and clip_eps is None:
         raise ValueError("epochs>1 必须配 clip_eps：无裁剪时同一批数据重复计算，"
                          "结果与 epochs=1 相同（纯浪费）。")
@@ -307,7 +342,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     gen = torch.Generator().manual_seed(seed)
     for g in range(G):
         dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
-                              sample=True, generator=gen)
+                              sample=True, generator=gen, constraints=constraints)
         chains.append(dec)
         rewards.append(scalar_reward(objective_vector(met), w))
 

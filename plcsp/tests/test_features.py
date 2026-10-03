@@ -4,10 +4,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from plcsp.algo.group_rel import setup_flag
+from plcsp.algo.setup import build_ctx_for_unit_test, build_layout_and_dm
+from plcsp.env.constraints import ConstraintConfig
 from plcsp.env.des import SimConfig, SimWorld
 from plcsp.env.instances import load_mk
-from plcsp.env.layout import sample_layout
-from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
 from plcsp.env.snapshot import JobState, MachineState, Snapshot, VehicleState
 from plcsp.nn.features import F_B, F_G, F_M, F_MAX, F_V, FEATURE_NAMES, norm_context
 from plcsp.nn.state_emb import (build_tok, global_features, job_features,
@@ -15,13 +16,15 @@ from plcsp.nn.state_emb import (build_tok, global_features, job_features,
 
 
 def _ctx_and_snap(name="mk01", done=False):
+    """⚠️ ctx 走 `build_ctx_for_unit_test`（**占位 m_ref**，非生产口径）——本文件是纯特征层
+    测试，手搓快照/不跑训练，不应为一次参考运行付墙钟（详见该函数的 docstring）。"""
     inst = load_mk(name)
-    lay = sample_layout(inst.n_machines, seed=0, n_agv=3)
-    g = build_corridor_graph(lay)
-    w = SimWorld(inst, lay, dock_distance_matrix(g), SimConfig(), graph=g)
+    cfg = SimConfig()
+    lay, dm = build_layout_and_dm(inst, cfg)
+    w = SimWorld(inst, lay, dm, cfg)
     if done:
         w.run(seed_chain=1)
-    return inst, lay, w, norm_context(inst, lay, m_ref=100.0)
+    return inst, lay, w, build_ctx_for_unit_test(inst, lay)
 
 
 def _snap(now=0.0, machines=(), jobs=(), vehicles=(), n_done=0, in_flight=0):
@@ -177,6 +180,71 @@ def test_feature_order_matches_feature_names():
         for col, name in enumerate(names):
             assert row[col] == pytest.approx(expected[name], rel=1e-5, abs=1e-6), (
                 f"{key} 段第 {col} 列应是「{name}」={expected[name]}，实测 {row[col]}")
+
+
+@pytest.mark.unit
+def test_setup_flag_reads_constraint_switch():
+    """⚠️ F2（评审裁定）：⑤ 关闭时 `setup_flag` 必须恒 0——仿真里换型时长就是 0。
+
+    旧实现只看 `prev_job != job`，从不读 `ConstraintConfig.setup_time` ⟹ 消融档（−生产 /
+    None）下特征**照样报 1.0**，给策略一个"这里要换型"的假信号（真阴性变假阳性）。
+    """
+    inst, _lay, _w, _ctx = _ctx_and_snap()
+    m = MachineState(backlog_min=0.0, in_q_len=0, in_cap=2.0, out_q_len=0, out_cap=2.0,
+                     busy=False, remaining_min=0.0, pm_used_min=0.0, fail_rate=0.0,
+                     prev_job=0)
+    snap = _snap(machines=(m,) * inst.n_machines)
+    full, off = ConstraintConfig(), ConstraintConfig().with_off("setup_time")
+    assert setup_flag(snap, 0, 1, full) == 1.0      # 换作业 + 全开：1.0
+    assert setup_flag(snap, 0, 0, full) == 0.0      # 同作业：恒 0（与约束无关）
+    assert setup_flag(snap, 0, 1, off) == 0.0, "⑤ 关时仍报换型——特征层没读约束开关"
+
+
+@pytest.mark.unit
+def test_capacity_feature_degenerates_when_hetero_off():
+    """⚠️ F2：⑩ 关时仿真里**所有**车容量退化为 1（`AgvSim.capacity = spec.capacity if
+    hetero else 1`），归一标度 `ctx.max_capacity` 必须跟着退化——否则载量维报
+    `1/2 = 0.5`（MK01 实测），等于告诉策略"每台车都只装了半满"（假信号）。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, dm = build_layout_and_dm(inst, cfg)
+    full = ConstraintConfig()
+    off = full.with_off("heterogeneous_fleet")
+
+    def capacity_col(cons):
+        w = SimWorld(inst, lay, dm, cfg, constraints=cons)
+        ctx = norm_context(inst, lay, m_ref=100.0, constraints=cons)
+        tok, seg = build_tok(w.snapshot(), inst, lay, ctx)
+        n_m, n_b, n_v, _ = seg
+        return tok[n_m + n_b:n_m + n_b + n_v, 8]
+
+    on = capacity_col(full)
+    assert len(set(on.tolist())) > 1, "前提：⑩ 开时车队异构（载量不同）——否则本判据无区分度"
+    deg = capacity_col(off)
+    assert np.allclose(deg, 1.0), (
+        f"⑩ 关时载量维应退化为同构满值 1.0，实测 {deg.tolist()}"
+        f"（ctx.max_capacity 仍按 layout 原始规格算？）")
+
+
+@pytest.mark.unit
+def test_pm_interval_scale_comes_from_cfg():
+    """⚠️ F3（评审裁定）：`norm_context` 的 `pm_interval` 必须来自 `SimConfig`，不得硬编码 120。
+
+    可达路径：`m11_constraint_binding` 的极端档探针正是 `cfg.pm_interval /= 10` → 12.0；
+    那里 `pm_left = 1 − pm_clock/120` 而真实间隔是 12，`pm_clock` 一过 120 就被 clip 到 0，
+    该维**静默死掉**（spec §9.2 还把 pm_interval 列在 assumed 参数栏要求做敏感性分析）。
+    """
+    inst, _lay, _w, _ctx = _ctx_and_snap()
+    m = MachineState(backlog_min=0.0, in_q_len=0, in_cap=2.0, out_q_len=0, out_cap=2.0,
+                     busy=False, remaining_min=0.0, pm_used_min=6.0, fail_rate=0.0,
+                     prev_job=-1)
+    snap = _snap(machines=(m,) * inst.n_machines)
+    pm_col = lambda cfg: machine_features(                      # noqa: E731
+        snap, norm_context(inst, _lay, m_ref=100.0, cfg=cfg))[0, 5]
+    assert pm_col(SimConfig(pm_interval=120.0)) == pytest.approx(1.0 - 6.0 / 120.0)
+    assert pm_col(SimConfig(pm_interval=12.0)) == pytest.approx(1.0 - 6.0 / 12.0), \
+        "pm_left 没接 cfg.pm_interval——极端档（12 min）下该维静默死掉"
 
 
 @pytest.mark.unit

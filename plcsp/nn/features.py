@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..env.constraints import ConstraintConfig
+from ..env.des import SimConfig
 from ..env.instances import Instance
 from ..env.layout import Layout
 
@@ -53,12 +55,23 @@ class NormContext:
     node_xy: tuple[tuple[float, float], ...]   # 通道节点坐标（V 段 x/y 用）
 
 
-def norm_context(inst: Instance, layout: Layout, m_ref: float) -> NormContext:
-    """由实例 + 布局算出全部归一化标度（与 `SimConfig` 无关的部分）。
+def norm_context(inst: Instance, layout: Layout, m_ref: float,
+                 cfg: SimConfig | None = None,
+                 constraints: ConstraintConfig | None = None) -> NormContext:
+    """由实例 + 布局 + 配置算出全部归一化标度。
 
     ⚠️ 本函数是 `NormContext` 的**唯一构造入口**，与 `NormContext` 同模块——标度口径与
     字段定义同处一地，改一处不会漏另一处。`state_emb` 只是转出（re-export）它。
+
+    ⚠️ **`cfg` / `constraints` 必须与跑仿真的那一份相同**：
+    - `cfg`（评审 F3）：`pm_interval` 是扫描轴之一（spec §9.2 assumed 参数），写死 120 会让
+      极端档（`m11_constraint_binding` 的 `pm_interval /= 10` → 12.0）下 `pm_left` **静默
+      死掉**——`pm_clock` 一过 120 就被 clip 到 0，该维恒 0 且零报错。`None` = 默认 `SimConfig()`。
+    - `constraints`（评审 F2）：约束开关会改变仿真的**有效范围**（⑩ 关 → 车队容量全退化为 1），
+      归一标度若不跟着退化，特征就报出一个仿真里不存在的值（MK01 实测：⑩ 关时载量维报
+      1/2 = 0.5，而仿真里每台车都是满容量 1）。`None` = 十约束全开（向后兼容）。
     """
+    c = cfg or SimConfig()
     total_work = sum(min(t for _m, t in op) for job in inst.jobs for op in job)
     spec = layout.grid
     diag = float(np.hypot(spec.n_rows * (spec.cell_h + spec.aisle_w),
@@ -68,7 +81,8 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float) -> NormContext:
         n_m=inst.n_machines, n_jobs=inst.n_jobs, n_agv=len(layout.agvs or []),
         bbox_diag=max(diag, 1e-9),
         max_fail_rate=max((m.fail_rate for m in layout.machines), default=1e-9),
-        pm_interval=120.0,          # 与 SimConfig.pm_interval 同源（Task 7 归一到 cfg）
-        max_capacity=max((a.capacity for a in (layout.agvs or [])), default=1),
+        pm_interval=float(c.pm_interval),   # 与 SimConfig.pm_interval 同源（评审 F3）
+        max_capacity=(max((a.capacity for a in (layout.agvs or [])), default=1)
+                      if (constraints is None or constraints.heterogeneous_fleet) else 1),
         max_queued=max(1, int(np.ceil(np.sqrt(max(inst.n_jobs, 1))))),
         node_xy=tuple(spec.node_xy(*spec.node_rc(i)) for i in range(spec.n_nodes)))

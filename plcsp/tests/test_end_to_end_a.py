@@ -33,14 +33,12 @@ import torch
 
 from plcsp.algo.group_rel import joint_chain_step, roll_chain
 from plcsp.algo.policy import PolicyNet
-from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
-from plcsp.env.des import SimConfig, reference_makespan, rollout
+from plcsp.algo.setup import build_setup
+from plcsp.env.des import SimConfig, rollout
 from plcsp.env.instances import load_mk
-from plcsp.env.layout import sample_layout
-from plcsp.env.reward import ReferenceObjectives, reward_weights
+from plcsp.env.reward import ReferenceObjectives
 from plcsp.m13_train_a import EVAL_SEED_BASE       # 评估种子起点：唯一定义处（评审 M-13）
 from plcsp.nn.encoder import LayoutEncoder
-from plcsp.nn.state_emb import norm_context
 
 STEPS, G, LR = 30, 4, 3e-4        # R1 裁定的小预算（见模块头）
 EVAL_SEEDS = 10                   # argmax 评估的扰动种子数（J>1 只用于评估，spec §5.3.4 约定 3）
@@ -55,21 +53,15 @@ EVAL_SEEDS = 10                   # argmax 评估的扰动种子数（J>1 只用
 def _setup(name: str = "mk01"):
     """返回 (inst, layout, dm, cfg, ctx, policy)——与 `roll_chain` 的签名对齐。
 
-    ⚠️ 布局 seed 固定 0：`SimWorld._due_map` 用**该布局**的 seed 取参考 makespan，而奖励侧
-    `ReferenceObjectives.of` 固定用 seed_layout=0 的参考运行——两者同源才有一致的目标口径
-    （`joint_chain_step` 入口有守卫，非 0 种子直接报错）。
-
-    归一化标度 `m_ref` 取**真实参考 makespan**（`reference_makespan`，有缓存不额外付代价）而非
-    占位常量：spec §5.3.1③ 要求归一化用实例静态量，且这个数与交期 `d_j = τ·M_ref` 的 `M_ref`
-    是**同一个**（特征归一化与交期同源）。**本文件与 `m13_train_a.py::build_setup` 同口径。**
+    ⚠️ 环境三件套一律走 `algo.setup.build_setup`（评审 F4 收敛：此前五份拷贝里三份漏传
+    `aisle_w` / `max_agv_capacity`、三份用 `m_ref=100.0` 占位）。布局 seed 固定 0 与真实的
+    参考 makespan 归一化都在 `build_setup` 里定死，本文件不再自留口径。
     """
     inst = load_mk(name)
     cfg = SimConfig()
-    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
-    g = build_corridor_graph(lay)
+    lay, dm, ctx = build_setup(inst, cfg)
     pol = PolicyNet(enc=LayoutEncoder())
-    ctx = norm_context(inst, lay, m_ref=reference_makespan(inst, cfg))
-    return inst, lay, dock_distance_matrix(g), cfg, ctx, pol
+    return inst, lay, dm, cfg, ctx, pol
 
 
 @dataclass(frozen=True)
@@ -94,11 +86,11 @@ def a_run() -> _ARun:
     #                          则每次运行的初始权重与 30 步读数都不同（验收数字不可复现）。
     #                          钉在序列开头后整条轨迹（初始化 + 每步采样）被完全确定 ⇒ 可复现。
     inst, lay, dm, cfg, ctx, pol = _setup()
-    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    ref = ReferenceObjectives.of(inst, cfg)      # ref 进训练入口（评审 F5：w 由 ref 派生）
     t0 = time.time()
     rewards = []
     for s in range(STEPS):
-        r, _diag = joint_chain_step(pol, inst, lay, dm, cfg, ctx, w, seed=s, G=G, lr=LR)
+        r, _diag = joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=s, G=G, lr=LR)
         rewards.append(float(r))
     secs = time.time() - t0
     trained = tuple(float(roll_chain(inst, lay, dm, cfg, pol, seed=EVAL_SEED_BASE + s, ctx=ctx,

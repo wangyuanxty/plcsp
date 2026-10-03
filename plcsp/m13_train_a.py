@@ -10,8 +10,8 @@ ckpt 每 `--save-every` 步落盘）。
 
 ⚠️ **`--seed` 的语义（评审 I-3 修后：可复现）**——`--seed` 同时锁定三条随机来源：
 
-1. **网络初始化**：`main()` 入口 `torch.manual_seed(args.seed)`（在 `build_setup` 构造
-   `PolicyNet` **之前**）；
+1. **网络初始化**：`main()` 入口 `torch.manual_seed(args.seed)`（在 `build_training_setup`
+   构造 `PolicyNet` **之前**）；
 2. **仿真扰动流**：第 s 步第 g 条链的 `seed_chain = (args.seed + s) * SEED_STRIDE + g`
    （`runner.py` 传 `seed0+s`；步长常量在 `group_rel.py`）；
 3. **动作采样**：`joint_chain_step` 用 `torch.Generator().manual_seed(seed0+s)` 采样并透传给
@@ -48,13 +48,12 @@ import torch
 from .algo.group_rel import SEED_STRIDE, roll_chain
 from .algo.policy import PolicyNet
 from .algo.runner import run_training
-from .env.corridors import build_corridor_graph, dock_distance_matrix
-from .env.des import SimConfig, reference_makespan, rollout
+from .algo.setup import build_setup
+from .env.constraints import ConstraintConfig
+from .env.des import SimConfig, rollout
 from .env.instances import load_mk
-from .env.layout import sample_layout
 from .env.reward import ReferenceObjectives, reward_weights
 from .nn.encoder import LayoutEncoder
-from .nn.state_emb import norm_context
 
 # 评估种子起点。⚠️ **必须避开训练用过的扰动流**（评审 F1 修的就是这里）：`joint_chain_step`
 # 第 s 步第 g 条链用 `seed_chain = (seed0+s)*SEED_STRIDE + g`（`runner.py` 传 `seed0+s`），
@@ -84,24 +83,21 @@ def assert_eval_seed_isolated(seed0: int, steps: int) -> None:
             f"{EVAL_SEED_BASE // SEED_STRIDE}（减小 --seed 或 --steps）。")
 
 
-def build_setup(inst_name: str, cfg: SimConfig | None = None):
-    """(inst, layout, dm, cfg, ctx, policy) —— 布局 seed 固定 0（`joint_chain_step` 的守卫前提）。
+def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
+                         constraints: ConstraintConfig | None = None):
+    """(inst, layout, dm, cfg, ctx, policy)——在共享 `algo.setup.build_setup` 之上再补两件事：
+    加载实例、构造策略网络。环境三件套的口径（布局 seed=0 / 真实参考 makespan / `cfg` 的
+    几何+车队参数 / `constraints` 同源）**全部**由 `build_setup` 定死（评审 F4 收敛）。
 
     ⚠️ 布局 seed 必须为 0：奖励权重取自 `ReferenceObjectives.of`（固定用 seed_layout=0 的参考
     运行），而 `SimWorld._due_map` 用**该布局**的 seed 取 `M_ref`——两者同源才有一致的口径
-    （非 0 种子会被 `joint_chain_step` 入口拒绝）。
-
-    `ctx` 的归一化标度 `m_ref` 取**真实参考 makespan**（`reference_makespan`）而非占位值：
-    spec §5.3.1③ 要求归一化用实例静态量，且这个数与交期 `d_j = τ·M_ref` 的 `M_ref` **是同一个**
-    ——特征归一化与交期同源（有缓存，不额外付参考运行的代价）。
+    （非 0 种子会被 `joint_chain_step` 入口拒绝，`build_setup` 的默认值即 0）。
     """
     inst = load_mk(inst_name)
     c = cfg or SimConfig()
-    lay = sample_layout(inst.n_machines, seed=0, n_agv=c.n_agv)
-    g = build_corridor_graph(lay)
+    lay, dm, ctx = build_setup(inst, c, constraints=constraints)
     pol = PolicyNet(enc=LayoutEncoder())        # 车队规模由 seg 定，网络无 n_agv 形参（M-4）
-    ctx = norm_context(inst, lay, m_ref=reference_makespan(inst, c))
-    return inst, lay, dock_distance_matrix(g), c, ctx, pol
+    return inst, lay, dm, c, ctx, pol
 
 
 def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float):
@@ -140,21 +136,23 @@ def main() -> None:
               flush=True)
     if args.eval_every > 0:                  # 只有真会用评估流时才查（不开评估 = 该条件空真）
         assert_eval_seed_isolated(args.seed, args.steps)
-    # ⚠️ 必须在 build_setup **之前**：`PolicyNet` 的初始化吃全局 torch RNG。
+    # ⚠️ 必须在 build_training_setup **之前**：`PolicyNet` 的初始化吃全局 torch RNG。
     #    动作采样自评审 I-3 起由 `seed0+s` 派生的 `torch.Generator` 负责，与本流互不干扰。
     torch.manual_seed(args.seed)
-    inst, lay, dm, cfg, ctx, pol = build_setup(args.inst)
-    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    inst, lay, dm, cfg, ctx, pol = build_training_setup(args.inst)
+    ref = ReferenceObjectives.of(inst, cfg)     # ref 进训练入口（评审 F5：w 由 ref 派生）
+    w = reward_weights(ref.as_tuple())          # 仅为日志打印
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}")
-    print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ReferenceObjectives.of(inst, cfg).as_tuple()}）")
+    print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
           "（跨进程亦然；唯一例外是 --resume 续跑，见模块 docstring）", flush=True)
 
     run_training(pol, inst, steps=args.steps,
-                 step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, w=w, G=args.G, lr=args.lr),
+                 step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref,
+                                  G=args.G, lr=args.lr),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule)
