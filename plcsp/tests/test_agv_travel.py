@@ -24,12 +24,21 @@ def test_episode_completes_on_grid():
 
 
 @pytest.mark.unit
-def test_travel_time_is_small_fraction_of_makespan():
-    """运输应占 makespan 的**小头**（bug#13 量纲对齐后应成立；若运输占大头说明量纲又歪了）。"""
+def test_travel_time_is_a_bounded_fraction_of_makespan():
+    """运输占 makespan 的比例必须有界（量纲 sanity）。**下界与上界都是本批实测定的**。
+
+    ⚠️ **上界从 0.20 放宽到 0.50（P4-B Task 2b，实测记录）**：作业改为在**装卸站**入场、
+    完工**回站**后，每个作业多两条 LU 负载腿，运输不再只是"机台间的小头"。
+    实测 mk01（n_agv=4，几何口径）：**travel/makespan = 0.314**（改造前 ≈ 0.09）——
+    旧上界 0.20 被**真实结构变化**作废，不是被调参作废。放宽后的界仍能挡住量纲错误
+    （若行程再被除以 60，frac 会掉到 0.006 以下；若单位反过来则远超 1）。
+    下界 0.05 挡的是"运输根本没接进仿真"。⚠️ 论文里"运输不在关键路径"这句（spec §3.3.3）
+    必须按**矩阵口径**重测后再写——本批不得沿用旧结论。
+    """
     inst = load_mk("mk01")
     r = rollout(inst, seed_chain=1, cfg=SimConfig(n_agv=4))
     frac = r["travel_time_total"] / r["makespan"]
-    assert 0.0 < frac < 0.20, f"运输/makespan = {frac:.3f}，超出预期区间 (0, 0.20)"
+    assert 0.05 < frac < 0.50, f"运输/makespan = {frac:.3f}，超出实测区间 (0.05, 0.50)"
 
 
 @pytest.mark.unit
@@ -42,12 +51,16 @@ def test_travel_time_equals_distance_matrix_exactly():
     P1b Task 2 加了空载段：n_agv=1 时任务按 `task_flow` 生成序 FIFO 执行，
     故第 k 条任务的空载段 = 第 k−1 条任务的卸货点到第 k 条的取货点（首条无空载段）。
     这里同时校验**总额**与**空载/负载分账**——只对总额会让"两段记反"蒙混过关。
+
+    ⚠️ P4-B Task 2b：任务端点多了**装卸站**（号 = `inst.n_machines`）——首/末条任务的两端
+    就是站。故端点→通道节点要走 `_dock_node`（站取 `lay.lu.node`，其位置由连接段接入）。
     """
     # Arrange
     # ⚠️ 必须在**单载**下测：⑩ 多载量开启时一趟送多件，`travel_time_total` 会**小于**
     #    Σ 每件的负载段（实测少 ~2.4 min），精确等式不成立。这条断言守的是"节点索引没错"，
     #    与拼车无关，故把异构车队关掉（载量退化为 1）后再对拍。
     inst = load_mk("mk01")
+    lu_idx = inst.n_machines
     cfg = SimConfig(n_agv=1)
     lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)   # 同 rollout 默认 seed_layout
     dm = dock_distance_matrix(build_corridor_graph(lay))
@@ -60,10 +73,12 @@ def test_travel_time_equals_distance_matrix_exactly():
     def _minutes(u: int, v: int) -> float:
         return float(dm[u, v]) / cfg.eff_speed / cfg.agv_speed_mps / 60.0
 
+    def _dock(idx: int) -> int:
+        return lay.lu.node if idx == lu_idx else lay.machines[idx].dock_node
+
     loaded, empty, prev_dock = 0.0, 0.0, None
     for _job, _oi, frm_m, to_m in r["task_flow"]:
-        a = lay.machines[frm_m].dock_node
-        b = lay.machines[to_m].dock_node
+        a, b = _dock(frm_m), _dock(to_m)
         loaded += _minutes(a, b)
         if prev_dock is not None:
             empty += _minutes(prev_dock, a)

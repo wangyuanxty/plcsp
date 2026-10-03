@@ -12,11 +12,11 @@
    本模块只接受**含 LU 的全矩阵**——喂进 `load_mkt_layout(m)` 的默认（已丢 LU）结果会**显式报错**；
 3. 矩阵**非对称**（`m=4` 是唯一例外，见 README §2）⟹ 查表**必须保序**。
 
-⚠️ **LU 今天没有消费者**：本项目的 AGV 任务只在**机台之间**搬运（作业在首工序机台入场、
-在末工序机台完工，见 `des.py` 的 `AgvSim.run`），没有"从装卸站取件/送回装卸站"这一段。
-全矩阵进来是为了**保住数据**（将来要加 LU 运输时不必回头改数据层），不是现在用得上——
-`node_slot` 里没有任何节点映射到下标 0，`test_slot_zero_is_reserved_for_the_load_unload_station`
-钉住这一点（加了 LU 运输它会红，逼人同时改口径与文档）。
+⚠️ **装卸站（LU）的下标 0 现在有消费者**（P4-B Task 2b，2026-10-03 用户裁定）：作业**在装卸站
+入场、在装卸站完工**，故任务里会出现"站→首工序机台"与"末工序机台→站"两条**负载**腿，它们查的
+正是矩阵的第 0 行/列。`layout.lu` 的节点由 `from_matrix` 自动映射到下标 0——不需要调用方记得传，
+也就没有"忘了传"的口子。若某布局确实没有装卸站（`layout.lu is None`，只应出现在手搓的测试夹具里），
+则下标 0 空置，`test_slot_zero_is_the_load_unload_station_and_nothing_else` 钉住"站 ↔ 0"。
 """
 from __future__ import annotations
 
@@ -62,8 +62,10 @@ class TransportCaliber:
                 f"行程时间矩阵必须是 (m+1)×(m+1)（**第 0 行/列是装卸站 LU**）：机台最大下标 "
                 f"{want - 1} ⟹ 应有 {want} 行/列，实得 {self.matrix.shape[0]}——若你手上是 "
                 f"`load_mkt_layout(m)` 的默认结果，那是**已丢 LU** 的 m×m，不得当全矩阵用")
-        if min(self.node_slot.values()) < 1:
-            raise ValueError("节点不得映射到下标 0——那是装卸站（LU）的位置，本项目尚无 LU 运输")
+        if min(self.node_slot.values()) < 0:
+            raise ValueError("矩阵下标必须 ≥ 0（0 = 装卸站的位置）")
+        if len(set(self.node_slot.values())) != len(self.node_slot):
+            raise ValueError("两个通道节点映射到了同一个矩阵下标——节点→下标不是一一对应")
 
     # ── 构造 ──
     @staticmethod
@@ -74,15 +76,22 @@ class TransportCaliber:
     @staticmethod
     def from_matrix(matrix: np.ndarray, layout: Layout,
                     *, unmapped: str = UNMAPPED_RAISE) -> "TransportCaliber":
-        """按**布局**建矩阵口径：机台 i 的 `dock_node` ↔ 矩阵下标 **i+1**。
+        """按**布局**建矩阵口径：机台 i 的 `dock_node` ↔ 矩阵下标 **i+1**，装卸站 ↔ 下标 **0**。
 
         ⚠️ 机台号必须与**实例机台号**一致：`sample_layout` 按格子顺序放机台（`machines[i]` 即
         实例机台 i），故这里直接用 `enumerate`。⚠️ 对齐的是**下标**，不是坐标——MKT 矩阵的
         机台编号来自 Brandimarte 的 `.fjs`，两边同源同序（P4-A 已核"加工数据一字不改"）。
+        ⚠️ 装卸站**由布局自动带入**（`layout.lu`）——不设开关、不让调用方记得传：
+        "忘了映射装卸站"会是静默错行（整条 LU 腿查错格），不是显式错误。
         """
         node_slot = {int(mp.dock_node): i + 1 for i, mp in enumerate(layout.machines)}
         if len(node_slot) != len(layout.machines):
             raise ValueError("机台的 dock_node 有重复——节点→矩阵下标不是一一对应")
+        lu = getattr(layout, "lu", None)
+        if lu is not None:
+            if int(lu.node) in node_slot:
+                raise ValueError("装卸站节点与某台机台的 dock_node 重合——节点→下标不是一一对应")
+            node_slot[int(lu.node)] = 0        # 矩阵第 0 行/列就是装卸站
         return TransportCaliber(mode=MATRIX, matrix=np.asarray(matrix, dtype=float),
                                 node_slot=node_slot, unmapped=unmapped)
 

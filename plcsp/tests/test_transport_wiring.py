@@ -67,14 +67,17 @@ def test_matrix_travel_time_equals_the_lookup_sum_exactly():
     （空载段 = 上一卸货点 → 本次取货点）。
     """
     mkt = load_mkt("mk01")
-    t = mkt.trans_time                                  # m×m 机台间矩阵（分钟）
+    t = mkt.base.trans_time_full                        # (m+1)×(m+1)：**含装卸站**
     r = rollout(mkt.base, seed_chain=1, cfg=SimConfig(n_agv=1), constraints=_exact_caliber_constraints())
+
+    def slot(idx: int) -> int:                          # 机台 i → i+1；装卸站 → 0
+        return 0 if idx == mkt.base.n_machines else idx + 1
 
     loaded, empty, prev = 0.0, 0.0, None
     for _j, _oi, frm, to in r["task_flow"]:
-        loaded += float(t[frm][to])
+        loaded += float(t[slot(frm)][slot(to)])
         if prev is not None:
-            empty += float(t[prev][frm])
+            empty += float(t[slot(prev)][slot(frm)])
         prev = to
     assert len(r["task_flow"]) > 0, "本 episode 应有搬运任务"
     assert r["travel_time_total"] == pytest.approx(loaded + empty, rel=1e-9), (
@@ -91,14 +94,18 @@ def test_zone_split_preserves_the_matrix_total():
     ⑧ 关（矩阵交期表 Task 3 才落盘，见 `_exact_caliber_constraints`）。
     """
     mkt = load_mkt("mk01")
-    t = mkt.trans_time
+    t = mkt.base.trans_time_full                        # 含装卸站（P4-B Task 2b）
     cons = ConstraintConfig().with_off("due_dates", "heterogeneous_fleet", "charging")   # ① 保持默认开
     r = rollout(mkt.base, seed_chain=1, cfg=SimConfig(n_agv=1), constraints=cons)
+
+    def slot(idx: int) -> int:
+        return 0 if idx == mkt.base.n_machines else idx + 1
+
     loaded, empty, prev = 0.0, 0.0, None
     for _j, _oi, frm, to in r["task_flow"]:
-        loaded += float(t[frm][to])
+        loaded += float(t[slot(frm)][slot(to)])
         if prev is not None:
-            empty += float(t[prev][frm])
+            empty += float(t[slot(prev)][slot(frm)])
         prev = to
     assert r["zone_wait"]["n"] >= 0                            # 若 ① 根本没生效，下面的等式无意义
     assert r["travel_time_total"] == pytest.approx(loaded + empty, rel=1e-9)
@@ -207,7 +214,10 @@ def test_geometry_instance_never_gets_a_matrix_caliber():
 def test_rollout_declares_its_transport_caliber_in_the_metrics():
     """口径必须**随结果自报**——否则两档口径的数并排放时无从分辨（P4-A Review Focus #1 同型）。"""
     mk = rollout(load_mk("mk01"), seed_chain=1, cfg=SimConfig(n_agv=3))["transport"]
-    mkt = rollout(load_mkt("mk01").base, seed_chain=1, cfg=SimConfig(n_agv=6),
+    # ⚠️ 矩阵 + ⑪ 开时充电桩没有矩阵项 ⟹ 必须显式选降级策略（本测试只看口径标签，用 ⑧ 关
+    #    把交期标定的依赖摘掉——矩阵交期表要到 Task 3 才落盘）。
+    mkt = rollout(load_mkt("mk01").base, seed_chain=1,
+                  cfg=SimConfig(n_agv=6, transport_unmapped="geometry"),
                   constraints=ConstraintConfig().with_off("due_dates"))["transport"]
     assert mk == "geometry" and mkt == "matrix"
 
@@ -221,7 +231,9 @@ def test_reference_runs_of_the_two_calibers_do_not_share_the_cache():
     """
     from plcsp.env.des import reference_run
 
-    cfg = SimConfig(n_agv=6)
+    # ⚠️ 矩阵口径的参考运行必须显式声明"充电桩用几何补"——矩阵口径下 ⑪ 真的会 binding
+    #    （单车一趟耗电与电池同量级），默认 `raise` 会在充电腿处显式报错（这正是设计要的）。
+    cfg = SimConfig(n_agv=6, transport_unmapped="geometry")
     a = reference_run(load_mk("mk01"), cfg=cfg, seed_layout=0)["makespan"]
     b = reference_run(load_mkt("mk01").base, cfg=cfg, seed_layout=0)["makespan"]
     assert a != b, "两个口径的参考运行跑出同一 makespan——缓存串味（_instance_key 漏了口径/矩阵）"

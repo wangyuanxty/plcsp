@@ -18,7 +18,11 @@ from .layout import Layout
 
 
 def build_corridor_graph(layout: Layout) -> nx.Graph:
-    """格点图：节点带 pos 属性；横/竖相邻边，权重 = 欧氏段长 [m]。"""
+    """格点图：节点带 pos 属性；横/竖相邻边，权重 = 欧氏段长 [m]。
+
+    ⚠️ 另加**装卸站**：格点外的一个节点 + **一条**连接段边（接到 `GridSpec.lu_dock_node`）。
+    装卸站**不是**格点交叉口——AGV 不在那里与别的车争用路口区段（见 `layout.LuPad`）。
+    """
     spec = layout.grid
     g = nx.Graph()
     for r in range(spec.n_rows + 1):
@@ -33,6 +37,9 @@ def build_corridor_graph(layout: Layout) -> nx.Graph:
             if r + 1 <= spec.n_rows:                     # 纵向
                 v = spec.node_id(r + 1, c)
                 g.add_edge(u, v, weight=abs(spec.node_xy(r + 1, c)[1] - spec.node_xy(r, c)[1]))
+    if layout.lu is not None:
+        g.add_node(layout.lu.node, pos=(layout.lu.x, layout.lu.y))
+        g.add_edge(layout.lu.node, layout.lu.dock_node, weight=float(layout.lu.connector_m))
     return g
 
 

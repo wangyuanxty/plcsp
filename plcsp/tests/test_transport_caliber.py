@@ -46,15 +46,22 @@ def test_non_square_matrix_is_rejected():
 
 
 @pytest.mark.unit
-def test_slot_zero_is_reserved_for_the_load_unload_station():
-    """⚠️ 下标 0 是装卸站（LU）——**本项目今天没有任何节点该映射到它**（尚无 LU 运输）。
+def test_slot_zero_is_the_load_unload_station_and_nothing_else():
+    """⚠️ 下标 0 是装卸站（LU）——**恰好一个**节点映射到它，且那是装卸站节点。
 
-    这条挡的是"把某台机台挂到下标 0"的实现错误（会让所有机台整体错行）。
+    ⚠️ **绊线翻转**（P4-B Task 2b）：Task 1 时本项目还没有 LU 运输，本测试当时钉的是
+    "**没有**任何节点映射到下标 0"；用户裁定本批就加装卸站后，这一位**必须有**消费者。
+    本测试当时就写明"加了 LU 运输它会红，逼人同时改口径与文档"——现在按它的要求翻转：
+    下标 0 只能属于装卸站，机台仍从下标 1 起（少加一会让这条红）。
     """
     lay = _layout(6)
     c = TransportCaliber.from_matrix(load_mkt_layout(6, drop_lu=False), lay)
-    assert 0 not in set(c.node_slot.values()), "有节点映射到了 LU 位（下标 0）"
-    assert set(c.node_slot.values()) == set(range(1, 7))
+    slots = set(c.node_slot.values())
+    assert slots == set(range(7)), "机台必须占满 1..6（+ 装卸站的 0）"
+    assert c.slot_of(lay.lu.node) == 0, "装卸站没有映射到下标 0"
+    assert list(c.node_slot.values()).count(0) == 1
+    for i, mp in enumerate(lay.machines):
+        assert c.slot_of(mp.dock_node) == i + 1
 
 
 @pytest.mark.unit

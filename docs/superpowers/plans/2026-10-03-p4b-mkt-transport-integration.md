@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **项目根** = `D:\research\DeepReinforcementLearningScheduling`。**根目录只允许有目录**，不得新增根级文件；**禁止**把 `*.log` / `*.jsonl` / `figs/` 等临时产物写进包目录或根目录。
+- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python** 一律用 `D:/anaconda/python.exe`；前缀 `PYTHONIOENCODING=utf-8`。**CPU-only**。
 - **单位约定（不得改动）**：仿真时间 = 分钟，布局坐标 = 米，能耗 = kWh。**矩阵已经是分钟**——**不得**对它套几何口径的 `距离 / (eff_speed · 车速) / 60` 换算（本批的头号缺陷形态）。
 - **回归门禁**：`plcsp/tests/` 现有 **283 项必须始终全绿**，且 `ruff check plcsp/` 保持 clean。⚠️ **全套 `plcsp/tests` 约 6 分钟**（`test_end_to_end_a.py` 独占 4 分多），每个任务末尾都要跑，知情安排墙钟。
@@ -935,7 +935,69 @@ git commit -m "feat: MKT 行程时间矩阵接入 AgvSim（口径跟随实例、
 
 ---
 
-### Task 3: MKT 口径的交期标定（冻结 `TF_RDD_MATRIX`）
+### Task 2b: 装卸站（LU）接入——作业在站入场、完工回站（2026-10-03 用户裁定，插在 Task 3 之前）
+
+> **为什么插在这里**：Task 2 的「已知边界」把"仿真没有 LU 端点"当作**口径边界**记录，用户裁定
+> **本批就加**——档 A 要与 MKT 逐位同口径（作业从装卸站出发、完工回站），矩阵的**第 0 行/列**
+> 才真正有消费者。加了它 ⟹ 释放/完工时刻变 ⟹ makespan、能耗、参考调度、**以及两张交期标定表**
+> 全变，故它必须在 Task 3（矩阵标定）与 Task 4（两档表）**之前**落地，否则那两项要重做。
+
+**形态依据**（与 spec §3.2 一致，引用纪律照旧）：*Real-time scheduling for production-logistics
+collaborative environment using multi-agent deep reinforcement learning*, Advanced Engineering
+Informatics 65:103216, 2025 的 **Fig. 2**，该文自陈采用其 [5] 的车间布局 —— 即 **Cai et al.,
+*International Journal of Production Research* 61(4):1373-1393, 2023**。Figure 形态：单一装卸单元在
+**机位网格外左侧**、高度约在第 1/2 行机位的分界处，由一个**短连接段**接到网格左边缘的交叉口；
+**它不是格点交叉口**（AGV 图符全部落在交叉口上，装卸站不在其中）。
+❌ **不得**把某个边界交叉口改当装卸站——那会静默短掉一整段连接段，并把装卸站塞进通道网当普通路口。
+❌ **不得**引 JMS 82（MMSLS）作为布局来源（spec §3.2 已明令：该文不是物理平面图）。
+
+**判定的设计（本任务的核心裁定，须写进报告与 spec）**：
+
+1. **几何口径与矩阵口径都要有装卸站**——口径差别**只允许**体现在"行程时间从哪来"，
+   **不得**改变问题的结构（有没有 LU 段是结构）。故原始 MK（几何）也走"站→首工序机台"与
+   "末工序机台→站"两段，只是时长由几何算。
+2. **装卸站是格点外的新节点 + 一条连接段边**（不是被复用的边界交叉口）。
+3. **`BufferPad`/`buffers` 删除，其角色由装卸站承担**：它是 spec §3.2「缓冲/装卸：网格外一侧」
+   一句话的产物，全仓**零读者**（死数据）；保留它与新加装卸站会留下两个半用概念。
+4. **任务端点号**：机台 = `0..m-1`，装卸站 = `m`（= `machines` 表末位）。旧口径里 `task_flow`
+   的端点全是机台号；现在两端各多一条 LU 任务，故 `task_flow` 的每条记录里出现 `m` 即"这一端
+   是装卸站"。
+5. **两条 LU 段都是负载段**（工件在车上），走**正常派车路径**（同一个 `_transporter` 生成任务、
+   同一个 `tasks_in` 队列、同一套 `agv_phi`/L 层绑定），**不得瞬移**。
+6. `completes[j]` 由**到达装卸站**的时刻给出（makespan 口径随之改变）。
+
+**Files:**
+- Modify: `plcsp/env/layout.py`（`GridSpec` 加装卸站几何；删 `BufferPad`/`Layout.buffers`，加 `LuPad`/`Layout.lu`）
+- Modify: `plcsp/env/corridors.py`（`build_corridor_graph` 加装卸站节点 + 连接段边）
+- Modify: `plcsp/env/transport.py`（装卸站节点 ↔ 矩阵下标 **0**）
+- Modify: `plcsp/env/des.py`（`LuStation` 实体；`build_zone_map` 处理格点外节点；`_transporter`
+  生成两类 LU 任务；`MachineSim.run` 末工序不再直接记完工）
+- Modify: `plcsp/nn/features.py`（`node_xy` 补上装卸站坐标——`state_emb` 会按 `pos_node` 取值）
+- Modify: `plcsp/tests/test_transport_caliber.py`（**绊线翻转**，不删除：下标 0 现在是装卸站）
+- Modify: `plcsp/tests/test_corridors_lattice.py`、`plcsp/tests/test_agv_travel.py`（图多一个节点、
+  `task_flow` 多 LU 段——这两条是**既有断言的口径更新**，不是放宽）
+- Test: `plcsp/tests/test_lu_station.py`（**LF**）
+
+- [ ] **Step 1: 写失败测试**（`test_lu_station.py`）
+- [ ] **Step 2: 跑测试确认失败**
+- [ ] **Step 3: 实现**
+- [ ] **Step 4: 跑测试确认通过 + 全套回归 + 变异自检**
+- [ ] **Step 5: 提交** `feat: 装卸站（LU）接入——作业在站入场、完工回站，矩阵下标 0 的消费者（P4-B Task 2b）`
+
+> ⚠️ 本任务会**作废一批冻结数字**：`TF_RDD`（几何口径）必须用标定脚本**重新生成**（不得手改），
+> `m14` 的 `ours` 列、`docs/INDEX.md` §5.8/§5.9、`progress-log` §20.4/§21.5、spec §3.1/§3.4/§5.8
+> 里受影响的数字必须**显式标注作废**并在 Task 5 统一改写——不得留着旧数当现值。
+> ⚠️ 「我们的 makespan 不含回库运输」这条比较性告诫**作废**（它不再成立），Task 5 必须删/改。
+
+---
+
+### Task 3: MKT 口径的交期标定（冻结 `TF_RDD_MATRIX`；**几何表一并按新结构重标**）
+
+> ⚠️ **Task 2b 之后**：几何口径的 makespan 也变了 ⟹ `TF_RDD` 的冻结值必须重标。
+> 本任务因此产出**两张表**：几何 `TF_RDD`（重标）与矩阵 `TF_RDD_MATRIX`（新标）。
+> 重标**必须走脚本**（`test_frozen_table_is_reproduced_by_the_calibration_script` 盯着），
+> 并把 before/after 记进报告与 progress-log。
+
 
 **Files:**
 - Modify: `plcsp/m16_due_calib.py`（加 `--transport` / `--n-agv`；网格上限按口径取；贴回块打印分口径表）

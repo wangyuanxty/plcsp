@@ -94,5 +94,8 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float,
         max_capacity=(max((a.capacity for a in (layout.agvs or [])), default=1)
                       if cons.heterogeneous_fleet else 1),
         max_queued=max(1, int(np.ceil(np.sqrt(max(inst.n_jobs, 1))))),
-        node_xy=tuple(spec.node_xy(*spec.node_rc(i)) for i in range(spec.n_nodes)),
+        # ⚠️ 末位是**装卸站**（节点号 = `grid.n_nodes`，格点外）——`state_emb` 按
+        # `VehicleState.node` 取坐标，AGV 在站上时没有它就会 IndexError。
+        node_xy=(tuple(spec.node_xy(*spec.node_rc(i)) for i in range(spec.n_nodes))
+                 + (() if layout.lu is None else ((layout.lu.x, layout.lu.y),))),
         constraints=cons)

@@ -12,7 +12,10 @@ from plcsp.env.layout import sample_layout
 def test_lattice_is_connected_and_sized():
     lay = sample_layout(6, seed=0)
     g = build_corridor_graph(lay)
-    assert g.number_of_nodes() == lay.grid.n_nodes
+    # ⚠️ P4-B Task 2b：图里还有**装卸站**——格点外的第 `n_nodes` 号节点（+ 一条连接段边）。
+    #    `grid.n_nodes` 仍是**格点交叉口**数（`nn` 的逐节点特征按它建），故这里是 +1。
+    assert g.number_of_nodes() == lay.grid.n_nodes + 1
+    assert g.degree(lay.lu.node) == 1, "装卸站应只有一条连接段"
     assert nx.is_connected(g), "格点图必须连通"
 
 

@@ -17,16 +17,38 @@ import numpy as np
 
 @dataclass(frozen=True)
 class GridSpec:
-    """网格规格。机位 n_rows × n_cols；通道节点 (n_rows+1) × (n_cols+1)。"""
+    """网格规格。机位 n_rows × n_cols；通道节点 (n_rows+1) × (n_cols+1)。
+
+    ⚠️ **装卸站是格点外的第 n_nodes 号节点**（不是某个交叉口被挪用，见 `lu_node`）——
+    形态来自 AEI 103216 Fig. 2：装卸单元在网格外左侧、经一条**连接段**接到边界交叉口。
+    """
     n_rows: int
     n_cols: int
     cell_w: float = 3.0      # 机位宽 [m]
     cell_h: float = 2.4      # 机位高 [m]
     aisle_w: float = 1.5     # 通道宽 [m]（< 1.5 触发窄道降速，见 des.eff_speed）
+    lu_connector_m: float = 3.0   # 装卸站连接段长 [m]（⚠️ assumed，无出处，见 spec §9.2）
 
     @property
     def n_nodes(self) -> int:
+        """**格点交叉口**数（不含装卸站——装卸站是格点外挂节点，编号紧接其后）。"""
         return (self.n_rows + 1) * (self.n_cols + 1)
+
+    @property
+    def lu_node(self) -> int:
+        """装卸站的节点号 = 格点末位的下一个（格点外）。"""
+        return self.n_nodes
+
+    @property
+    def lu_dock_node(self) -> int:
+        """连接段接入的格点交叉口：左边缘、第 0/1 行机位分界处（Fig. 2 的位置）。"""
+        return self.node_id(1, 0)
+
+    @property
+    def lu_xy(self) -> tuple[float, float]:
+        """装卸站坐标：在被连交叉口的左侧 `lu_connector_m` 处。"""
+        x, y = self.node_xy(1, 0)
+        return (x - self.lu_connector_m, y)
 
     def node_id(self, r: int, c: int) -> int:
         return r * (self.n_cols + 1) + c
@@ -59,9 +81,25 @@ class ChargerPad:
 
 
 @dataclass
-class BufferPad:
-    id: int
-    node: int
+class LuPad:
+    """装卸站（Load/Unload unit）——**网格外一侧**，由一条**连接段**接到格点边界交叉口。
+
+    形态来源：**AEI 103216 Fig. 2**（*Real-time scheduling for production-logistics
+    collaborative environment using multi-agent deep reinforcement learning*, Advanced
+    Engineering Informatics 65:103216, 2025）；该文自陈采用其 [5] 的车间布局，即
+    **Cai et al., International Journal of Production Research 61(4):1373-1393, 2023**。
+    Fig. 2 形态：单一装卸单元在机位网格**左侧**、约在第 1/2 行机位分界的高度，
+    经一条**短连接段**接入左边缘交叉口；图上的 AGV 全部落在格点交叉口上，装卸站不在其中。
+
+    ⚠️ 故 `node`（装卸站自己的节点号）**不是**任何交叉口——`dock_node` 才是它接入的那个。
+    ❌ 不得用某个边界交叉口冒充当装卸站：那会静默短掉一整段连接段，并把站塞进通道网当普通路口。
+    ❌ 不得引 JMS 82（MMSLS）作为布局来源（spec §3.2：该文不是物理平面图）。
+    """
+    node: int          # 装卸站自己的节点号（格点外，= GridSpec.lu_node）
+    dock_node: int     # 连接段接入的格点交叉口（= GridSpec.lu_dock_node）
+    x: float
+    y: float
+    connector_m: float
 
 
 @dataclass(frozen=True)
@@ -82,7 +120,7 @@ class Layout:
     grid: GridSpec
     machines: list[MachinePad]
     chargers: list[ChargerPad]
-    buffers: list[BufferPad]
+    lu: LuPad
     layout_seed: int
     agvs: list[AgvSpec] = None      # 车队规格（默认 None → 由 sample_layout 填）
 
@@ -144,9 +182,10 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
     charger_nodes = [free[i] for i in idx]
     chargers = [ChargerPad(id=j, node=n) for j, n in enumerate(charger_nodes)]
 
-    # 缓冲/装卸：取最后两个自由节点（网格外侧），避开充电桩
-    rest = [n for n in free if n not in set(charger_nodes)]
-    buffers = [BufferPad(id=j, node=n) for j, n in enumerate(rest[-2:])] if len(rest) >= 2 else []
+    # 装卸站（Fig. 2）：单一，在网格**外左侧**、经一条连接段接入左边缘交叉口。
+    # ⚠️ 它**不占自由节点**（是格点外的新节点），故与充电桩的选取互不干扰。
+    lu = LuPad(node=spec.lu_node, dock_node=spec.lu_dock_node,
+               x=spec.lu_xy[0], y=spec.lu_xy[1], connector_m=spec.lu_connector_m)
 
     # 车队规格（⑩ 异构）。⚠️ 抽样放在**最后**——机台/充电桩的抽样序列才不会被扰动。
     # 这些数只被 `AgvSim` 在 `heterogeneous_fleet=True` 时读；关掉时行为与"从未存在"一致。
@@ -157,4 +196,4 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
             for a in range(n_agv)]
 
     return Layout(grid=spec, machines=machines, chargers=chargers,
-                  buffers=buffers, layout_seed=seed, agvs=agvs)
+                  lu=lu, layout_seed=seed, agvs=agvs)

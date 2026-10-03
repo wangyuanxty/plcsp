@@ -313,13 +313,45 @@ class MachineSim:
             self.track.cur_op[self.pad.id] = None
             self.track.job_progress[job] = oi + 1
             self.stats["ops_done"] = self.stats.get("ops_done", 0) + 1
-            if is_last:
-                self.completes[job] = self.env.now      # 末工序完成即出库（不进输出缓冲/无搬运）
-                self.events_q.put((self.pad.id, job, oi, op, True))  # 批注入载体：transporter 收
-                continue                                # is_last → 从 inject_q 补下一作业（否则
-                                                        # 分批门控下只有首批作业会运行！）
-            self.events_q.put((self.pad.id, job, oi, op, is_last))  # 先发事件：transporter 的 out_q.get 作为
-            yield self.out_q.put((job, oi, op, is_last))            # 等待者立即放行 put（防 put→事件 顺序死锁）
+            # ⚠️ **末工序不再在这里记完工**（P4-B Task 2b）：工件还要**回装卸站**，
+            # `completes[j]` = 到站时刻（由 `LuStation` 记）。两类出口同走"先发事件 →
+            # 再入 out_q"的顺序（防 put→事件 顺序死锁；transporter 的 get 即等待者）。
+            self.events_q.put((self.pad.id, job, oi, op, is_last))
+            yield self.out_q.put((job, oi, op, is_last))            # transporter 取走（含末工序）
+
+
+class _StationPad:
+    """`AgvSim`/transporter 只读 `.pad.dock_node`——装卸站用这个最小形状与机台共用索引表，
+    **不**把装卸站伪装成 `MachinePad`（它不加工、没有故障率/缓冲容量）。"""
+    __slots__ = ("dock_node",)
+
+    def __init__(self, node: int):
+        self.dock_node = node
+
+
+class LuStation:
+    """装卸站（Load/Unload unit）：作业在此**入场**、末工序完工后**回站**。不加工、不改工序。
+
+    形态、书目与"为什么不是某个交叉口"见 `layout.LuPad`。仿真里它只承担两件事：
+
+    1. **回站落点**：AGV 把回站工件投递进 `in_q`，**到达时刻即 `completes[j]`**（makespan 口径）；
+    2. **与机台共用端点号空间**：机台 `0..m-1`、装卸站 = `m`（= `machines` 表的末位），
+       于是 `_transporter` / `AgvSim` 的既有索引逻辑对两类端点一视同仁。
+    """
+
+    def __init__(self, env, pad, idx: int, completes: dict, track: SimTrack):
+        self.env, self.id = env, idx
+        self.pad = _StationPad(pad.node)     # ⚠️ 站自己的节点号（格点外），不是它接入的交叉口
+        self.completes, self.track = completes, track
+        self.in_q = simpy.Store(env)         # 回站落点：无容量上限（站是终点，永不阻塞 AGV）
+        self.out_q = simpy.Store(env)        # 形状与 MachineSim 对齐（transporter 只读机台的）
+
+    def run(self):
+        while True:
+            job, _oi, _op, _is_last = yield self.in_q.get()
+            self.completes[job] = self.env.now      # 完工 = **到达装卸站**（不是末工序下机）
+            self.track.job_agv[job] = -1
+            self.track.job_loc[job] = -1
 
 
 def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
@@ -328,18 +360,24 @@ def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
     - `node`：每个通道节点一个区段（最细；MK10 的 5×4 网格 → 30 个）
     - `row` / `col`：整行 / 整列算一个区段（像"一条长廊一个区段"）
     - `all`：全图一个区段（极端档，用于下界）
+
+    ⚠️ 装卸站是**格点外**节点（号 = `grid.n_nodes`），`row`/`col` 没有它的行列号 ⟹
+    给它**独占**一个区段（`all` 档则并入唯一那一个）——它不是路口，不该与某一行共用区段。
     """
     spec = layout.grid
-    n = spec.n_nodes
-    if granularity == "node":
-        return {i: i for i in range(n)}, n
-    if granularity == "row":
-        return {i: spec.node_rc(i)[0] for i in range(n)}, spec.n_rows + 1
-    if granularity == "col":
-        return {i: spec.node_rc(i)[1] for i in range(n)}, spec.n_cols + 1
+    n = spec.n_nodes                      # 格点交叉口数（装卸站不在其中）
     if granularity == "all":
-        return dict.fromkeys(range(n), 0), 1
-    raise ValueError(f"未知区段粒度：{granularity}")
+        return dict.fromkeys(range(n + 1), 0), 1
+    if granularity == "node":
+        zof, nz = {i: i for i in range(n)}, n
+    elif granularity == "row":
+        zof, nz = {i: spec.node_rc(i)[0] for i in range(n)}, spec.n_rows + 1
+    elif granularity == "col":
+        zof, nz = {i: spec.node_rc(i)[1] for i in range(n)}, spec.n_cols + 1
+    else:
+        raise ValueError(f"未知区段粒度：{granularity}")
+    zof[spec.lu_node] = nz                # 装卸站独占一格（node 粒度下恰好等于它自己的号）
+    return zof, nz + 1
 
 
 class ZoneManager:
@@ -708,12 +746,16 @@ class SimWorld:
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
                         seed_chain: int = 0, charger_res=()) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
-        """建机台 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
+        """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
         `run()` / `run_gated()` / `_cold_start()` **共用同一份**构造（逐字重复是本仓评审会判
         缺陷的形态）。⚠️ 只建对象、**不启进程**：`env.process` 的**注册顺序**决定同刻事件
         次序，故启动由调用方按原顺序做（机台 → 车辆）。返回调用方后续还要用的实体
-        `(machines, tasks_in, zm, events_q)`（`self.*` 上的活引用已一并挂好）。
+        `(entities, tasks_in, zm, events_q)`（`self.*` 上的活引用已一并挂好）。
+
+        ⚠️ **`entities` 比 `self.machines` 多一项**：末位是装卸站（端点号 = `inst.n_machines`）。
+        任务端点、AGV 的投递目标都走这张表；而 `self.machines` **只含机台**——`snapshot()` 与
+        `_energy_report` 的逐机台口径不能被装卸站污染（它不是机台）。
         """
         fleet = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -723,11 +765,13 @@ class SimWorld:
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
                                events_q, self.constraints, track)
                     for i in range(self.inst.n_machines)]
+        lu = LuStation(env, self.layout.lu, self.inst.n_machines, completes, track)
+        entities = machines + [lu]
         if bound:
             tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]   # L 层绑定：每车一队列
         else:
             tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
-        agvs = [AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in, machines,
+        agvs = [AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in, entities,
                        self.g, zm, self.constraints, fleet[a],
                        np.random.default_rng([seed_chain, 1000 + a]),      # ⑨ 每车独立流
                        track, chargers=self.layout.chargers, charger_res=charger_res,
@@ -736,7 +780,8 @@ class SimWorld:
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
-        self.machines = machines
+        self.machines = machines            # ⚠️ 只含机台（装卸站在 `self.lu`，不进快照的机台段）
+        self.lu = lu
         self.tasks_in = tasks_in
         self.track = track
         self._job_progress = track.job_progress
@@ -746,7 +791,7 @@ class SimWorld:
         self._agv_loaded = track.agv_loaded
         self._agv_load_n = track.agv_load_n
         self.agvs = agvs
-        return machines, tasks_in, zm, events_q
+        return entities, tasks_in, zm, events_q
 
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
@@ -906,6 +951,7 @@ class SimWorld:
                  "unmapped_legs": 0, "unmapped_min": 0.0}
         env = simpy.Environment()
         inst = self.inst
+        lu_idx = inst.n_machines             # 端点号约定：机台 0..m-1、装卸站 = m
         # 计划表：job -> [机台号]（按 op_choices 或贪婪最短选择）。⚠️ 与 run_gated 同形状：
         # 选机一律走 `_pick_machine`（离线=查表），时长在那里就地查 alts。所选时长另收一份
         # 供 horizon 用（求和顺序与旧式 `sum(t for ops in plans.values() for _, t in ops)`
@@ -920,21 +966,20 @@ class SimWorld:
         completes: dict[int, float] = {}
         bound = agv_phi is not None
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
-        (machines, tasks_in, zm,
+        (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=bound,
                                           seed_chain=seed_chain, charger_res=charger_res)
-        for m in machines:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
-            env.process(m.run())
+        for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
+            env.process(e.run())
         for agv in self.agvs:
             env.process(agv.run())
-        # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）
+        # 全量注入（2026-10-02：分批门控已删，见 progress-log §12.5——所有作业一次投放）。
+        # ⚠️ P4-B Task 2b 起投放**不是瞬移**：每个作业发一条"装卸站 → 首工序机台"事件，
+        # 由 transporter 走正常派车路径生成任务（端点号 = 装卸站）。
         jkeys = list(plans.keys())
-        inject_q: list = []
         for j in jkeys:
-            m0, t0 = self._pick_machine(j, 0, None, False, plans)         # 离线：不调策略
-            env.process(self._release(env, machines[m0].in_q,
-                                      (j, 0, OpLite(t0), len(inst.jobs[j]) == 1)))
-        env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
+            env.process(self._release(env, events_q, (lu_idx, j, -1, OpLite(0.0), False)))
+        env.process(self._transporter(env, events_q, tasks_in, plans, entities, stats, lu_idx,
                                       bound=bound, agv_phi=agv_phi))
         total_work = sum(chosen_times)          # = 所选候选的时长之和（口径与旧式逐位相同）
         horizon = float(total_work * 6 + 500)   # v0 护栏升格：B 层门控（cap=2）下运行可远长于
@@ -1023,6 +1068,7 @@ class SimWorld:
                  "unmapped_legs": 0, "unmapped_min": 0.0}
         env = simpy.Environment()
         inst = self.inst
+        lu_idx = inst.n_machines             # 端点号约定：机台 0..m-1、装卸站 = m（同 run()）
         # 计划表：job -> [机台号]。离线 = 预填（同 run()）；在线 = 空 **决策日志**，
         # 由 `_pick_machine` 决策后写入（`None` = 尚未决策，决策前读它即 bug）。
         plans: dict[int, list] = {}
@@ -1035,20 +1081,17 @@ class SimWorld:
                 plans[j] = [job_ops[oi][plan[oi]][0] for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
-        (machines, tasks_in, zm,
+        (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res)
-        for m in machines:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
-            env.process(m.run())
+        for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
+            env.process(e.run())
         for agv in self.agvs:
             env.process(agv.run())
         jkeys = list(plans.keys())
-        inject_q: list = []                     # 全量注入（分批门控已删，同 run()）
-        for j in jkeys:
-            m0, t0 = self._pick_machine(j, 0, policy_s, online_s, plans)
-            env.process(self._release(env, machines[m0].in_q,
-                                      (j, 0, OpLite(t0), len(inst.jobs[j]) == 1)))
-        env.process(self._transporter(env, events_q, tasks_in, plans, machines, stats, inject_q,
+        for j in jkeys:                         # 全量注入（同 run()：投放走装卸站 → 正常派车路径）
+            env.process(self._release(env, events_q, (lu_idx, j, -1, OpLite(0.0), False)))
+        env.process(self._transporter(env, events_q, tasks_in, plans, entities, stats, lu_idx,
                                       bound=True, policy_l=policy_l,
                                       policy_s=policy_s, online_s=online_s))
         # horizon 的工时上界：**按最短候选**估（在线时 `plans` 是决策日志、读不到时长；
@@ -1113,18 +1156,27 @@ class SimWorld:
     def _release(env, store, item):
         yield store.put(item)
 
-    def _transporter(self, env, events_q, tasks_in, plans, machines, stats, inject_q,
+    def _transporter(self, env, events_q, tasks_in, plans, entities, stats, lu_idx: int,
                      bound: bool = False, agv_phi: list[int] | None = None,
                      policy_l=None, policy_s=None, online_s: bool = False):
-        """机台完成事件：非末工序 → 从其输出缓冲取出 → 生成下一工序搬运任务（目标=下一工序机台）。
+        """机台完成事件 → 生成搬运任务；`task_i` = 本函数生成序。
+
+        **三类事件**（端点号：机台 `0..m-1`、装卸站 = `lu_idx` = `m`）：
+
+        - **投放**（`frm_idx == lu_idx`，`oi = -1`）：装卸站 → 首工序机台（**负载**段）；
+        - **工序流转**（`frm_idx < m` 且非末工序）：本机台 → 下一工序机台（负载段）；
+        - **回站**（`is_last`）：末工序机台 → 装卸站（**负载**段）。
+
+        `task_flow` 的 `oi` 口径 = "这条搬运服务于第几道工序"（投放 = 0、流转 = 目标工序号、
+        回站 = 末工序号 + 1）——三条路同一条判据，便于外部按同一套规则复算行程。
 
         **这里的取事件处即"下一工序的派工点"**（P2 Task 5）：目标机台由 `_pick_machine` 决定
-        （在线 = 此刻调 `policy_s` 看活状态；离线 = 查 `plans`）。
+        （在线 = 此刻调 `policy_s` 看活状态；离线 = 查 `plans`）。回站任务的终点是装卸站，
+        **不经** `_pick_machine`（它不是候选机台，也不该进 S 层的选择空间）。
 
         输出缓冲满=阻塞源：out_q.put 在机台侧阻塞；此处 get 保证消费（阻塞语义=M1.1 消磨）。
-        末工序 + 在途注入队列非空 → 注入下一作业（分批门控波次语义）。
         L 层（`policy_l` 非空）：`policy_l(snap, job, frm, to, oi+1, cand_v) -> 车号`——`snap` = 此刻
-        的活状态，任务身份 = (作业号, 起送机台, 目标机台, 目标工序序号)，候选 = 全车队；此处
+        的活状态，任务身份 = (作业号, 起送端点, 目标端点, 目标工序序号)，候选 = 全车队；此处
         **不构造任何特征**（F1，P2 Task 5；作业号由 P2 Task 7 补入——L 头的任务特征含"该机
         是否需换型"，需要作业号，且用 (frm, to, oi) 反查作业多义）。
         L 层（bound，`policy_l` 为空）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；
@@ -1135,26 +1187,20 @@ class SimWorld:
         while True:
             frm_idx, job, oi, op, is_last = yield events_q.get()
             stats["trans_evt"] = stats.get("trans_evt", 0) + 1
-            if is_last:
-                if inject_q:
-                    j2 = inject_q.pop(0)
-                    m0, t0 = self._pick_machine(j2, 0, policy_s, online_s, plans)
-                    # 注入用独立进程（非 yield 阻塞）：transporter 若在 in_q 满机上阻塞 put，
-                    # 事件队列头被卡死 → 输出缓冲无人取 → 机器永不释放空间 → 永久死锁
-                    # （jobs=9/10 quiescence 实测）。env.process 与首批注入同模式（_release）。
-                    env.process(self._release(env, machines[m0].in_q,
-                                              (j2, 0, OpLite(t0), len(self.inst.jobs[j2]) == 1)))
-                continue
-            yield machines[frm_idx].out_q.get()
-            # 下一工序的机台在此刻决策（工件已离开机台、即将入下一机台的输入缓冲）
             n_ops = len(self.inst.jobs[job])
-            nxt_m, nxt_t = self._pick_machine(job, oi + 1, policy_s, online_s, plans)
+            if is_last:                                     # 末工序完工 → 回装卸站
+                yield entities[frm_idx].out_q.get()
+                nxt_m, item = lu_idx, (job, n_ops, op, True)
+            else:                                           # 投放（frm=装卸站）或工序流转
+                if frm_idx != lu_idx:
+                    yield entities[frm_idx].out_q.get()
+                nxt_m, nxt_t = self._pick_machine(job, oi + 1, policy_s, online_s, plans)
+                item = (job, oi + 1, OpLite(nxt_t), oi + 1 == n_ops - 1)
             from .corridors import shortest_node_path
-            _path = shortest_node_path(self.g, machines[frm_idx].pad.dock_node,
-                                       machines[nxt_m].pad.dock_node)   # AGV 实际经过的节点序列
-            task = (frm_idx, nxt_m,
-                    (job, oi + 1, OpLite(nxt_t), oi + 1 == n_ops - 1), _path)
-            stats.setdefault("task_flow", []).append((job, oi + 1, frm_idx, nxt_m))  # L 层流导出
+            _path = shortest_node_path(self.g, entities[frm_idx].pad.dock_node,
+                                       entities[nxt_m].pad.dock_node)   # AGV 实际经过的节点序列
+            task = (frm_idx, nxt_m, item, _path)
+            stats.setdefault("task_flow", []).append((job, item[1], frm_idx, nxt_m))  # L 层流导出
             stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
                                                      tuple(stats["agv_pos"])))       # 任务时点车状态
             if policy_l is not None:
@@ -1167,7 +1213,7 @@ class SimWorld:
                 # MK10 538/985 个键有歧义），静默取错作业 = 换型特征错，故走显式参数。
                 snap = self.snapshot()                  # 派车决策时点的活状态（只读）
                 cand_v = list(range(len(tasks_in)))     # 候选 = 全车队（每车一队列，都可选）
-                agv = int(policy_l(snap, job, frm_idx, nxt_m, oi + 1, cand_v))
+                agv = int(policy_l(snap, job, frm_idx, nxt_m, item[1], cand_v))
                 if agv not in cand_v:
                     # 同 policy_s：非候选**显式报错**——负索引会静默回绕到别的车
                     raise ValueError(f"policy_l 派了不存在的车 {agv}；候选={cand_v}")

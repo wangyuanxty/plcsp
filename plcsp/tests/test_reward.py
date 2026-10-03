@@ -90,13 +90,17 @@ def test_end_to_end_reward_on_real_rollout():
 def test_reference_weights_are_pinned_to_the_due_date_caliber():
     """⚠️ **本测试把 `f^ref` / `w` 钉在交期口径上**——口径一改它就红，逼改的人同步更新文档。
 
-    实测（TF/RDD 冻结表，mk01，`SimConfig()`）：
-      `f^ref = (103.42, 7.73, **124.05**)` → `w = (0.066, 0.880, 0.055)`（TWT 占 **5.5%**）。
+    实测（TF/RDD 冻结表，mk01，`SimConfig()`，**P4-B Task 2b 之后**）：
+      `f^ref = (117.66, 8.77, **161.52**)` → `w = (0.066, 0.886, 0.048)`（TWT 占 **4.8%**）。
     **为什么它与交期绑定**：`wᵢ = (1/fᵢ^ref)/Σ`，而 TWT 是**事后按当前交期**从参考运行的
     `completes` 算的 —— 交期变 ⟹ `f^ref` 的第三分量变 ⟹ w 变。
-    旧口径（`d_j = τ·M_ref`）下是 `f^ref = (103.42, 7.73, 19.51)` → `w = (0.051, 0.680, 0.269)`
-    （TWT 占 **26.9%**）：⑧ 从死目标复活后 TWT 从 19.51 涨到 124.05，**TWT 的奖励份额因此从
-    27% 掉到 5.5%、energy 升到 88%**——这是口径重设计的**直接后果**，不是笔误。
+
+    ⚠️ **本批（P4-B Task 2b）的两处变更**，都是结构变化不是调参：
+    ① 作业改为**在装卸站入场、完工回站** ⟹ 参考 makespan 103.42 → **117.66**、运输时长
+       7.73 → 8.77（每个作业多两条 LU 负载腿）；
+    ② 几何口径的 `TF_RDD` 随之**重标**（mk01 的 τ/R：2.45/0.2 → 2.75/0.3）⟹ TWT 124.05 → 161.52。
+    历史（供追溯，**均已作废**）：旧口径 `d_j = τ·M_ref` 下 `f^ref = (103.42, 7.73, 19.51)`
+    → `w = (0.051, 0.680, 0.269)`（TWT 占 26.9%）。
     ⚠️ **改口径的人必须同时改**：本测试、`spec §5.3.3`、`INDEX §5.8`、`progress-log` 里引用
     `f^ref`/`w` 的地方（权重失衡是**研究决定**，不在本测试的处置范围内）。
     """
@@ -105,6 +109,6 @@ def test_reference_weights_are_pinned_to_the_due_date_caliber():
     ref = ReferenceObjectives.of(load_mk("mk01"), SimConfig())
     f = ref.as_tuple()
     w = reward_weights(f)
-    assert f == pytest.approx((103.42, 7.73, 124.05), rel=1e-3)
-    assert w == pytest.approx((0.0657, 0.8795, 0.0548), rel=1e-3)
-    assert w[2] == pytest.approx(0.055, abs=5e-3), "TWT 的奖励份额（复活后应约 5.5%）"
+    assert f == pytest.approx((117.66, 8.77, 161.52), rel=1e-3)
+    assert w == pytest.approx((0.0660, 0.8859, 0.0481), rel=1e-3)
+    assert w[2] == pytest.approx(0.048, abs=5e-3), "TWT 的奖励份额（P4-B 重标后应约 4.8%）"

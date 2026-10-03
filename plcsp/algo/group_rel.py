@@ -78,8 +78,12 @@ def setup_flag(snap, machine: int, job: int,
     ⚠️ **⑤ 关闭时恒 0**（评审 F2）：仿真里换型时长就是 0（`MachineSim._process` 读的是同一个
     开关），特征若不读它，消融档（−生产 / None）会报出"这里要换型"的**假信号**。
     `constraints=None` = 十约束全开（与 `SimWorld` 的 None 语义一致，向后兼容）。
+    ⚠️ P4-B Task 2b：任务端点可以是**装卸站**（端点号 = `n_machines`，不是机台）——站上没有
+    "上一件加工的作业"，换型问题对它无意义，恒 0。少了这条守卫就是运行期 IndexError。
     """
     if constraints is not None and not constraints.setup_time:
+        return 0.0
+    if machine >= len(snap.machines):           # 装卸站（格点外端点）：换型语义不适用
         return 0.0
     return 0.0 if snap.machines[machine].prev_job in (-1, job) else 1.0
 
@@ -91,6 +95,10 @@ def task_feat(inst: Instance, snap, frm: int, to: int, oi: int, job: int,
     ⚠️ 第 4 维需要**作业号**（`setup_flag(snap, to, job)`）——故 `des.run_gated` 的
     `policy_l` 回调契约在 Task 7 扩了 `job` 参数（原 `(snap, frm, to, oi, cand)` 表达不了
     本维；用 `(frm, to, oi)` 反查作业**多义**：实测 MK01 51/112、MK10 538/985 个键歧义）。
+
+    ⚠️ P4-B Task 2b：端点可以是**装卸站**（号 = `n_machines`，作业在站入场、完工回站）——
+    归一后站**恰好取 1.0**，而机台仍是 `i/n_m ∈ [0, 1)`。故机台部分的取值与旧口径**逐位不变**
+    （不必重训机台→机台那部分），装卸站单独占 1.0 这个点。
     """
     n_ref = max(max(len(j) for j in inst.jobs), 1)
     n_m = max(inst.n_machines, 1)
