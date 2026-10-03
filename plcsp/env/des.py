@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 import numpy as np
@@ -24,6 +25,7 @@ from .corridors import shortest_node_path
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
+from .transport import MATRIX, UNMAPPED_RAISE, TransportCaliber
 
 if TYPE_CHECKING:                       # 仅为标注；运行期在 `snapshot()` 里就地导入
     from .snapshot import Snapshot
@@ -91,6 +93,11 @@ class SimConfig:
     # 交期跨度（due-date range, RDD）——与 tau 同进退的覆盖开关（None = 查标定表）。
     # 两者**要么都显式传、要么都不传**：只传一个时另一个仍查表，未标定实例会显式报错。
     due_range: float | None = None
+    # 矩阵口径下**未被矩阵覆盖的端点**（充电桩等）怎么算行程：`raise`（默认，显式报错）或
+    # `geometry`（**声明式**降级为几何口径，并进 metrics 计数）。它进 `_cfg_key`（失效安全）。
+    # ⚠️ 这**不是**"口径开关"：口径永远跟随实例（见 transport.py 的共存规则），本项只管
+    # "矩阵覆盖不到的那几段"。
+    transport_unmapped: str = UNMAPPED_RAISE
 
     @property
     def eff_speed(self) -> float:
@@ -163,9 +170,18 @@ _CFG_KEY_SKIP = ("tau", "due_range")
 
 
 def _instance_key(inst: Instance) -> tuple:
-    """实例内容指纹——用于缓存 `M_ref`（比 id() 稳，比文件名稳）。"""
-    return (inst.n_machines, inst.n_jobs,
-            tuple(tuple(min(t for _, t in op) for op in job) for job in inst.jobs))
+    """实例内容指纹——用于缓存 `M_ref`（比 id() 稳，比文件名稳）。
+
+    ⚠️ P4-B：**行程时间口径与矩阵必须进键**——同名 MK 与 MKT 实例只差一张矩阵，漏了它
+    `reference_run` 会把几何口径的参考运行**静默喂给**矩阵口径的运行（M_ref、奖励权重、
+    特征归一化一起错，且零报错）。
+    """
+    mat = getattr(inst, "trans_time_full", None)
+    digest = (None if mat is None else
+              hashlib.blake2b(np.ascontiguousarray(mat, dtype=float).tobytes(),
+                              digest_size=8).hexdigest())
+    return (inst.n_machines, inst.n_jobs, getattr(inst, "transport", "geometry"),
+            tuple(tuple(min(t for _, t in op) for op in job) for job in inst.jobs), digest)
 
 
 def _cfg_key(cfg: SimConfig) -> tuple:
@@ -405,10 +421,12 @@ class AgvSim:
     等待环或超时则回队重试；关时不申请，按距离一次到底。
     """
 
-    def __init__(self, env, aid, m_dm: np.ndarray, cfg: SimConfig, stats: dict,
+    def __init__(self, env, aid, m_dm: np.ndarray, transport: TransportCaliber, cfg: SimConfig,
+                 stats: dict,
                  tasks_in, machines: list, graph, zm, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
+        self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
         self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
         self.g, self.zm = graph, zm
@@ -420,6 +438,7 @@ class AgvSim:
         hetero = constraints.heterogeneous_fleet
         self.capacity = spec.capacity if hetero else 1
         self.speed = cfg.agv_speed_mps * (spec.speed_factor if hetero else 1.0)
+        self.speed_ratio = spec.speed_factor if hetero else 1.0   # ⑩ 的**相对**倍率（关掉恒 1）
         self.battery_cap = spec.battery_kwh
         self.battery = spec.battery_kwh     # [kWh]，只在 ⑪ 开启时增减
         self.chargers, self.charger_res = list(chargers), list(charger_res)
@@ -430,8 +449,36 @@ class AgvSim:
         self.up.succeed()                   # 初始可用
 
     def _seg_min(self, u: int, v: int) -> float:
-        """节点 u→v 的行驶时长 [min]。距离矩阵给的是最短路，故 u,v 不必相邻。"""
+        """节点 u→v 的**几何**行驶时长 [min]（格点最短路 ÷ 有效车速 ÷ 60）。
+
+        ⚠️ 矩阵口径**不走这里**（矩阵已是分钟，不得再换算）——那条路走 `_leg_min`。
+        """
         return float(self.m_dm[u, v]) / (self.cfg.eff_speed * self.speed) / SECONDS_PER_MIN
+
+    def _leg_min(self, src: int, dst: int, *, count_unmapped: bool = True) -> float:
+        """**整段** src→dst 的行驶时长 [min]——两种口径的唯一汇合点（不含区段拆分）。
+
+        - 几何口径：转调 `_seg_min`（现状，逐位不变）；
+        - 矩阵口径：**直接查表**（矩阵已是分钟，**不得**再套任何换算），只再乘 ⑩ 的**相对**
+          速度倍率（⑩ 关 ⟹ 倍率恒 1 ⟹ 与"该约束从未存在"逐位相同）；
+        - 任一端点**没有矩阵对应项**（充电桩）⟹ 按 `transport.unmapped` 处置：`raise` 显式报错；
+          `geometry` **声明式**降级为几何口径并计数（metrics 带出，供表里如实声明）。
+        `count_unmapped=False` 供**排序**之类的查数用（只选一个桩却把候选全计一遍会虚高）。
+        ⚠️ 计数按**出发次数**记：区段争用失败而重试的腿会重复计一次（它确实又跑了一趟）。
+        """
+        if self.transport.mode != MATRIX:
+            return self._seg_min(src, dst)
+        t = self.transport.minutes(src, dst)
+        if t is not None:
+            return t / self.speed_ratio
+        if self.transport.unmapped == UNMAPPED_RAISE:
+            raise ValueError(
+                f"节点 {src}→{dst} 在行程时间矩阵里**没有对应项**（矩阵只覆盖机台与装卸站）——"
+                f"若要跑含充电桩的口径，请显式设 SimConfig.transport_unmapped='geometry'")
+        self.stats["unmapped_legs"] = self.stats.get("unmapped_legs", 0) + 1
+        got = self._seg_min(src, dst)
+        self.stats["unmapped_min"] = self.stats.get("unmapped_min", 0.0) + got
+        return got
 
     def _drain(self, leg: str, minutes: float) -> None:
         """⑪ 行驶耗电：kWh = kW × min ÷ 60（与 `energy.py` 同一套三态功率）。"""
@@ -475,7 +522,7 @@ class AgvSim:
         if self.battery > self.cfg.battery_low * self.battery_cap:
             return
         src = self.pos_node if self.pos_node is not None else self.chargers[0].node
-        for ch in sorted(self.chargers, key=lambda c: float(self.m_dm[src, c.node])):
+        for ch in sorted(self.chargers, key=lambda c: self._leg_min(src, c.node, count_unmapped=False)):
             res = self.charger_res[ch.id]
             if res.count >= res.capacity:       # 桩被占（SimPy 单线程，检查与申请之间无 yield）
                 continue
@@ -515,7 +562,7 @@ class AgvSim:
         if src == dst:
             return True, dst
         if not self.congestion:                 # ① 关：不申请区段，按距离直行
-            seg = self._seg_min(src, dst)
+            seg = self._leg_min(src, dst)
             yield self.env.timeout(seg)
             self._drain(leg, seg)               # ⑪ 行驶耗电
             self.stats["travel_time"] += seg
@@ -524,6 +571,10 @@ class AgvSim:
             return True, dst
         # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
         path = shortest_node_path(self.g, src, dst)
+        # ⚠️ 矩阵口径下**整段时长先算出来**，逐段只决定**分摊比例**（占比之和恒为 1 ⟹
+        # 各段之和 == 矩阵查表值，有测试钉）；矩阵里没有"中间走廊节点"这一说，逐段查表必失败。
+        total = self._leg_min(src, dst) if self.transport.mode == MATRIX else None
+        leg_geo = self._seg_min(src, dst) if total is not None else 0.0
         zseq = [self.zm.zone_of[p] for p in path]
         zseq = [z for i, z in enumerate(zseq) if i == 0 or z != zseq[i - 1]]   # 合并同一区段的连续段
         granted, cycle = yield from self.zm.wait_zone(self.aid, zseq[0], self.cfg.zone_wait_limit)
@@ -542,6 +593,8 @@ class AgvSim:
                 self.zm.release(self.aid, prev_z)
                 prev_z = z
             seg = self._seg_min(path[pi], path[pi + 1])
+            if total is not None:
+                seg = total * seg / leg_geo
             yield self.env.timeout(seg)
             self._drain(leg, seg)               # ⑪ 行驶耗电
             travel += seg
@@ -637,6 +690,10 @@ class SimWorld:
             from .constraints import ConstraintConfig
             constraints = ConstraintConfig()
         self.constraints = constraints      # 十约束开关（spec §3.3）
+        # 行程时间口径（P4-B）：**跟随实例**（MKT 实例走矩阵、原始 MK 走几何）。只在这里
+        # 认一次，整条运行链（含快照/训练栈建的世界）拿到的是同一个口径对象。
+        self.transport = TransportCaliber.for_instance(inst, layout,
+                                                       unmapped=self.cfg.transport_unmapped)
         self._cold_start()                  # t=0 快照骨架（P2 Task 1，run() 会整套换掉）
 
     def _fleet(self) -> list:
@@ -670,7 +727,7 @@ class SimWorld:
             tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]   # L 层绑定：每车一队列
         else:
             tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
-        agvs = [AgvSim(env, a, self.m_dm, self.cfg, stats, tasks_in, machines,
+        agvs = [AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in, machines,
                        self.g, zm, self.constraints, fleet[a],
                        np.random.default_rng([seed_chain, 1000 + a]),      # ⑨ 每车独立流
                        track, chargers=self.layout.chargers, charger_res=charger_res,
@@ -844,7 +901,9 @@ class SimWorld:
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
-                 "trans_evt": 0, "tasks_put": 0}
+                 "trans_evt": 0, "tasks_put": 0,
+                 # P4-B：矩阵覆盖不到的端点（充电桩）走几何降级时的**留痕**（段数与分钟数）
+                 "unmapped_legs": 0, "unmapped_min": 0.0}
         env = simpy.Environment()
         inst = self.inst
         # 计划表：job -> [机台号]（按 op_choices 或贪婪最短选择）。⚠️ 与 run_gated 同形状：
@@ -912,7 +971,11 @@ class SimWorld:
                 "travel_time_total": float(stats["travel_time"]),
                 "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
                               "max": float(max(zm.waits)) if zm.waits else 0.0},
-                "n_zones": zm.n}
+                "n_zones": zm.n,
+                # 口径**随结果自报**（P4-A Review Focus #1 同型）：两档的数并排放时靠这两行分辨
+                "transport": self.inst.transport,
+                "unmapped_legs": stats.get("unmapped_legs", 0),
+                "unmapped_min": float(stats.get("unmapped_min", 0.0))}
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False) -> dict:
@@ -955,7 +1018,9 @@ class SimWorld:
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
-                 "trans_evt": 0, "tasks_put": 0}
+                 "trans_evt": 0, "tasks_put": 0,
+                 # P4-B：矩阵覆盖不到的端点（充电桩）走几何降级时的**留痕**（段数与分钟数）
+                 "unmapped_legs": 0, "unmapped_min": 0.0}
         env = simpy.Environment()
         inst = self.inst
         # 计划表：job -> [机台号]。离线 = 预填（同 run()）；在线 = 空 **决策日志**，
@@ -1010,7 +1075,11 @@ class SimWorld:
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
-                "travel_time_total": float(stats["travel_time"])}
+                "travel_time_total": float(stats["travel_time"]),
+                # 口径随结果自报（同 run()；run_gated 此前连 zone_wait 都没带，本批不动它）
+                "transport": self.inst.transport,
+                "unmapped_legs": stats.get("unmapped_legs", 0),
+                "unmapped_min": float(stats.get("unmapped_min", 0.0))}
 
     def _pick_machine(self, job: int, oi: int, policy_s, online_s: bool,
                       plans) -> tuple[int, float]:

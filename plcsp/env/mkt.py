@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -83,12 +83,18 @@ class MktInstance:
 
     ⚠️ **车辆数不是数据文件里的字段**（§19.7d）：HF2021 用 2 台、HGS 与 HA-DQN 用 v=m。
     **不同车数下的 Cmax 不可比**，故它只能是显式参数、且必须随结果一起报出去。
+    ⚠️ P4-B 起矩阵**挂在 `base` 上**（`base.trans_time_full`，含 LU 的全矩阵）——正是它让
+    "口径跟随实例"贯通整条训练/评估栈；`trans_time` 是本对象提供的**丢 LU 视图**（P4-A 语义不变）。
     """
 
     base: Instance
-    trans_time: np.ndarray
     n_agv: int
     layout_m: int
+
+    @property
+    def trans_time(self) -> np.ndarray:
+        """机台间矩阵（丢 LU 的 m×m）——`base.trans_time_full[1:, 1:]` 的**视图**（只读用）。"""
+        return self.base.trans_time_full[1:, 1:]
 
     @property
     def name(self) -> str:
@@ -100,11 +106,11 @@ def load_mkt(name: str, n_agv: int | None = None) -> MktInstance:
 
     ⚠️ **加工数据一字不改**（有测试逐作业比对）：布局矩阵与车辆数是 MKT 相对 MK 的**全部**增量。
     ⚠️ 布局按**机台数**选（不是按实例名）——故 mk06 与 mk10 共用同一份 15 机布局。
-    ⚠️ **本函数只产出数据对象，不接进仿真**：把 `trans_time` 接进 `AgvSim` 是 P4-B 的设计决定
-       （现有"布局最短路距离"与"行程时间矩阵"如何共存）。
+    ⚠️ P4-B 起把实例标成 **matrix 口径**并挂上**含 LU 的全矩阵**（`drop_lu=False`）——
+       `AgvSim` 的节点→矩阵下标映射需要第 0 位是 LU 的那个全矩阵。
     """
     base = load_mk(name)                      # 加工数据一字不改（有测试钉住）
     m = base.n_machines
-    trans = load_mkt_layout(m)
-    return MktInstance(base=base, trans_time=trans, n_agv=(m if n_agv is None else int(n_agv)),
-                       layout_m=m)
+    full = load_mkt_layout(m, drop_lu=False)  # ⚠️ **含 LU**：丢 LU 的 m×m 会被口径对象拒绝
+    base = replace(base, transport="matrix", trans_time_full=full)
+    return MktInstance(base=base, n_agv=(m if n_agv is None else int(n_agv)), layout_m=m)

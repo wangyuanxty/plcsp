@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:                       # 仅作标注（`from __future__ import annotations` 下不求值，
+    import numpy as np                  # 但 ruff 的 F821 仍会检查标注里的名字）
 
 # MK 最优解（Brandimarte；来源 brandimarte_optimal.txt）
 MK_OPTIMAL: dict[str, int] = {
@@ -24,6 +28,11 @@ class Instance:
     n_machines: int
     jobs: list[list[list[tuple[int, float]]]]   # job -> op -> [(mach, time), ...]
     source: str = ""
+    # ── P4-B：**行程时间口径跟随实例**（用户裁定）──
+    # `transport` 是口径标签（"geometry" | "matrix"）；矩阵本身在 `trans_time_full`——
+    # 口径是**问题的属性**，不是运行配置，故它随实例走、`rollout`/`SimWorld` 的签名一概不变。
+    transport: str = "geometry"
+    trans_time_full: np.ndarray | None = None   # (m+1)×(m+1)，**第 0 行/列是装卸站（LU）**，单位分钟
 
 
 def _parse_fjs_body(toks: list[str], header_len: int) -> tuple[int, int, list, int]:

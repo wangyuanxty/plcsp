@@ -60,6 +60,20 @@ TF_RDD: dict[str, tuple[float, float]] = {
     "mk10": (3.00, 0.7),
 }
 
+# 矩阵口径（MKT）的 (τ,R)：由 `plcsp/m16_due_calib.py --transport matrix` 标定后落盘（Task 3）。
+# 在落盘前它是空的 ⟹ 矩阵口径的 `due_dates_for` 会**显式报错**（不会退回几何表）。
+TF_RDD_MATRIX: dict[str, tuple[float, float]] = {}
+
+TABLE_BY_CALIBER: dict[str, dict[str, tuple[float, float]]] = {
+    "geometry": TF_RDD,
+    "matrix": TF_RDD_MATRIX,
+}
+
+
+def _caliber_of(inst: Instance) -> str:
+    """实例的行程时间口径标签（缺省 geometry）——决定用哪张标定表。"""
+    return getattr(inst, "transport", "geometry")
+
 
 def total_work_content(inst: Instance) -> list[float]:
     """`W_j` = 作业 j 各工序**最短候选工时**之和。
@@ -129,19 +143,27 @@ def due_dates_for(inst: Instance, tau: float | None = None,
     """交期入口：**显式传入 ≥ 标定表**；表里没有的实例**显式报错**（不静默取默认值）。
 
     - `tau` / `due_range` 都给 ⟹ 直接用（调用方自担口径，可用于新实例的标定/敏感性扫描）；
-    - 任一为 `None` ⟹ 查 `TF_RDD` 补缺；实例不在表里 ⟹ `ValueError`，错误信息指明
-      需要跑哪个脚本（Review Focus #3：不得静默用错值、也不得 `KeyError` 崩在深处）。
+    - 任一为 `None` ⟹ 按**实例的行程时间口径**选表（`TABLE_BY_CALIBER`，键仍是文件名主干）；
+      实例不在该表里 ⟹ `ValueError`，错误信息指明口径、该跑哪个脚本（Review Focus #3：不得
+      静默用错值、也不得 `KeyError` 崩在深处）。⚠️ 口径未知 ⟹ 同样显式报错，**不得**回退几何表。
 
     签名里**没有 cfg**——交期是外生量，不得随仿真配置变（Review Focus #1）。
     """
     if tau is None or due_range is None:
+        caliber = _caliber_of(inst)
+        try:
+            table = TABLE_BY_CALIBER[caliber]
+        except KeyError:
+            raise ValueError(
+                f"未知行程时间口径 {caliber!r}——无法确定用哪张交期标定表"
+                f"（已知：{sorted(TABLE_BY_CALIBER)}）") from None
         key = _instance_name(inst)
-        calib = TF_RDD.get(key) if key else None
+        calib = table.get(key) if key else None
         if calib is None:
             raise ValueError(
-                f"实例 {key or inst.source or '<无 source>'} 未标定交期 (τ, R)——"
-                f"TF_RDD 只覆盖 {sorted(TF_RDD)}。请跑 `plcsp/m16_due_calib.py` 标定该实例，"
-                f"或显式传入 tau= 与 due_range= 两个参数（覆盖开关）。")
+                f"实例 {key or inst.source or '<无 source>'} 在 **{caliber}** 口径下未标定交期 "
+                f"(τ, R)——{caliber} 表只覆盖 {sorted(table)}。矩阵口径请跑 "
+                f"`plcsp/m16_due_calib.py --transport matrix`；或显式传入 tau= 与 due_range=。")
         tau = calib[0] if tau is None else tau
         due_range = calib[1] if due_range is None else due_range
     return tf_rdd_due_dates(inst, tau, due_range)

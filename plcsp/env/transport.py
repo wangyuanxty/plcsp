@@ -86,6 +86,31 @@ class TransportCaliber:
         return TransportCaliber(mode=MATRIX, matrix=np.asarray(matrix, dtype=float),
                                 node_slot=node_slot, unmapped=unmapped)
 
+    @staticmethod
+    def for_instance(inst, layout: Layout, *, unmapped: str = UNMAPPED_RAISE) -> "TransportCaliber":
+        """按**实例自带的口径标签**建口径——共存规则的**唯一入口**。
+
+        - `transport == "geometry"`（缺省）⟹ 几何口径，**忽略**任何矩阵；
+        - `transport == "matrix"` ⟹ 必须有 `(m+1)×(m+1)` 的**含 LU 全矩阵**，否则**显式报错**
+          （静默退回几何 = "同一实例两套行程时间"，正是本设计要堵的口子）。
+        """
+        mode = getattr(inst, "transport", GEOMETRY)
+        if mode == GEOMETRY:
+            return TransportCaliber.geometry()
+        if mode != MATRIX:
+            raise ValueError(f"实例的 transport 标签未知：{mode!r}（只认 {GEOMETRY!r} / {MATRIX!r}）")
+        full = getattr(inst, "trans_time_full", None)
+        if full is None:
+            raise ValueError(
+                "实例标了 transport='matrix' 却没有 trans_time_full——口径标签与数据不符"
+                "（矩阵口径的实例必须由 `plcsp.env.mkt.load_mkt` 造出）")
+        want = inst.n_machines + 1
+        if tuple(full.shape) != (want, want):
+            raise ValueError(
+                f"实例 {inst.source} 的行程时间矩阵应为 (m+1)×(m+1)={want}×{want}，"
+                f"实得 {tuple(full.shape)}")
+        return TransportCaliber.from_matrix(full, layout, unmapped=unmapped)
+
     # ── 查询 ──
     def slot_of(self, node: int) -> int | None:
         """通道节点 → 矩阵下标；无对应项（充电桩等）→ None。"""
