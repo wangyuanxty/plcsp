@@ -46,12 +46,12 @@ def build_setup(inst: Instance, cfg: SimConfig | None = None, seed_layout: int =
     """`(layout, dm, ctx)`——训练/评估/验收的**统一**环境三件套。
 
     - `m_ref` 取**真实参考 makespan**（`reference_makespan`，有缓存）：spec §5.3.1③ 要求
-      归一化用实例静态量，且这个数与交期 `d_j = τ·M_ref` 的 `M_ref` **是同一个**
-      （特征归一化与交期同源）；
+      归一化用实例静态量。（⑧ 交期自 2026-10-03 起是**外生**量、不再由 `m_ref` 导出——
+      "特征归一化与交期同源"这句话已随之作废，见 spec §3.5。）
     - `cfg` / `constraints` 同时进 `norm_context`（评审 F2/F3：归一标度必须与仿真同源）；
     - `seed_layout` 默认 0：`joint_chain_step` 的入口守卫前提（奖励权重 `ReferenceObjectives.of`
-      固定用 seed_layout=0 的参考运行，而 `SimWorld._due_map` 用**布局**的 seed 取 M_ref
-      ——两者不同源则目标口径与权重口径静默错位）。
+      固定用 seed_layout=0 的参考运行，而这里按**给定布局**的 seed 取 m_ref——两者不同源则
+      策略看到的刻度与 w 的刻度来自两次参考调度，静默错位）。
     """
     c = cfg or SimConfig()
     lay, dm = build_layout_and_dm(inst, c, seed_layout)

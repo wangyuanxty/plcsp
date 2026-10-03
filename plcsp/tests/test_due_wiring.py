@@ -64,17 +64,17 @@ def test_reference_objectives_twt_uses_the_same_due_dates():
 
 @pytest.mark.unit
 def test_due_margin_is_no_longer_redundant():
-    """⚠️ Review Focus #4：**有跨度**（R > 0）的交期下 `due_margin` 维**不再**是冗余维。
+    """⚠️ Review Focus #4：**有跨度**（R ≥ 0.2）的交期下 `due_margin` 维**不再**是冗余维。
 
     旧口径（共同交期 `d_j = τ·M_ref`）下 `due_margin = τ − time_progress`，对所有作业 token
-    同值 ⟹ 冗余维。新口径 `d_j = LB·τ·(1+R(2ρ_j−1))` 在 R>0 的实例上逐作业取不同值。
-    ⚠️ **改写说明**：原测试断言 `load_mk("mk01")`，但标定规则给 mk01 的冻结值恰是 **R=0.0**
-    （共同交期是可行解里评分最优的，见 `TF_RDD`）——留着会红。故判据落在 R>0 的 mk08；
-    mk01/mk04 的 R=0.0 是**标定产物**、不是接线漏了（由
-    `test_due_calib.test_frozen_table_is_reproduced_by_the_calibration_script` 钉住）。
+    同值 ⟹ 冗余维。新口径 `d_j = LB·τ·(1+R(2ρ_j−1))` 逐作业取不同值 ⟹ 有区分度。
+    ⚠️ **改写说明**：标定网格的 R 下限一度是 0，mk01/mk04 因此落到 **R=0**（共同交期）——
+    本测试当时只能退到 mk08。R 下限改为 0.20 后**全部 10 个实例的 d_j 互不相同**，
+    故判据回到计划点名的 **mk01**（= P4 的训练实例），并保留 mk08（跨度最宽）作第二判据。
     """
     from plcsp.env.due_dates import due_dates_for
 
-    d = due_dates_for(load_mk("mk08"))
-    assert len(set(round(v, 6) for v in d.values())) > 1, \
-        "R>0 的实例仍给出共同交期——逐作业口径没接通"
+    for name in ("mk01", "mk08"):
+        d = due_dates_for(load_mk(name))
+        assert len(set(round(v, 6) for v in d.values())) > 1, \
+            f"{name} 仍给出共同交期——逐作业口径没接通"

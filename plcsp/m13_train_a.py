@@ -97,7 +97,7 @@ def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
     "ctx 按 A 组约束建、训练跑全开"的静默错配（F2 要消灭的正是这一类）。`None` = 十约束全开。
 
     ⚠️ 布局 seed 必须为 0：奖励权重取自 `ReferenceObjectives.of`（固定用 seed_layout=0 的参考
-    运行），而 `SimWorld._due_map` 用**该布局**的 seed 取 `M_ref`——两者同源才有一致的口径
+    运行），而特征归一化的 `m_ref` 按**该布局**的 seed 取——两者同源才有一致的归一化刻度
     （非 0 种子会被 `joint_chain_step` 入口拒绝，`build_setup` 的默认值即 0）。
     """
     inst = load_mk(inst_name)

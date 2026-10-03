@@ -23,7 +23,7 @@ class ConstraintConfig:
     # B 类：近乎免费
     rework: bool = True               # ④ 工件返工
     setup_time: bool = True           # ⑤ 换型 / 准备时间（顺序相关）
-    due_dates: bool = True            # ⑧ 交期 / 拖期（τ·M_ref）
+    due_dates: bool = True            # ⑧ 交期 / 拖期（TF/RDD：LB·τ·(1+R(2ρ−1))，见 due_dates.py）
     agv_failure: bool = True          # ⑨ AGV 故障
     # C 类：真花钱
     heterogeneous_fleet: bool = True  # ⑩ 异构车队（载重/速度/多载量）

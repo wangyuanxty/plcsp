@@ -160,8 +160,10 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
     ⚠️ 每个决策存**当时的** token/决策/候选特征——仿真状态在变，用事后最新快照重建等于把
        策略输入换成另一个状态（决策与 logp 不再对应）。
     ⚠️ 布局由调用方给（本函数**不采样布局**）：`layout.layout_seed` 必须与奖励侧参考运行同源
-       ——`ReferenceObjectives.of` 固定 seed_layout=0，而 `SimWorld._due_map` 用**该布局**的
-       seed 取 M_ref。用默认奖励口径时请传 seed=0 的布局（本任务不扩这条口径）。
+       ——`ReferenceObjectives.of` 固定 seed_layout=0，而特征归一化的 `m_ref` 取自**该布局**的
+       参考运行（`build_setup`）。两者不同源则策略看到的刻度与 w 的刻度来自两次参考调度。
+       用默认奖励口径时请传 seed=0 的布局（本任务不扩这条口径）。
+       （⑧ 交期自 2026-10-03 起是**外生**量，已不参与这条同源约束——见 spec §3.5。）
     ⚠️ L 回调需要**作业号**（任务特征第 4 维 = 该机是否需换型）：`des.run_gated` 的
        `policy_l` 契约在 Task 7 由 `(snap, frm, to, oi, cand)` 扩为 `(snap, job, frm, to, oi, cand)`
        ——用 `(frm, to, oi)` 反查作业**多义**（实测 MK01 51/112、MK10 538/985 个键歧义），
@@ -296,9 +298,10 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     `clipped_frac` 就是这条的读数（1.0 = 全裁、该轮无梯度信号）。
 
     ⚠️ **`layout.layout_seed` 必须为 0**（守卫在入口）：奖励权重 `w` 的既定来源
-    `ReferenceObjectives.of` 固定用 seed_layout=0 的参考运行，而 `SimWorld._due_map` 用**该
-    布局**的 seed 取 M_ref（连交期本身都随之变）——两者不同源则目标口径与权重口径**静默错位**
-    （Fact F）。如需非 0 布局种子，须先让 `ReferenceObjectives` 记录其种子再放宽此守卫。
+    `ReferenceObjectives.of` 固定用 seed_layout=0 的参考运行，而特征归一化的 `m_ref` 取自
+    **该布局**的参考运行（`build_setup` 把布局 seed 传进去）——两者不同源则"按参考调度归一化"
+    的刻度对不上、且**静默**（Fact F）。如需非 0 布局种子，须先让 `ReferenceObjectives`
+    记录其种子再放宽此守卫。（⑧ 交期已外生，**不再**是这条约束的理由——见 spec §3.5。）
 
     ⚠️ **`constraints` 必须透传**（评审 F1）：`None` = 十约束全开（向后兼容），其余按消融组
     传入——不透传时 spec §6.2 的 5 组消融跑出完全相同的链（假阴性，见 `roll_chain`）。
@@ -313,8 +316,9 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     if layout.layout_seed != 0:
         raise ValueError(
             f"layout_seed={layout.layout_seed} ≠ 0：奖励权重（ReferenceObjectives.of 固定 "
-            "seed_layout=0）与交期 M_ref（_due_map 用布局种子）会不同源，目标口径静默错位。"
-            "请传 seed=0 的布局；确需非 0 种子，先扩展 ReferenceObjectives 记录它。")
+            "seed_layout=0 的参考运行）与特征归一化的 m_ref（build_setup 按**该布局**的 seed "
+            "取）会不同源，归一化刻度静默错位。请传 seed=0 的布局；确需非 0 种子，先扩展 "
+            "ReferenceObjectives 记录它。")
     if not ref.matches(inst, cfg):
         raise ValueError(
             "ReferenceObjectives 与当前 (inst, cfg) 不同源（cfg 指纹不符）——w 是按**旧** cfg "

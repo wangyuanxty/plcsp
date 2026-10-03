@@ -23,8 +23,8 @@ def _setup(name="mk01"):
 
     ⚠️ 环境三件套一律走 `algo.setup.build_setup`（评审 F4 收敛：此前本处用 `m_ref=100.0`
     占位，且 `sample_layout` 漏传 `aisle_w` / `max_agv_capacity`）。布局 seed 固定 0：
-    `SimWorld._due_map` 用**该布局**的 seed 取参考 makespan，而奖励侧
-    `ReferenceObjectives.of` 固定用 seed_layout=0 的参考运行——两者同源才有一致的目标口径。
+    特征归一化的 `m_ref` 按**该布局**的 seed 取，而奖励侧 `ReferenceObjectives.of` 固定用
+    seed_layout=0 的参考运行——两者同源才有一致的归一化刻度。
     """
     inst = load_mk(name)
     cfg = SimConfig()
@@ -254,9 +254,9 @@ def test_multi_epoch_clip_warns_about_saturation():
 
 @pytest.mark.unit
 def test_nonzero_layout_seed_is_rejected():
-    """Fact F 守卫：奖励权重（`ReferenceObjectives.of` 固定 seed_layout=0）与交期 M_ref
-    （`SimWorld._due_map` 用**布局**种子）必须同源——非 0 布局种子**显式报错**，
-    不得让目标口径与权重口径静默错位。"""
+    """Fact F 守卫：奖励权重（`ReferenceObjectives.of` 固定 seed_layout=0 的参考运行）与
+    特征归一化的 `m_ref`（按**布局**种子取）必须同源——非 0 布局种子**显式报错**，
+    不得让归一化刻度静默错位。"""
     inst, lay, dm, cfg, ctx, pol = _setup()
     lay1, dm1 = build_layout_and_dm(inst, cfg, seed_layout=1)
     with pytest.raises(ValueError, match="seed"):
