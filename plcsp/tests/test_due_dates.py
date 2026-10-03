@@ -53,3 +53,19 @@ def test_due_dates_are_exogenous():
     # 与 cfg 无关——签名里根本没有 cfg
     import inspect
     assert "cfg" not in inspect.signature(due_dates_for).parameters
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", [f"mk{i:02d}" for i in range(1, 11)])
+def test_due_dates_are_strictly_positive(name: str):
+    """⚠️ 交期必须 **> 0**——`d_j = LB·τ·(1 + R·(2ρ_j − 1))` 在 `R > 1` 时**会越过零点**。
+
+    实测踩到过：mk04 标定出 R=1.2 时最短作业的交期是 **−35.2**（"在时间原点之前到期"，
+    无意义），而当时的标定测试只看两个误期率，**没看交期本身**，于是一路绿着发了出去。
+    """
+    from plcsp.env.instances import load_mk
+
+    from plcsp.env.due_dates import due_dates_for
+
+    d = due_dates_for(load_mk(name))
+    bad = {j: round(v, 2) for j, v in d.items() if v <= 0.0}
+    assert not bad, f"{name} 出现非正数交期：{bad}"

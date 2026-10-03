@@ -44,16 +44,16 @@ from .instances import Instance
 # （规则见该脚本 docstring），**不是手抄的魔数**：`plcsp/tests/test_due_calib.py` 与
 # 脚本输出对拍。新增实例必须重跑标定脚本，否则 `due_dates_for` 显式报错（Review Focus #3）。
 TF_RDD: dict[str, tuple[float, float]] = {
-    "mk01": (2.50, 0.0),
+    "mk01": (2.45, 0.2),
     "mk02": (2.65, 0.3),
     "mk03": (3.40, 0.5),
-    "mk04": (3.85, 0.0),
+    "mk04": (4.00, 0.7),
     "mk05": (1.55, 0.6),
     "mk06": (5.60, 0.2),
     "mk07": (1.90, 0.6),
     "mk08": (2.50, 0.8),
     "mk09": (2.45, 0.8),
-    "mk10": (2.95, 0.9),
+    "mk10": (3.00, 0.7),
 }
 
 
@@ -86,7 +86,11 @@ def tf_rdd_due_dates(inst: Instance, tau: float, due_range: float) -> dict[int, 
     `n_jobs == 1` 时排名无意义，取 `ρ = 0.5` ⟹ `d_0 = LB·τ`（R 不起作用）。
 
     ⚠️ `tau` / `due_range` 由调用方给出（`due_dates_for` 负责查表或覆盖）。
+    ⚠️ **`due_range > 1` 不合法**：最低倍率 `1 − R` 越过零点会产出**负交期**（实测 mk04 在
+       R=1.2 下最短作业交期 −35.2）。守卫在此**显式报错**，不静默发出——标定网格改了也不会漏。
     """
+    if not 0.0 <= due_range <= 1.0:
+        raise ValueError(f"due_range 必须在 [0, 1]，收到 {due_range}——超过 1 会产出负交期")
     w = total_work_content(inst)
     lb = workload_lower_bound(inst)
     n = inst.n_jobs
