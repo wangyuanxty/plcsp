@@ -23,10 +23,23 @@ import statistics as st
 
 from .env.des import SimConfig, rollout
 from .env.instances import load_mk
-from .env.mkt import MKT_PUBLISHED
+from .env.mkt import MKT_PUBLISHED, MKT_PUBLISHED_AGV
 
 # `ours` 那一列的口径标签。**接上 trans_time（P4-B）后必须改成 "MKT"**（有绊线测试盯着）。
 OURS_BENCHMARK_RAW_MK = "MK-raw-geometry"
+
+
+def _fleet_spec_str(spec: str | int, m: int) -> str:
+    """车数设定的可读写法：`"m"` → `v=m(=6)`；整数 → `v=2`。"""
+    return f"v=m(={m})" if spec == "m" else f"v={int(spec)}"
+
+
+def _same_fleet(spec: str | int, v: int, m: int) -> bool:
+    """该对照列的车数是否与 `ours`（本表用的是 `v`）**一致**。
+
+    ⚠️ 一致才可比——不一致的列并排摆着只是参考，不能当成同口径对手（Review Focus #1）。
+    """
+    return v == m if spec == "m" else int(spec) == v
 
 
 def reference_table(names: tuple[str, ...], n_agv: int | None = None,
@@ -35,6 +48,8 @@ def reference_table(names: tuple[str, ...], n_agv: int | None = None,
 
     `n_agv=None` → 该实例的 **v = m**（HGS/HA-DQN 口径）。表里**必带车辆数列**，
     且 `benchmark` 自报对照列是 MKT、`ours_benchmark` 自报我们那列的口径——防与原始 MK 混表。
+    `comparable_fleet` 是**逐列算出来的**同车数判定（不是写死的脚注）：摘要表里
+    HF2021 是异类，切到 `--n-agv 2` 后异类变成 HGS/HA-DQN——写死的脚注会**恰好说反**。
 
     ⚠️ 参考调度 = `rollout` 的默认口径（每工序取最短候选 + AGV 轮询派车），**未训练**；
        它是"链路能不能跑、量级对不对"的探针，不是我们的方法。
@@ -42,12 +57,16 @@ def reference_table(names: tuple[str, ...], n_agv: int | None = None,
     rows: list[dict] = []
     for name in names:
         base = load_mk(name)
-        v = base.n_machines if n_agv is None else int(n_agv)
+        m = base.n_machines
+        v = m if n_agv is None else int(n_agv)
         cfg = SimConfig(n_agv=v)
         got = [rollout(base, seed_chain=s, cfg=cfg)["makespan"] for s in range(seeds)]
-        rows.append({"inst": name, "benchmark": "MKT", "n_agv": v,
+        rows.append({"inst": name, "benchmark": "MKT", "n_agv": v, "layout_m": m,
                      "ours": float(st.mean(got)),
                      "ours_benchmark": OURS_BENCHMARK_RAW_MK,
+                     "published_agv": dict(MKT_PUBLISHED_AGV),
+                     "comparable_fleet": {k: _same_fleet(s, v, m)
+                                          for k, s in MKT_PUBLISHED_AGV.items()},
                      **MKT_PUBLISHED[name]})
     return rows
 
@@ -63,11 +82,17 @@ def main() -> None:
     rows = reference_table(tuple(args.instances.split(",")), n_agv=v, seeds=args.seeds)
     print(f"⚠️ ours 口径 = {OURS_BENCHMARK_RAW_MK}（trans_time 未接入仿真，P4-B 才接）"
           f"｜对照列口径 = MKT｜**两者不同口径，只判量级，不可直接比**")
-    print(f"{'实例':<7}{'基准':<6}{'车辆数':>7}{'我们(参考)':>12}{'HGS':>9}{'HA-DQN':>9}{'HF2021*':>10}")
-    print("  * HF2021 的 LAHC 用 2 台车，与其余列**不同口径**，不可直接比（§19.7d 存疑点②）")
+    print(f"{'实例':<7}{'基准':<6}{'车辆数':>7}{'我们(参考)':>12}{'HGS':>9}{'HA-DQN':>9}{'HF2021':>10}")
     for r in rows:
         print(f"{r['inst']:<7}{r['benchmark']:<6}{r['n_agv']:>7}{r['ours']:>12.1f}"
               f"{r['HGS_JMS2024']:>9.1f}{r['HA_DQN_CIS2025']:>9.1f}{r['HF2021_LAHC']:>10.1f}")
+        m = r["layout_m"]
+        specs = " / ".join(f"{k}({_fleet_spec_str(s, m)})" for k, s in r["published_agv"].items())
+        ok = [k for k, same in r["comparable_fleet"].items() if same]
+        bad = [k for k, same in r["comparable_fleet"].items() if not same]
+        print(f"    车数：ours v={r['n_agv']}｜{specs}")
+        print(f"    与 ours **同车数**（口径可比的对照）：{ok or '（无）'}")
+        print(f"    与 ours **不同车数**（只作参考，不可当同口径对手）：{bad or '（无）'}")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,17 @@ def load_mkt_layout(n_machines: int, *, drop_lu: bool = True) -> np.ndarray:
 # HF2021 LAHC：Homayouni & Fontes, J. Global Optimization 79(2):463-502, 2021（其车辆数为 2，
 #      **与 HGS/HA-DQN 的 v=m 不同口径**——见 progress-log §19.7d 存疑点②）。
 # ⚠️ 三列**都**是 MKT 口径。原始 MK 的 BKS 是另一套（MK01=40），**不得混表**。
+# ⚠️ 每个方法的**车数设定**（Review Focus #1）：`"m"` = 该实例的机台数；整数 = 固定车数。
+# HF2021 的 2 台是**二手转述**（§19.7d 存疑点②原文如此），引用时须保留这个限定词。
+# 机读形式存在的理由：`MKT_PUBLISHED` 只有数字，下游画表/画图时若只拿它，
+# "HF2021 与 HGS 不同车数"这条事实就会丢掉，两档车数的数会被并排当成可比。
+MKT_PUBLISHED_AGV: dict[str, "str | int"] = {
+    "HGS_JMS2024": "m",
+    "HA_DQN_CIS2025": "m",
+    "HF2021_LAHC": 2,
+}
+
+
 MKT_PUBLISHED: dict[str, dict[str, float]] = {
     "mk01": {"HGS_JMS2024": 153.0, "HA_DQN_CIS2025": 97.0, "HF2021_LAHC": 187.0},
     "mk02": {"HGS_JMS2024": 104.0, "HA_DQN_CIS2025": 71.0, "HF2021_LAHC": 148.0},

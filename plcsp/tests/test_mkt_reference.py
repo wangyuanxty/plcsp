@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from plcsp.env.mkt import MKT_PUBLISHED, load_mkt
+from plcsp.env.mkt import MKT_PUBLISHED
 
 
 @pytest.mark.unit
@@ -76,6 +76,37 @@ def test_fleet_size_changes_the_reference_result():
     b = reference_table(("mk01",), n_agv=6, seeds=1)[0]
     assert a["n_agv"] == 1 and b["n_agv"] == 6
     assert a["ours"] != b["ours"], "1 台车与 6 台车跑出同一 Cmax——n_agv 没生效"
+
+
+@pytest.mark.unit
+def test_fleet_comparability_is_computed_not_hardcoded():
+    """⚠️ Review Focus #1：**哪一列与我们的车数同口径**必须是**算出来的**，不能是写死的脚注。
+
+    `HF2021` 用 2 台、`HGS` 与 `HA-DQN` 用 v=m。摘要表固定写一句"HF2021 与其余列不同口径"，
+    在 `--n-agv 2`（HF2021 口径）那张敏感性表上就**恰好说反**：那时 `ours` 也是 2 台，
+    而与 `ours` 不同口径的反倒是 HGS/HA-DQN。读者会以为 HGS/HA-DQN 与我们的数可直接比。
+
+    故每行必须带**逐列**的可比性判定，且随 `n_agv` 变。
+    """
+    from plcsp.m14_mkt_reference import reference_table
+
+    r_m = reference_table(("mk01",), n_agv=6, seeds=1)[0]      # mk01 是 6 机 → v=m 即 6 台
+    assert r_m["comparable_fleet"] == {
+        "HGS_JMS2024": True, "HA_DQN_CIS2025": True, "HF2021_LAHC": False}, \
+        "v=m 这一档：HGS/HA-DQN 同车数，HF2021(2 台) 不同"
+
+    r_2 = reference_table(("mk01",), n_agv=2, seeds=1)[0]      # 与 HF2021 同口径
+    assert r_2["comparable_fleet"] == {
+        "HGS_JMS2024": False, "HA_DQN_CIS2025": False, "HF2021_LAHC": True}, \
+        "v=2 这一档：只有 HF2021 同车数——脚注若写死就会说反"
+
+
+@pytest.mark.unit
+def test_published_fleet_specs_are_recorded_machine_readably():
+    """⚠️ Review Focus #1：每个方法的车数设定必须**可机读**——否则下游画表/画图又会丢掉它。"""
+    from plcsp.env.mkt import MKT_PUBLISHED_AGV
+
+    assert MKT_PUBLISHED_AGV == {"HGS_JMS2024": "m", "HA_DQN_CIS2025": "m", "HF2021_LAHC": 2}
 
 
 @pytest.mark.unit

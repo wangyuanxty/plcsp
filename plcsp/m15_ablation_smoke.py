@@ -6,8 +6,10 @@
    **5 组 × 3 实例 × 100 步不可能分钟级跑完**——故测试只跑 2 组 × 3 步，本脚本是长跑。
 ⚠️ 术语：描述本脚本做的事用平实说法（「消融链路打通」），**不自造术语**（用户明令）。
 
-## 种子流（⚠️ 本项目栽过两次的坑：评审 F1 / I-2）
+## 种子流（⚠️ 本项目栽过两次的坑：评审 F1 / I-2 + 终审 F1；**三条都要锁**）
 
+- **初始化流**：`run_group` 里 `torch.manual_seed(seed)`——**各组用同一个 seed**，从同一初始
+  网络出发才可比。漏了这条的实测后果见 `run_group` docstring。
 - **训练流**：第 s 步第 g 条链的仿真扰动种子 = `(seed*TRAIN_STEP_STRIDE + s) * SEED_STRIDE + g`，
   `TRAIN_STEP_STRIDE = SEED_STRIDE = 1000`。上界 = `(seed*1000 + steps-1)*1000 + G-1`。
 - **评估流**：自 `EVAL_SEED_BASE = 10**9` 起——**显式**与训练块分离。
@@ -19,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import time
+
+import torch
 
 from .algo.group_rel import SEED_STRIDE, joint_chain_step, roll_chain
 from .algo.setup import build_setup
@@ -70,12 +74,20 @@ def run_group(inst: Instance, constraints: ConstraintConfig, *, seed: int,
 
     ⚠️ `constraints` 必须**同时**进 `build_setup`（决定 `NormContext`）与两个训练/评估入口
        ——③/⑧ 的特征静默读 `ctx.constraints`，不同源会给出"不会坏/无交期"的假信号（评审 R2）。
-    ⚠️ 返回的是 **argmax**（`sample=False`）评估：无采样噪声，同 seed 逐位可复现。
+    ⚠️ **三条种子流都要锁**（本项目中招记录）：① 网络初始化 ② 仿真扰动 ③ 动作采样。
+       起初只锁了后两条，`_policy_for()` 每次从**全局未播种**的 RNG 取初始化 ⇒ 同一组、
+       同 seed、同参数在三个独立进程跑出 **129.17 / 234.00 / 89.28**（steps=0、G=1）；
+       而 init 噪声的幅度**大于组间差异**，于是"跨组读数不同"根本推不出"constraints 接通了"。
+       故此处 `torch.manual_seed(seed)`——与 `m13_train_a.main()` 的做法一致。
+       ⚠️ 用的是**同一个 seed**（不是 `seed*步号`）：各组必须从**同一初始化**出发才可比。
+    ⚠️ 返回的是 **argmax**（`sample=False`）评估；配合上面的播种，同 seed 逐位可复现
+       （`test_same_seed_is_reproducible_across_calls` 钉住）。
     """
     cfg = cfg or SimConfig()
     assert_streams_disjoint(seed=seed, steps=steps, G=G)
     lay, dm, ctx = build_setup(inst, cfg, constraints=constraints)
     ref = ReferenceObjectives.of(inst, cfg)
+    torch.manual_seed(seed)                      # ① 网络初始化流（见上）
     pol = _policy_for()
     for s in range(steps):
         joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref,
