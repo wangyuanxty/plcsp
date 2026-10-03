@@ -1,7 +1,12 @@
-"""MKT 上跑我们参考调度的测试（P4-A Task 3）。
+"""MKT 上跑我们参考调度的测试（P4-A Task 3；P4-B Task 4 起**两档、矩阵口径**）。
 
-⚠️ **本批不把 `trans_time` 接进仿真**（那是 P4-B 的设计决定）——故 `ours` 跑在**原始 MK 几何**下，
-只在**量级**上与已发表数字可比。本文件的断言全部据此设计。
+⚠️ P4-A 时本文件的设计前提是「`trans_time` 未接进仿真 ⟹ `ours` 跑在原始 MK 几何上」；
+P4-B 已把矩阵接进仿真 ⟹ 该前提**作废**，对应断言按下述方式更新：
+
+- 绊线 `test_our_column_declares_its_own_basis_and_is_not_mkt_yet` **翻转**为
+  `test_our_column_declares_the_mkt_basis`（**改写非删除**，计数不减）；
+- `test_our_reference_is_in_the_published_ballpark` 仍留（量级判据仍有效），
+  但量级基准从"几何口径的 ~107"变成"矩阵口径的 ~205（档 A）/ ~678（档 B）"。
 """
 from __future__ import annotations
 
@@ -31,30 +36,31 @@ def test_reference_table_labels_the_benchmark():
 
 
 @pytest.mark.unit
-def test_our_column_declares_its_own_basis_and_is_not_mkt_yet():
-    """⚠️ Review Focus #3 的**绊线**：`ours` 那一列的口径必须**单独**声明，且本批**不是** MKT。
+def test_our_column_declares_the_mkt_basis():
+    """⚠️ Review Focus #3 的**绊线翻转**：`ours` 那一列的口径必须**单独**声明，且本批**就是** MKT。
 
-    本批 `ours` 跑在**原始 MK 几何**上（`trans_time` 还没接进 `AgvSim`），而对照列是 MKT——
-    **两者不同口径**，只判量级。若把 `ours` 也标成 MKT，读者会以为这是可直接比的同口径数字。
-
-    ⭐ **这个断言是故意会红的**：P4-B 把 `trans_time` 接进仿真后，`ours_benchmark` 必须改成
-    `"MKT"`，那时**本测试会失败**，逼着改的人同时更新表与文档——而不是让标签悄悄留在旧值上。
+    P4-A 埋的原绊线（`…_and_is_not_mkt_yet`）要求"接上 `trans_time` 后把它改成 MKT"——
+    P4-B Task 2 已把矩阵接进 `AgvSim`，故本批按它写明的做法**翻转**：断言改为 `== "MKT"`
+    （**改写不删除**，计数不减）。两列同口径 ⟹ 可以直接比，不再是"只判量级"。
     """
     from plcsp.m14_mkt_reference import reference_table
 
     row = reference_table(("mk01",), n_agv=6)[0]
     assert "ours_benchmark" in row, "表没声明 ours 那一列的口径"
-    assert row["ours_benchmark"] != "MKT", (
-        "ours 已标成 MKT——若 P4-B 真的接上了 trans_time，请把本断言一并改为 == 'MKT'；"
-        "若没接上，这个标签就是错的（Review Focus #3）")
+    assert row["ours_benchmark"] == "MKT", (
+        "ours 那一列的标签不是 MKT——若矩阵口径被回退成几何口径，这才是正确取值；"
+        "若矩阵仍接着，本标签与 `test_rows_carry_tier_and_caliber_labels` 都会红")
+    assert row["transport"] == "matrix", "行里自报的行程时间口径不是矩阵——接线被回退了"
 
 
 @pytest.mark.unit
 def test_our_reference_is_in_the_published_ballpark():
     """量级核验：我们的参考调度（最短候选 + 轮询派车）应落在已发表数字的**同一量级**。
 
-    这一步**只判量级**（训练后的 DRL 当然比未训练的参考调度好）：
-    若我们跑出 40 上下 ⟹ 行程时间根本没接上；若跑出几千 ⟹ 单位错了。
+    ⚠️ P4-B 起 `ours` 走**矩阵口径**，量级比 P4-A 的几何口径（~107）大数倍：
+    档 A（机制全关）实测 **205**、档 B（全开）**678**，对照 HGS=153 ⟹ 带 [0.3×, 5.0×] 仍覆盖。
+    这一步**只判量级**：若掉回 40 上下 ⟹ 矩阵口径被回退成几何（旧断言想抓的缺陷）；
+    若跑出几千 ⟹ 单位错了（矩阵被当成秒或又除了一次换算）。
     """
     from plcsp.m14_mkt_reference import reference_table
 
