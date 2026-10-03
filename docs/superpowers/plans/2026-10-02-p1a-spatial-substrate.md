@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **项目根** = `D:\research\DeepReinforcementLearningScheduling`。**根目录只允许有目录**，不得新增根级文件。
+- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python 解释器**一律用 `D:/anaconda/python.exe`。**CPU-only，torch 2.14.0+cpu**。
 - **单位约定（bug#13 已定，不得改动）**：**仿真时间单位 = 分钟，布局坐标单位 = 米**。运输时间 = `距离[m] / (窄道倍率 × agv_speed_mps) / 60`。`SECONDS_PER_MIN = 60.0` 已定义于 `plcsp/env/des.py`。
 - **回归门禁**：`plcsp/tests/` 的 **49 项必须始终全绿**。其中 `test_instances.py`（42 项）锁定官方 Brandimarte 实例，**任何任务都不得修改其断言**。

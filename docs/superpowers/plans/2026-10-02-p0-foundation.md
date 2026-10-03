@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **项目根** = `D:\research\DeepReinforcementLearningScheduling`。**根目录只允许有目录**，不得新增根级文件（`.gitignore` 除外——它是版本控制的必需项）。
+- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python 解释器**一律用 `D:/anaconda/python.exe`（Anaconda base；**非** `python`）。**CPU-only，torch 2.14.0+cpu**。
 - **回归测试 `plcsp/tests/test_instances.py` 必须始终全绿（42 项）**——它是 bug#12 的门禁，任何阶段都不得为通过而修改其断言。
 - **不删历史证据**：所有被砍路线的脚本与其产出 `*.jsonl` **一律归档，不删除**（它们是负例证据，见 spec §2）。
