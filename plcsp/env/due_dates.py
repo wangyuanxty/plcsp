@@ -70,9 +70,27 @@ TF_RDD: dict[str, tuple[float, float]] = {
     "mk10": (3.10, 0.8),
 }
 
-# 矩阵口径（MKT）的 (τ,R)：由 `plcsp/m16_due_calib.py --transport matrix` 标定后落盘（Task 3）。
-# 在落盘前它是空的 ⟹ 矩阵口径的 `due_dates_for` 会**显式报错**（不会退回几何表）。
-TF_RDD_MATRIX: dict[str, tuple[float, float]] = {}
+# 矩阵口径（MKT）的 (τ,R)：由 `plcsp/m16_due_calib.py --transport matrix` 标定后落盘（P4-B Task 3）。
+#   标定 cfg（**与几何表不同，必须写清**）：`SimConfig(n_agv=m, transport_unmapped="geometry")`
+#   （v=m = HGS/HA-DQN 口径；⑪ 充电开着而充电桩无矩阵项 ⟹ 声明式几何降级 + 计数）；
+#   约束 `ConstraintConfig().with_off("due_dates")`；`reference_completes` 用 `seed_chain=0`。
+#   网格：τ 0.50–**85.00**/0.05（上限按口径单独取，实测最大 `M_ref/LB` = 55.39（mk10）×1.5 ⟹ 85；
+#   见 `m16_due_calib.TAU_HI_BY_CALIBER`）、R 0.20–0.80/0.10。
+#   实测最大 τ = 52.70（mk10），10/10 实例均在网格内找到可行 (τ,R)。
+#   命令：`PYTHONIOENCODING=utf-8 D:/anaconda/python.exe -m plcsp.m16_due_calib --transport matrix`
+#   判据：`plcsp/tests/test_due_calib_mkt.py` 逐实例核对脚本输出（与几何表同一条纪律）。
+TF_RDD_MATRIX: dict[str, tuple[float, float]] = {
+    "mk01": (19.80, 0.4),
+    "mk02": (22.15, 0.2),
+    "mk03": (16.10, 0.3),
+    "mk04": (20.45, 0.5),
+    "mk05": (4.40, 0.4),
+    "mk06": (45.50, 0.5),
+    "mk07": (8.60, 0.3),
+    "mk08": (8.80, 0.6),
+    "mk09": (13.00, 0.4),
+    "mk10": (52.70, 0.6),
+}
 
 TABLE_BY_CALIBER: dict[str, dict[str, tuple[float, float]]] = {
     "geometry": TF_RDD,
