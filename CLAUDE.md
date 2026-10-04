@@ -27,6 +27,10 @@
 
 ## 3. 环境与门禁
 
-- Python 用 `D:/anaconda/python.exe`。CPU-only。命令前缀 `PYTHONIOENCODING=utf-8`。
+- **默认解释器**：`D:/anaconda/python.exe`（**CPU-only** torch）。**门禁跑在这个上。**
+- **GPU 解释器**：`D:/anaconda/envs/py312/python.exe`（torch 2.13.0+cu126，RTX 4060 Laptop，8 GB）。
+  CUDA 图 / worker 设备档 / 任何要 GPU 的测量走这个。**它不可用于门禁**——默认档必须保持 CPU-only。
+- 命令前缀 `PYTHONIOENCODING=utf-8`。
 - 门禁 = `plcsp/tests/` 全绿，且 `ruff check plcsp/` 干净。
+- **跑墙钟读数前先确认机器独占**（`Get-Process python`）。并发下的数字不能采信（§22.5）。
 - 提交格式 `<type>: <description>`。不添加署名或生成标识。
