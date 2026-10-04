@@ -181,6 +181,11 @@ def main() -> None:
                          "默认关（原串行路径，读数逐位不变）。⚠️ 开启后采样流改为**逐链"
                          "独立**（否则消费次序不确定）⟹ 与串行档同 seed 的数值不同"
                          "（第九次读数作废，见 progress-log §39）")
+    ap.add_argument("--worker-device", default="cpu", choices=("cpu", "cuda"),
+                    help="并行档 worker 的策略设备（2026-10-04 worker 设备批次）："
+                         "cpu = 默认档（worker 直接读共享内存镜像，每步零参数 IPC）；"
+                         "cuda = worker 在自己的进程里建 CUDA 上下文 + GPU 副本，在线前向"
+                         "走 CUDA 图（8 个上下文要显存，失败显式报错、不退回 CPU worker）")
     ap.add_argument("--workers", type=int, default=None,
                     help="并行档的 worker 进程数（默认 min(核数, G)）")
     args = ap.parse_args()
@@ -216,7 +221,8 @@ def main() -> None:
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}"
           f"｜route_k={args.route_k}｜pm_head={args.pm_head}｜device={pol.device}"
-          f"｜parallel={args.parallel}(workers={args.workers or 'auto'})")
+          f"｜parallel={args.parallel}(workers={args.workers or 'auto'},"
+          f"worker_device={args.worker_device})")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
@@ -231,6 +237,7 @@ def main() -> None:
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  parallel=args.parallel, n_workers=args.workers,
+                 worker_device=args.worker_device,
                  eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule,
                                         constraints=constraints, route_k=args.route_k,
                                         pm_head=args.pm_head)

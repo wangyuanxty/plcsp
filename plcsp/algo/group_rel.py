@@ -884,7 +884,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     "耗尽有后果"要在**小电池档**验证（`AgvSpec(battery_kwh=…)`，默认参数不动，见 §27.1）。
 
     ⚠️ **`parallel`（链级多进程，2026-10-04 并行批次）默认 `False` = 原串行路径，逐位不变。**
-    `True` 时把 G 条链交给 `ChainWorkerPool`（spawn；worker 只跑 CPU）——worker 跑
+    `True` 时把 G 条链交给 `ChainWorkerPool`（spawn）——worker 跑
     `roll_chain` 的整段 episode（仿真 + 在线前向 + 决策记录），主进程只做重算/反向/
     优化器步（实测 MK01、G=8 时在线部分占整步 ~79%，见 `progress-log.md` §36–§38）。
     - **必须显式传 `pool`**（`ChainWorkerPool` 实例）：`parallel=True, pool=None`
@@ -893,9 +893,10 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
       按链序消费；并行档每条链自建 `torch.Generator().manual_seed(seed*SEED_STRIDE + g)`
       （逐链独立且确定 —— 消费次序不再依赖跨进程调度）。**并行档与串行档同 seed 的数值
       不同**，差异来自采样流，不是实现错误。
-    - ⚠️ worker 在 **CPU** 上跑：主进程在 CUDA 时，并行档的在线前向浮点路径与采样流的设备
-      都与串行 CUDA 档不同（CPU 与 CUDA 的 generator 是两条流，§36.9）——跨档读数不可逐位
-      互比。重算/反向仍在主进程、仍跟随 `policy.device`。
+    - ⚠️ worker 的设备由池的 `worker_device` 定：`"cpu"`（默认）时在线前向浮点路径与采样流
+      设备都与串行 CUDA 档不同（CPU 与 CUDA 的 generator 是两条流，§36.9）——跨档读数不可
+      逐位互比；`"cuda"` 时 worker 自建 CUDA 上下文与 GPU 副本，在线前向走 CUDA 图快路。
+      两种档都不改本函数的语义，只改"在哪算"。重算/反向仍在主进程、仍跟随 `policy.device`。
     - 池常驻复用（每步只提交任务）；清理走 `pool.close()`，`runner.run_training` 的
       `finally` 已接好。
 

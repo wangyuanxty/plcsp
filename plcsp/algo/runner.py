@@ -48,7 +48,8 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
                  seed0: int = 0, run_dir: str = "checkpoints/run_0",
                  save_every: int = 10, resume: bool = False,
                  eval_fn=None, eval_every: int | None = None,
-                 parallel: bool = False, n_workers: int | None = None) -> dict:
+                 parallel: bool = False, n_workers: int | None = None,
+                 worker_device: str = "cpu") -> dict:
     """训练循环+保存。step_fn(policy, inst, seed=..., **step_kwargs) → (r_mean, diag)。
 
     resume=True：run_dir 存在 ckpt.pt → 恢复续跑（覆盖 policy 参数与起始 step）。
@@ -62,6 +63,10 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
     - 环境参数（`layout` / `dm` / `cfg` / `ctx` / `constraints` / `route_k` / `pm_head` /
       `charge_head`）从 `step_kwargs` 原样进每个任务——池不缓存旧环境。
     - `n_workers=None` ⇒ `min(核数, G)`（G 取自 `step_kwargs`）。
+    - `worker_device`（2026-10-04 worker 设备批次）：`"cpu"`（默认，逐位等于上一批）/
+      `"cuda"`（worker 在自己的进程里建 CUDA 上下文 + GPU 副本，在线前向走 CUDA 图）。
+      CUDA 档**不改**采样流之外的口径；采样流设备跟随 worker 策略设备 ⟹ 与 CPU 档数值不同。
+      worker 建上下文/建图失败**显式报错**，不退回 CPU worker。
     - ⚠️ 采样流口径随并行改变（每条链独立流）⟹ **并行档与串行档同 seed 的数值不同**
       （第九次读数作废，见 `progress-log.md` §39）。
     """
@@ -88,9 +93,10 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
             if n_workers is None:
                 n_workers = min(os.cpu_count() or 1,
                                 int(step_kwargs.get("G", os.cpu_count() or 1)))
-            pool = ChainWorkerPool(policy, int(n_workers))
+            pool = ChainWorkerPool(policy, int(n_workers), worker_device=worker_device)
             step_kwargs = {**step_kwargs, "parallel": True, "pool": pool}
             print(f"[runner] parallel=True workers={pool.n_workers} "
+                  f"worker_device={pool.worker_device} "
                   f"startup={pool.startup_s:.2f}s", flush=True)
         t0 = time.time()
         for s in range(start, start + steps):

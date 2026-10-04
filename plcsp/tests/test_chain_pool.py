@@ -93,6 +93,22 @@ def test_pool_rejects_bad_worker_count(tiny):
         ChainWorkerPool(pol, n_workers=0)
 
 
+@pytest.mark.unit
+def test_worker_device_defaults_to_cpu(tiny):
+    """硬要求 1：默认档仍是 CPU worker（上一批的行为与读数逐位不变）。"""
+    _inst, _lay, _dm, _cfg, _ctx, pol, _ref = tiny
+    sig = inspect.signature(ChainWorkerPool.__init__)
+    assert sig.parameters["worker_device"].default == "cpu"
+
+
+@pytest.mark.unit
+def test_pool_rejects_unknown_worker_device(tiny):
+    """设备名写错 → 建池即显式报错（不静默按 CPU 跑）。"""
+    _inst, _lay, _dm, _cfg, _ctx, pol, _ref = tiny
+    with pytest.raises(ValueError, match="worker_device"):
+        ChainWorkerPool(pol, n_workers=1, worker_device="gpu")
+
+
 @pytest.mark.integration
 def test_pool_starts_the_requested_number_of_workers(tiny, pool):
     """硬要求 5/6：池起来了、数量对（启动探针在 `__init__` 里核对过 pid）。"""
@@ -191,3 +207,94 @@ def test_pool_failure_is_explicit_and_then_pool_is_closed(tiny):
     finally:
         p.close()
     p.close()          # 清理路径幂等
+
+
+# ── worker_device="cuda"（2026-10-04 worker 设备批次）────────────────────────────
+# ⚠️ 门禁解释器（D:/anaconda/python.exe）是 CPU-only torch ⟹ 下面两条 CUDA 用例在那里
+#    **skip**（如实记账，同 `test_cuda_graph.py` 的 5 条）；GPU 解释器
+#    （D:/anaconda/envs/py312/python.exe）上跑。
+
+_CUDA_ONLY = pytest.mark.skipif(not torch.cuda.is_available(),
+                                reason="需要 CUDA（GF 的 worker 设备档；CPU-only 解释器上不适用）")
+
+
+@pytest.mark.integration
+def test_cuda_worker_device_without_cuda_raises(tiny):
+    """硬要求 6：worker 建不了 CUDA 上下文 → **显式报错**，不悄悄退回 CPU worker。
+
+    ⚠️ 这条判据**只在 CPU-only 解释器上成立**（那时 CUDA 必然建不起来）；CUDA 机器上 skip。
+    """
+    if torch.cuda.is_available():
+        pytest.skip("本机 CUDA 可用——该判据只在 CPU-only 解释器上成立")
+    _inst, _lay, _dm, _cfg, _ctx, pol, _ref = tiny
+    with pytest.raises(RuntimeError, match="worker 初始化失败"):
+        ChainWorkerPool(pol, n_workers=1, worker_device="cuda")
+
+
+@_CUDA_ONLY
+@pytest.mark.integration
+def test_cuda_worker_runs_on_gpu_and_is_bitwise_reproducible(tiny):
+    """CUDA 档：设备核对 + **同配置跑两遍逐位相同**（硬要求 5 的确定性证据）。
+
+    多进程 + 多 CUDA 上下文下"逐位可复现"不是显然的：每条链的采样流是 CUDA generator
+    （`torch.multinomial` 在 CUDA 上不接受 CPU generator），故两遍比对的是**整条链**
+    （动作、logp、token 特征、指标）逐位相同。
+    """
+    inst, lay, dm, cfg, ctx, pol, _ref = tiny
+    seed, G = 5, 2
+    p = ChainWorkerPool(pol, n_workers=2, worker_device="cuda")
+    try:
+        assert all(dev.startswith("cuda") for dev in p.worker_devices), \
+            f"worker 没跑在 CUDA 上：{p.worker_devices}"
+        p.sync_policy(pol)
+        a = p.run_chains(seed, G, inst=inst, layout=lay, dm=dm, cfg=cfg, ctx=ctx)
+        # 第二遍：参数未动，应当逐位复现（含 CUDA 采样流）
+        b = p.run_chains(seed, G, inst=inst, layout=lay, dm=dm, cfg=cfg, ctx=ctx)
+        _assert_chains_equal(a, b)
+        assert p.last_sync_s is not None and p.last_sync_s >= 0.0
+        # ⚠️ 参数同步是**活的**吗？——扰动参数 + sync 后**logp** 必须变。没有这条，"GPU 副本
+        #    一直用旧权重"也能通过上面的逐位复现判据（那是静止不动的另一种表现）。
+        #    ⚠️ 判据用 logp，**不用 action**：实测（MK01、G=1、w=1）全部参数 +0.01 后
+        #    104/120 个 logp 变了，但 **120/120 个动作一个都没变**——采样到的动作对这种扰动
+        #    不敏感，拿它当判据会给出假红。
+        with torch.no_grad():
+            for q in pol.parameters():
+                q.add_(0.01)
+        p.sync_policy(pol)
+        c = p.run_chains(seed, G, inst=inst, layout=lay, dm=dm, cfg=cfg, ctx=ctx)
+        pairs = [(x, y) for (da, _ma), (dc, _mc) in zip(a, c) for x, y in zip(da, dc)]
+        assert pairs, "没出决策——用例本身失效"
+        changed = sum(1 for x, y in pairs if x.logp != y.logp)
+        assert changed > 0, \
+            f"扰动参数并 sync 后 {len(pairs)} 个决策的 logp 一个都没变——CUDA worker 的 H2D 同步没生效"
+    finally:
+        p.close()
+
+
+@_CUDA_ONLY
+@pytest.mark.integration
+def test_cuda_worker_differs_from_cpu_worker_on_same_seed(tiny):
+    """如实记账：CUDA 档与 CPU 档**不是同一条采样流** ⟹ 同 seed 数值不同（默认档不受影响）。
+
+    这不是缺陷——`torch.multinomial` 在 CUDA 上不接受 CPU generator，采样流必须跟随设备
+    （§36.9）。本用例只钉住"两档确实不同"，防止有人把它误当逐位等价档用。
+    """
+    inst, lay, dm, cfg, ctx, pol, _ref = tiny
+    seed, G = 5, 2
+    pc = ChainWorkerPool(pol, n_workers=2, worker_device="cpu")
+    try:
+        pc.sync_policy(pol)
+        cpu = pc.run_chains(seed, G, inst=inst, layout=lay, dm=dm, cfg=cfg, ctx=ctx)
+    finally:
+        pc.close()
+    pg = ChainWorkerPool(pol, n_workers=2, worker_device="cuda")
+    try:
+        pg.sync_policy(pol)
+        gpu = pg.run_chains(seed, G, inst=inst, layout=lay, dm=dm, cfg=cfg, ctx=ctx)
+    finally:
+        pg.close()
+    pairs = [(a, b) for (dc, _mc), (dg, _mg) in zip(cpu, gpu) for a, b in zip(dc, dg)]
+    assert pairs, "两档都没出决策——用例本身失效"
+    same = sum(1 for a, b in pairs if a.action == b.action)
+    assert same < len(pairs), \
+        "两档逐位相同？采样流应当随设备不同（§36.9）——判据已失效，请复查"
