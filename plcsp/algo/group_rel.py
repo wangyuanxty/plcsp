@@ -9,6 +9,10 @@
 （每个决策一个 ratio）：2026-10-04 修复——此前按**整条链**裁剪，而链 logp 是求和（100–460
 项）⇒ 一次更新就把全部链推出带外、后续 epoch 梯度恒 0，clip 形同虚设（见 `joint_chain_step`）。
 
+⚠️ **O1：优势有两个口径**（`joint_chain_step` 的 `adv_mode`）——`"scalar"`（默认，历史口径：
+先加权求和再组内 z 化）与 `"per_objective"`（每目标各自组内 z 化、再按 w 合成）。后者对
+**逐目标单位缩放不变** ⇒ w 真正控制各目标的权衡；见 `_advantages` 的 docstring。
+
 spec §5.3.4 五条硬性约定在本模块的落点：
 1. **联合链、单一优势** —— `roll_chain` 把两头的决策记在**同一条**链上（同一 episode），
    `joint_chain_step` 只算**一个** A（不按头分组、不按层归一化）；
@@ -56,6 +60,42 @@ def _z(vals: np.ndarray) -> np.ndarray:
     调用点**（唯一调用方传的就是 "z"），已删（评审 M-6）。
     """
     return (vals - vals.mean()) / (vals.std() + 1e-9)
+
+
+# 优势口径（O1）。`scalar` = 历史口径（先加权求和、再组内 z 化，逐位兼容）；`per_objective`
+# = 每目标各自组内 z 化、再按 w 合成。白名单在此唯一定义，入口与算子共用（写错名不得静默回退）。
+ADV_MODES = ("scalar", "per_objective")
+
+
+def _check_adv_mode(adv_mode: str) -> None:
+    """`adv_mode` 白名单守卫——`joint_chain_step` 入口先查（写错名的代价不该是几分钟的仿真）。"""
+    if adv_mode not in ADV_MODES:
+        raise ValueError(
+            f"adv_mode={adv_mode!r} 未知：只接受 {ADV_MODES}。"
+            "'scalar' = 先加权求和再组内 z 化（历史口径，逐位兼容）；"
+            "'per_objective' = 每目标各自组内 z 化、再按 w 合成"
+            "（O1：消除目标之间的相对尺度，让 w 真正控制权衡）。")
+
+
+def _advantages(f_objs: np.ndarray, w: tuple[float, float, float],
+                adv_mode: str) -> torch.Tensor:
+    """组内优势 A（G 条链，float32）——两种口径（O1）。
+
+    - `scalar`：r_g = Σᵢ wᵢ(−f_{g,i})，A = z(r)。⚠️ 这是**今日**的表达式（逐位兼容，
+      由 `test_scalar_adv_mode_is_bitwise_unchanged` 的捕获摘要钉死）。z 只消掉加权和的
+      **总尺度**，消不掉**目标之间的相对尺度**——w 只把**参考点**上的三项贡献拉平
+      （wᵢ·fᵢ^ref ≡ 1/Σ），管不住三者在组内的**方差**：谁方差大谁主导 A，问题因此隐蔽。
+    - `per_objective`：A = Σᵢ wᵢ·zᵢ(−fᵢ)。每个目标**各自**组内 z 化——z 对逐目标正缩放不变
+      （`z(c·v)=z(v)`）——再按 w 合成，故 w 真正决定各目标的相对权重。
+
+    `f_objs` 是 (G, 3) 的**原始目标值**（越小越好），float64（与奖励侧同精度口径）。
+    """
+    _check_adv_mode(adv_mode)
+    if adv_mode == "scalar":
+        r = np.asarray([scalar_reward(tuple(o), w) for o in f_objs], dtype=np.float64)
+        return torch.tensor(_z(r), dtype=torch.float32)
+    z = np.stack([_z(-f_objs[:, i]) for i in range(f_objs.shape[1])], axis=1)   # (G, 3)
+    return torch.tensor(z @ np.asarray(w, dtype=np.float64), dtype=torch.float32)
 
 
 def op_feat(inst: Instance, job: int, oi: int, layout: Layout | None = None) -> list[float]:
@@ -322,12 +362,24 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      seed: int, G: int = 8, lr: float = 1e-3,
                      clip_eps: float | None = None,
                      epochs: int = 1,
-                     constraints: ConstraintConfig | None = None) -> tuple[float, dict]:
+                     constraints: ConstraintConfig | None = None,
+                     adv_mode: str = "scalar") -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
     `reward.scalar_reward`）→ **组内 z 化**（`_z`，一个优势，不按头分层）→ 组内更新。
     优化器 = Adam（`policy.optim` 惰性创建：约定 4；不再手写 SGD + 逐元素 clamp）。
+
+    ⚠️ **`adv_mode`（O1）——优势算在标量奖励上还是逐目标上**：
+    - `"scalar"`（默认）= 今日口径：`r = Σᵢ wᵢ(−fᵢ)`，`A = z(r)`。z 只消掉加权和的**总尺度**，
+      **不消掉目标之间的相对尺度**——w 只把**参考点**上的三项贡献拉平（wᵢ·fᵢ^ref ≡ 1/Σ），
+      管不住三者在组内的**方差**：谁方差大谁主导 A，w 名义上控制权衡、实际控制不了
+      （MK01 默认 cfg 下 w≈(0.066, 0.886, 0.048)）。此口径**逐位兼容**（既有读数全靠它，
+      由测试的捕获摘要钉死）。
+    - `"per_objective"` = `A = Σᵢ wᵢ·zᵢ(−fᵢ)`：每个目标**各自**组内 z 化，再按 w 合成。
+      z 对逐目标正缩放不变 ⇒ 换单位（J→0.1J）不改变 A，w 于是真正决定各目标的相对权重。
+    未知值在入口**显式报错**（`_check_adv_mode`），不静默回退。诊断（`r_mean` / `r_std`）
+    **始终**按 scalar 奖励算（它是"奖励读数"，与优势口径无关）；`A_std` 按所选口径的 A 算。
 
     ⚠️ **`ref` 而非裸 `w`**（评审 F5）：`w = (1/f^ref)/Σ(1/f^ref)` 只在**同一 (inst, cfg)**
     内有意义（实测 mk01 的 M_ref：n_agv=1/3/5 → 109.95/103.42/97.24；车速 0.5/1.0 →
@@ -384,6 +436,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     **逐决策**口径（`ratio` = 决策级比值的均值，`clipped_frac` = 出界决策占比）。`grad_norm` =
     **末轮**裁剪前的 `‖∂L/∂θ‖`——它非零即"这一轮确有梯度信号"（旧实现 `epochs≥2` 时恒为 0）。
     """
+    _check_adv_mode(adv_mode)                   # O1：白名单先于一切（写错名不得先跑几分钟仿真）
     if layout.layout_seed != 0:
         raise ValueError(
             f"layout_seed={layout.layout_seed} ≠ 0：奖励权重（ReferenceObjectives.of 固定 "
@@ -418,6 +471,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
 
     chains: list[list[Decision]] = []
     rewards: list[float] = []
+    f_objs: list[tuple[float, float, float]] = []
     # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
     #    （消费次序确定 ⇒ 逐位可复现），不再落到全局 torch RNG。
     gen = torch.Generator().manual_seed(seed)
@@ -425,9 +479,12 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
                               sample=True, generator=gen, constraints=cons)
         chains.append(dec)
-        rewards.append(scalar_reward(objective_vector(met), w))
+        f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
+        f_objs.append(f)
+        rewards.append(scalar_reward(f, w))     # 奖励读数（诊断用；与历史同一运算次序）
 
-    A = torch.tensor(_z(np.asarray(rewards, dtype=np.float64)), dtype=torch.float32)
+    # O1：两种优势口径的唯一分叉点（见 `_advantages`）。scalar 分支与历史表达式逐位相同。
+    A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode)
 
     # 裁剪路径的信任域基准 = 采样那一刻 logp 的**逐决策**回放（`Decision.logp`，无梯度）——
     # 不重算，且与 `decisions_logp` 同序同 dtype（见 `sampled_decisions_logp`），故首轮

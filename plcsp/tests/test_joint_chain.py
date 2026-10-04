@@ -10,8 +10,9 @@ import torch
 import pytest
 
 import plcsp.algo.group_rel as group_rel
-from plcsp.algo.group_rel import (chain_logp, decisions_logp, joint_chain_step,
-                                  roll_chain, sampled_decisions_logp, sampled_logp)
+from plcsp.algo.group_rel import (_advantages, chain_logp, decisions_logp,
+                                  joint_chain_step, roll_chain,
+                                  sampled_decisions_logp, sampled_logp)
 from plcsp.algo.policy import PolicyNet
 from plcsp.algo.setup import build_layout_and_dm, build_setup
 from plcsp.env.constraints import ABLATION_GROUPS, ConstraintConfig
@@ -445,3 +446,165 @@ def test_two_loss_paths_agree_when_chains_are_equal_length():
 
     flat = torch.arange(6, dtype=torch.float32)          # 三条等长链
     assert torch.allclose(_chain_mean(flat, [2, 2, 2]), flat.mean())
+
+
+# ================= O1：逐目标优势（adv_mode="per_objective"） =================
+# 背景：`scalar` 把三目标**先加权求和再组内 z 化**。z 只消掉**总尺度**，不消掉**目标之间的
+# 相对尺度**——哪个目标的奖励方差大，A 就由它主导，w 名义上控制权衡、实际控制不了。
+# `per_objective` 改成**每个目标各自组内 z 化、再按 w 合成**：z_i 对逐目标正缩放不变，
+# w 才能真正决定"各目标的相对权重"。
+
+# MK01 口径权重（任务书给出；默认 cfg 实测 ≈(0.066, 0.886, 0.048)，能量项权重最大），
+# 用于判据贴近真实口径。
+MK01_W = (0.066, 0.880, 0.055)
+
+
+@pytest.mark.unit
+def test_adv_mode_rejects_unknown_value():
+    """`adv_mode` 只认两个值——未知值必须**显式报错**（不得静默落到 scalar 或新口径）。
+
+    静默回退是本项目反复出现的失效形态（F1/F2/F5 同型）：名字写错时跑出来的曲线会被当成
+    "新机制没效果"，而实际上机制根本没接上。守卫必须在**跑链之前**（写错名的代价不该是
+    几分钟的仿真墙钟）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    with pytest.raises(ValueError, match="adv_mode"):
+        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
+                         ref=_ref(inst, cfg), adv_mode="per-objective")
+
+
+@pytest.mark.unit
+def test_scalar_adv_mode_is_bitwise_unchanged():
+    """⚠️ O1 硬要求 1：`adv_mode="scalar"` 必须与改造前**逐位相同**。
+
+    仓里所有已记录的读数（消融表、训练曲线）都建立在今天的 scalar 口径上——重构不得悄悄
+    改动它。判据 = **捕获参照**（改造前用固定初始化在本机捕获）：
+    `torch.manual_seed(1234)` → MK01 上跑一步（G=2, seed=0）→ 最终 `state_dict` 的 sha256 =
+        `2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a`
+    （同 seed 同起点下**跨进程逐位可复现**，见 `test_joint_step_bitwise_reproducible_given_seed`。）
+    任一个比特被改动都会让摘要变化——这比"两次调用互相相等"强，后者对两种实现都恒真。
+    """
+    torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, dm, ctx = build_setup(inst, cfg)
+    ref = ReferenceObjectives.of(inst, cfg)
+    torch.manual_seed(1234)                     # 与捕获脚本逐字对齐（ref 之前/之后各锚一次）
+    pol = PolicyNet(enc=LayoutEncoder())
+    joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
+    h = hashlib.sha256()
+    for k, v in sorted(pol.state_dict().items()):
+        h.update(k.encode("utf-8"))
+        h.update(v.detach().numpy().tobytes())
+    assert h.hexdigest() == "2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a", \
+        "scalar 路径的输出与改造前不再逐位相同——既有读数不可比"
+
+
+@pytest.mark.unit
+def test_per_objective_advantage_is_invariant_to_objective_unit_rescaling():
+    """⚠️ O1 的**头号性质**（机制存在的理由）：per_objective 对**逐目标单位缩放不变**，
+    scalar 不是。
+
+    `_z` 对正缩放不变（`_z(c·v) = _z(v)`），而"先加权求和、再 z 化"把这个不变性毁掉：
+    某目标的量纲一变，它在加权和里的方差占比就变，A 跟着变 ⟹ w 名义上控制权衡、实际被
+    目标的物理单位控制。把 energy 全部 ×10（等价于换单位：J → 0.1J），per_objective 的优势
+    必须**不变**，scalar 必须**变**——这正是"w 真的在控制权衡"的判据。
+    """
+    w = MK01_W
+    f = np.array([[100.0, 50.0, 10.0],
+                  [110.0, 45.0, 20.0],
+                  [95.0, 60.0, 5.0],
+                  [105.0, 55.0, 15.0]], dtype=np.float64)
+    f10 = f.copy()
+    f10[:, 1] *= 10.0                          # energy 换单位（其余目标原样）
+    a_po, a_po10 = _advantages(f, w, "per_objective"), _advantages(f10, w, "per_objective")
+    a_sc, a_sc10 = _advantages(f, w, "scalar"), _advantages(f10, w, "scalar")
+    assert torch.allclose(a_po, a_po10, atol=1e-6), \
+        "per_objective 未做到逐目标尺度不变——机制没生效"
+    assert not torch.allclose(a_sc, a_sc10, atol=1e-6), \
+        "scalar 竟然对 energy 单位缩放不敏感——对照组失效，本判据失去意义"
+    assert not torch.allclose(a_po, a_sc, atol=1e-6), \
+        "两种口径给出相同优势——adv_mode 没有接线"
+
+
+@pytest.mark.unit
+def test_per_objective_advantage_still_responds_to_weights():
+    """⚠️ O1 硬要求 3：per_objective 下 `w` 必须仍然**起作用**（否则机制是惰性的）。
+
+    这是上一条的对照：尺度不变性只允许来自 z，不允许把 w 一起抹掉。z_i 各自独立于 w，
+    只有合成那一步乘 w——故换 w 必然改变 A。
+    """
+    f = np.array([[100.0, 50.0, 10.0],
+                  [110.0, 45.0, 20.0],
+                  [95.0, 60.0, 5.0],
+                  [105.0, 55.0, 15.0]], dtype=np.float64)
+    a = _advantages(f, MK01_W, "per_objective")
+    b = _advantages(f, (0.8, 0.1, 0.1), "per_objective")   # 权重挪到 makespan
+    assert not torch.allclose(a, b, atol=1e-6), \
+        "改 w 而优势不变——w 在 per_objective 下失效（机制惰性）"
+
+
+@pytest.mark.unit
+def test_per_objective_step_returns_finite_diagnostics():
+    """O1 硬要求 4：per_objective 下 A 有限，既有诊断（A_std / r_mean / r_std…）照常可用。"""
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    r, diag = joint_chain_step(pol, inst, lay, dm, cfg, ctx, _ref(inst, cfg),
+                               seed=0, G=2, adv_mode="per_objective")
+    assert set(diag) >= {"loss", "ratio", "clipped_frac", "grad_norm",
+                         "r_mean", "r_std", "A_std"}
+    assert all(math.isfinite(float(v)) for v in diag.values()), f"诊断出现非有限值：{diag}"
+    assert r == pytest.approx(diag["r_mean"]), "返回值与 r_mean 诊断不一致"
+    assert diag["A_std"] > 0.0, "组内优势全同——判据失去意义"
+    assert diag["grad_norm"] > 0.0, "梯度范数为 0——诊断退化"
+
+
+@pytest.mark.unit
+def test_per_objective_step_is_invariant_to_energy_unit_rescaling(monkeypatch):
+    """端到端版的头号性质：**整步参数更新**对 energy 单位缩放不变（per_objective）/ 会变（scalar）。
+
+    直接测 `_advantages` 只盖住算子本身；这条钉住 `joint_chain_step` **真的把逐目标值喂进了
+    新口径**——若 adv_mode 接错线（例如仍走加权和），两种口径的更新会**逐位相同**，立刻变红。
+
+    构造：真实链当载体（logp/梯度有意义），奖励字典用**手写指标**——G=4 且各目标图案
+    互不共线。⚠️ 不能用 G=2：两点组内 z 恒为 ±1，**任何**口径都对尺度不敏感，对照会失效
+    （本测试初版正是踩了这个坑）。`joint_chain_step` 用完会 `clear()` 决策表，故打桩必须
+    返回副本，否则第二次调用看到空链。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    ref = _ref(inst, cfg)
+    dec_a, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
+    dec_b, _ = roll_chain(inst, lay, dm, cfg, pol, seed=1, ctx=ctx)
+    # 各目标图案互不共线（mk/en/twt 的组内 z 分别为 [.45,-1.34,1.34,-.45] 等三个不同方向），
+    # 于是"先加权求和"与"逐目标 z 化"必然给出不同 A；energy ×10 时前者的 A 变化、后者不变。
+    craft = [{"makespan": 100.0, "energy": 50.0, "tardy_twt": 10.0},
+             {"makespan": 110.0, "energy": 45.0, "tardy_twt": 20.0},
+             {"makespan": 95.0, "energy": 60.0, "tardy_twt": 5.0},
+             {"makespan": 105.0, "energy": 55.0, "tardy_twt": 15.0}]
+    state = {"g": 0, "scale": 1.0}
+
+    def _fake_roll(*_a, **_k):
+        g, state["g"] = state["g"], state["g"] + 1
+        dec = dec_a if g % 2 == 0 else dec_b
+        met = dict(craft[g])
+        met["energy"] *= state["scale"]
+        return list(dec), met
+
+    monkeypatch.setattr(group_rel, "roll_chain", _fake_roll)
+
+    def _run(mode: str, scale: float) -> dict:
+        state["g"], state["scale"] = 0, scale
+        p = copy.deepcopy(pol)
+        joint_chain_step(p, inst, lay, dm, cfg, ctx, ref, seed=0, G=4, lr=1e-3, adv_mode=mode)
+        return p.state_dict()
+
+    def _max_diff(a: dict, b: dict) -> float:
+        return max(float((a[k] - b[k]).abs().max()) for k in a)
+
+    po1, po10 = _run("per_objective", 1.0), _run("per_objective", 10.0)
+    sc1, sc10 = _run("scalar", 1.0), _run("scalar", 10.0)
+    d_po, d_sc, d_modes = _max_diff(po1, po10), _max_diff(sc1, sc10), _max_diff(po1, sc1)
+    assert d_modes > 1e-4, \
+        f"两种口径的整步更新相同（最大参数差 {d_modes}）——adv_mode 没有接线"
+    assert d_sc > 1e-5, \
+        f"scalar 的整步更新对 energy 单位不敏感（最大参数差 {d_sc}）——对照组失效"
+    assert d_po < 1e-6, f"per_objective 的整步更新随 energy 单位变化（最大参数差 {d_po}）"
