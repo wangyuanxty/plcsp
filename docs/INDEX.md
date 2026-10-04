@@ -49,7 +49,8 @@
 
 ## 5. 待办与阻塞
 
-> ⭐ **续接点（compact 后从这读）：`progress-log.md` §35**
+> ⭐ **续接点（compact 后从这读）：`progress-log.md` §35**（§35.5 的"下一步"已被 §36 取代）
+> ⭐ **训练时间：三段成本实测 + CUDA 图（最新）：`progress-log.md` §36**
 
 
 > ✅ **2026-10-04：Plan A 恢复推进**（本仓即 Plan A）。
