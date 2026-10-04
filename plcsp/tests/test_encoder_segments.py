@@ -5,7 +5,7 @@ import torch
 import pytest
 
 from plcsp.nn.encoder import LayoutEncoder
-from plcsp.nn.features import F_B, F_G, F_M, F_MAX, F_V
+from plcsp.nn.features import F_B, F_G, F_M, F_V
 
 
 def _tok(n_m=6, n_b=10, n_v=3, fill=1.0):
@@ -27,12 +27,28 @@ def test_forward_shapes():
 
 
 @pytest.mark.unit
-def test_single_linear_projection_not_per_segment():
-    """输入是**单张**张量、**单个** Linear（spec §5.3.1 的统一宽度方案）。"""
+def test_per_segment_projection():
+    """每段一个**自己的** Linear（2026-10-04 改；**推翻 P2 的"单个 Linear"决定**）。
+
+    P2 的旧方案是「一个共享 `Linear(10→d)` + 类型嵌入」，卖点是"统一宽度"。三条代价：
+    ① 补零列被白乘——G 段只有 3/10 列有效，却过 10 列的权重；
+    ② 同一列在不同段语义不同（第 0 列在 M 段是 `backlog`、在 V 段是 `st_idle`），
+       共享权重被迫用一组系数解释两个意思；
+    ③ "因为列语义重叠所以类型嵌入必需"这条理由绕。
+    改成每段自己的投影后，每段只吃自己那几列，三条都消失。
+    **类型偏置保留**——四段仍投到同一个 d 维空间，注意力需要一个显式的类型抓手。
+
+    ⚠️ **A/B 实测（MK01、30 步 × G=4、3 种子）：测不出性能差别。**
+    argmax Cmax 88.8（分段）vs 93.0（共享），|Δ|=4.2 < 2σ/√n=7.3，**不 binding**；
+    且 r 与 Cmax 两个指标方向相反。故这是**工程整洁，不是性能改进**——
+    **论文里不作为贡献**，只当实现细节。记录见 `progress-log` §二十四。
+    """
     enc = LayoutEncoder()
-    assert hasattr(enc, "embed") and isinstance(enc.embed, torch.nn.Linear)
-    assert enc.embed.in_features == F_MAX
-    assert not hasattr(enc, "proj"), "仍存在分段投影——与统一宽度方案不符"
+    assert hasattr(enc, "proj"), "分段投影不存在——回退成单个 Linear 了"
+    dims = tuple(int(p.in_features) for p in enc.proj)
+    assert dims == (F_M, F_B, F_V, F_G), f"各段投影的输入宽度不对：{dims}"
+    assert all(p.out_features == enc.d_model for p in enc.proj), "各段投影的输出宽度必须相同"
+    assert not hasattr(enc, "embed"), "仍存在共享投影——与分段方案不符"
 
 
 @pytest.mark.unit

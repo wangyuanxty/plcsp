@@ -3,10 +3,15 @@
 序列 = [M...M (机台) | B...B (作业) | V...V (车辆) | G (全局)]，四段行数 (n_m, n_jobs, n_agv, 1)。
 输入是**单张** `(N, F_MAX)` 张量（列定义见 `features.py`：各段补零到 `F_MAX=10`）：
 
-- **单个 `Linear(F_MAX → d_model)`**：四段共用同一套权重列（参数 1280，而非分段投影的 3584）；
+- **每段一个自己的 `Linear`**（`proj`，2026-10-04 改）：M/B/V/G 各自投到 `d_model`，
+  每段只吃自己那几列（7/8/10/3）。**推翻 P2 的"单个共享 Linear"决定**——旧方案白乘补零列
+  （G 段只有 3/10 列有效），且同一列在不同段语义不同（第 0 列在 M 段是 `backlog`、
+  在 V 段是 `st_idle`），共享权重被迫用一组系数解释两个意思。
+  ⚠️ **A/B 实测测不出性能差别**（见 `test_per_segment_projection` 的 docstring）——
+  这是**工程整洁**，**论文里不作为贡献**。
 - **类型嵌入 `type_emb (4, d_model)`**：由 `seg` 给每个 token 定类型 id（0=M/1=B/2=V/3=G）。
-  ⚠️ 统一宽度方案下**必需**（spec §5.3.1）：四段列语义重叠（第 3 列在 M 段是"在加工"、
-  在 B 段是"已完成"），只有类型嵌入能把它们解耦开。**去掉类型嵌入，本方案即失效。**
+  ⚠️ **仍然必需**：四段投到**同一个 d 维空间**，注意力算 q·k 相似度时，
+  没有任何东西保证不同类型的 token 落在可区分的位置。类型嵌入是那个显式抓手。
 - **全连接注意力**（spec §5.1）：原双轴块稀疏掩码（`block_mask` / `DualAxisLayer`）整体删除。
 - **补零列必须恒为 0**（spec §5.3.1）：`SEG_SLICE` 之外的列一旦非零即抛 `ValueError`——**不静默清零**。
   单 Linear 会照吃 `W[:, 7:]` 这类补零列权重，上游列偏移写错必须当场炸出来（快速失败纪律）。
@@ -23,9 +28,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .features import F_MAX, SEG_SLICE
+from .features import F_B, F_G, F_M, F_MAX, F_V, SEG_SLICE
 
 _SEG_KEYS = ("M", "B", "V", "G")          # 与 seg 元组的段序一一对应（不可改动）
+_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 各段实际列数（= `SEG_SLICE` 的宽度）
 
 
 class AttnLayer(nn.Module):
@@ -68,9 +74,10 @@ class LayoutEncoder(nn.Module):
         super().__init__()
         self.d_model, self.n_heads, self.n_layers = d_model, n_heads, n_layers
         self.feat_dim = feat_dim
-        self.embed = nn.Linear(feat_dim, d_model)          # **单个** Linear（统一宽度）
-        # 类型嵌入**必需**（spec §5.3.1）：解耦四段重叠的列语义。小随机初值（BERT 式 0.02）——
-        # 若零初值，特征全同的 token 会退化成完全相同的嵌入，网络分不出类型。
+        # **分段投影**：每段一个 Linear，只吃自己那几列（见模块 docstring）。
+        self.proj = nn.ModuleList([nn.Linear(dim, d_model) for dim in _SEG_DIMS])
+        # 类型嵌入**必需**：四段投到同一个 d 维空间，注意力需要显式类型抓手。小随机初值
+        # （BERT 式 0.02）——若零初值，特征全同的 token 会退化成完全相同的嵌入。
         self.type_emb = nn.Parameter(torch.randn(self.N_SEG_TYPES, d_model) * 0.02)
         self.layers = nn.ModuleList([AttnLayer(d_model, n_heads) for _ in range(n_layers)])
         self.ln = nn.LayerNorm(d_model)
@@ -89,7 +96,13 @@ class LayoutEncoder(nn.Module):
         tid = torch.cat([torch.full((n,), i, dtype=torch.long)
                          for i, n in enumerate(seg)])          # 每个 token 的类型 id
         self._require_zero_padding(tok_feat, seg)
-        x = (self.embed(tok_feat[0]) + self.type_emb[tid]).unsqueeze(0)
+        # 分段投影：各段只取自己那几列，拼回 (N, d) 后再进注意力。
+        parts, r = [], 0
+        for i, n in enumerate(seg):
+            if n:
+                parts.append(self.proj[i](tok_feat[0, r:r + n, :_SEG_DIMS[i]]))
+            r += n
+        x = (torch.cat(parts, dim=0) + self.type_emb[tid]).unsqueeze(0)
         for layer in self.layers:
             x = layer(x)
         x = self.ln(x)
@@ -99,9 +112,10 @@ class LayoutEncoder(nn.Module):
                               seg: tuple[int, int, int, int]) -> None:
         """补零列（`SEG_SLICE` 之外）必须恒为 0，否则抛 `ValueError`——**不静默清零**。
 
-        ⚠️ 单 Linear 会照吃 `W[:, 7:]` 这类补零列权重：上游一旦把数据写进补零列，嵌入就会
-        带上一个本该**不存在**的分量。静默清零会把这种列偏移写错吞成看不见的 bug，故此处
-        快速失败。补零列本应恒 0，见 spec §5.3.1。
+        ⚠️ 分段投影**只取各段自己的列**（`tok_feat[..., :_SEG_DIMS[i]]`），补零列不参与计算——
+        故此处不再有"补零列被白乘"的风险。但守卫**照旧保留**：上游列偏移写错（把某个特征
+        写到别的段的位置上）会让**有效列**错位，静默通过就变成看不见的 bug，故仍然快速失败。
+        补零列本应恒 0，见 spec §5.3.1。
         """
         r = 0
         for key, n in zip(_SEG_KEYS, seg):

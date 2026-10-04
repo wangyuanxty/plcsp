@@ -56,8 +56,9 @@ def test_l_head_gradient_reaches_encoder():
     out = pol.agv_logits_emb(tok, torch.zeros(1, 1, F_TASK), _cand_feat(len(idx)),
                              torch.tensor(idx)).sum()
     out.backward()
-    g = pol.enc.embed.weight.grad            # 编码器输入投影
-    assert g is not None and g.abs().sum() > 0, "L 头梯度没到编码器"
+    # ⚠️ 2026-10-04 分段投影：L 头读 V 段 token ⟹ 梯度落在 `proj[2]`（不是共享的 `embed`）。
+    g = pol.enc.proj[2].weight.grad
+    assert g is not None and g.abs().sum() > 0, "L 头梯度没到编码器（V 段投影）"
 
 
 @pytest.mark.unit

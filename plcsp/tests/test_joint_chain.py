@@ -161,9 +161,12 @@ def test_gradient_flows_to_both_heads_and_encoder():
     inst, lay, dm, cfg, ctx, pol = _setup()
     decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
     chain_logp(decisions, pol).backward()
+    # ⚠️ 2026-10-04 编码器改**分段投影**：S 头读 M 段 token、L 头读 V 段 token，
+    # 故梯度应分别落到 `proj[0]`（M）与 `proj[2]`（V）——见 `encoder.py` 模块 docstring。
     for name, p in (("s_head_tok", pol.s_head_tok[0].weight),
                     ("l_head_tok", pol.l_head_tok[0].weight),
-                    ("enc.embed", pol.enc.embed.weight),
+                    ("enc.proj[M]", pol.enc.proj[0].weight),
+                    ("enc.proj[V]", pol.enc.proj[2].weight),
                     ("enc.type_emb", pol.enc.type_emb)):
         assert p.grad is not None and p.grad.abs().sum() > 0, f"{name} 无梯度"
 
@@ -180,8 +183,13 @@ def test_l_decisions_alone_send_gradient_to_encoder():
     l_only = [d for d in decisions if d.kind == "L"]
     assert len(l_only) >= 20, f"L 决策太少（{len(l_only)}）——断言失去意义"
     chain_logp(l_only, pol).backward()
+    # ⚠️ 分段投影下，这里的判据与旧版**相同**（不是更严）。
+    #    曾想加一条反向判据"M 段投影不该有梯度"，**实测证伪**：注意力是全连接的
+    #    （spec §5.1 删掉了轴掩码），V 段 token 经 8 层注意力后混合了全部段 ⟹
+    #    L 头的梯度会回传到**每一段**的投影。分段投影改变的是"各段用了哪些列"，
+    #    **不是梯度的可达性**。故此处只断言 V 段投影非零（这才是 L 路径的入口）。
     for name, p in (("l_head_tok", pol.l_head_tok[0].weight),
-                    ("enc.embed", pol.enc.embed.weight),
+                    ("enc.proj[V]", pol.enc.proj[2].weight),
                     ("enc.type_emb", pol.enc.type_emb)):
         assert p.grad is not None and p.grad.abs().sum() > 0, f"{name} 无梯度（仅 L 决策反传）"
 
