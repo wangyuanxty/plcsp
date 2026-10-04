@@ -80,6 +80,13 @@ class SimConfig:
     max_agv_capacity: int = 3     # ⑩ 车队载量上限 [件]（1 = 退化为单载）
     agv_mtbf: float = 480.0       # ⑨ AGV 平均无故障时间 [min]（8 h）
     agv_mttr: float = 10.0        # ⑨ AGV 平均修复时间 [min]
+    # ⑨ **故障 failover 开关**（2026-10-05）：`True` = 停机期间把该车**手上/队列里**的任务
+    # 退回队列（bound 档转交未停机的其它车，FIFO 档放回共享队列）——任务不再"车趴多久卡多久"。
+    # ⚠️ **这是改动力学**：打开后 makespan / travel / requeue 都会变，是 ⑨ 的代价口径从
+    # "仅停机时间"改为"停机 + 重新派车 + 队列重排"的**定义性后果**（此前是低估口径）。
+    # ⚠️ 时点不变：故障仍只在**腿间**（不持任何区段锁）生效——持锁停机 = 死锁，绝不做。
+    # 默认 False ⟹ 与今日逐位相同（既有读数靠它）。
+    agv_failover: bool = False
     battery_low: float = 0.20     # ⑪ 低电阈值（占容量比）
     battery_high: float = 0.80    # ⑪ 充电目标（占容量比）
     charge_kw: float = 3.0        # ⑪ 充电功率 [kW]
@@ -549,7 +556,7 @@ class AgvSim:
                  stats: dict,
                  tasks_in, machines: list, graph, zm, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 route=None, charge=None):
+                 route=None, charge=None, fleet: list | None = None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -580,6 +587,12 @@ class AgvSim:
         self.down = False
         self.up = simpy.Event(env)
         self.up.succeed()                   # 初始可用
+        # ⑨ failover（`SimConfig.agv_failover`，默认关）：停机期间把手上/队列里的任务退回。
+        # `fleet` = 本世界的**同一份**车队列表（`_build_entities` 边建边填；run 之前一定填满）
+        # ——转交前要查目标车是否停机（转给停机车会在两辆停机车之间乒乓）。
+        self.failover = bool(cfg.agv_failover)
+        self.fleet: list = fleet if fleet is not None else []
+        self._rr = 0                        # 转交轮转指针（本车实例级、确定性）
 
     def _seg_min(self, u: int, v: int) -> float:
         """节点 u→v 的**几何**行驶时长 [min]（格点最短路 ÷ 有效车速 ÷ 60）。
@@ -625,8 +638,13 @@ class AgvSim:
     def _failures(self):
         """⑨ AGV 故障：按泊松流停机 `agv_mttr`，期间不接活。
 
-        **腿间检出**：故障不打断正在进行的行驶（在途任务滞留在车上），
-        在下一段行驶开始前生效。这是简化，但 MTBF(480 min) 远大于单段行驶时长，误差可忽略。
+        **腿间检出**：故障不打断正在进行的行驶，在下一段行驶开始前的**腿间**生效。
+        这是简化，但 MTBF(480 min) 远大于单段行驶时长，误差可忽略。
+
+        ⚠️ **`SimConfig.agv_failover=True`** 时语义加强：车在腿间停机期间，**手上与队列里的
+        任务退回/转交别的车**（`_handoff_queued` / `_requeue_hand`），不再"车趴多久卡多久"。
+        时点**不变**——仍只在腿间、且车不持任何区段锁（持锁停机 = 同区段的车永久等待 = 死锁）。
+        默认关时本函数**逐字**是今日行为（只设 down/up）。
         """
         while True:
             yield self.env.timeout(self.rng.exponential(self.cfg.agv_mtbf))
@@ -643,6 +661,82 @@ class AgvSim:
         """⑨ 若当前停机，等到修复。"""
         while self.down:
             yield self.up
+
+    def _up_targets(self) -> list[int]:
+        """可接管的**其它车**（未停机），从本车 +1 起轮转——确定性顺序。
+
+        ⚠️ 只收未停机的车：转给停机车会在两辆停机车之间乒乓（任务原地打转、计数虚增，
+        且双方都在等 `up` 事件，谁也不会先跑）。
+        """
+        n = len(self.fleet) or self.cfg.n_agv
+        out = []
+        for k in range(1, n):
+            j = (self.aid + k) % n
+            if j < len(self.fleet) and not self.fleet[j].down:
+                out.append(j)
+        return out
+
+    def _handoff_queued(self):
+        """⑨ failover **检查点 1**（循环顶、腿间、不持锁）：把本车队列里的任务转交别的车。
+
+        只在 `bound`（每车一 Store）且存在未停机的其它车时动作；FIFO 档的共享队列本来就
+        人人可取（无需动作），其它车全停机时也不动（留在本车队列，等任一车恢复后再转交）。
+        """
+        if not self.failover or not self.bound or not self.down:
+            return
+        targets = self._up_targets()
+        if not targets:
+            return
+        q = self.tasks_in[self.aid]
+        while q.items:
+            item = yield q.get()
+            j = targets[self._rr % len(targets)]
+            self._rr += 1
+            yield self.tasks_in[j].put(item)
+            self.track.job_agv[item[2][0]] = j            # 快照：改指新持有者
+            self.stats["agv_failover_tasks"] = self.stats.get("agv_failover_tasks", 0) + 1
+
+    def _requeue_hand(self, items):
+        """⑨ failover **检查点 2/3**（腿间、不持锁）：把本车**手上**的任务退回/转交。
+
+        `bound`：转交未停机的其它车；其它车全停机 ⟹ 放回**本车队列**（车不再手拿任务，
+        恢复后可跑）。FIFO：放回**共享队列队尾**（会改变 FIFO 相对顺序，如实记明）。
+        记账：`agv_failover_tasks` + `track.job_agv`（新持有者 / −1）。
+        """
+        if not self.failover or not items:
+            return
+        if not self.bound:
+            for item in items:
+                yield self.tasks_in.put(item)
+                self.track.job_agv[item[2][0]] = -1
+                self.stats["agv_failover_tasks"] = self.stats.get("agv_failover_tasks", 0) + 1
+            return
+        targets = self._up_targets()
+        own = self.tasks_in[self.aid]
+        for item in items:
+            if targets:
+                j = targets[self._rr % len(targets)]
+                self._rr += 1
+                yield self.tasks_in[j].put(item)
+                self.track.job_agv[item[2][0]] = j
+            else:
+                yield own.put(item)
+                self.track.job_agv[item[2][0]] = self.aid
+            self.stats["agv_failover_tasks"] = self.stats.get("agv_failover_tasks", 0) + 1
+
+    def _wait_up_or_failover(self):
+        """⑨ 腿间停机等待。`failover` 关 ⟹ **逐字**等于 `_wait_up`（默认档逐位不变）。
+
+        `failover` 开：停机期间反复尝试转交本车队列里的任务（检查点 1）。轮询间隔 =
+        `zone_hold`（确定性；停机是有界事件，轮询代价可忽略）。**只等待、不行驶**——
+        车不持任何区段锁，故不会死锁。
+        """
+        if not self.failover:
+            yield from self._wait_up()
+            return
+        while self.down:
+            yield from self._handoff_queued()
+            yield self.up | self.env.timeout(self.cfg.zone_hold)
 
     def _depleted(self) -> bool:
         """⑪ **电量耗尽**（模型修复的判据）：`battery <= 0` ⟹ 该车**不可用**，不接新任务。
@@ -815,7 +909,7 @@ class AgvSim:
         if self.con.agv_failure:
             self.env.process(self._failures())       # ⑨ 关掉时不启进程 → 不抽随机数
         while True:
-            yield from self._wait_up()               # ⑨ 停机中不接活
+            yield from self._wait_up_or_failover()   # ⑨ 停机中不接活（failover 档含转交）
             # ⚠️ ⑪ **耗尽门（模型修复）**：`battery <= 0` ⟹ 该车不可用，**不接新任务**，
             # 直到充到 `battery_high × cap` 才恢复（`_recover_from_depletion`）。
             # 判定在**任务边界**：此刻车空闲待命、不在行驶中、**不持任何区段锁**（`_drive`
@@ -825,12 +919,17 @@ class AgvSim:
                 self.stats["agv_dry_events"] = self.stats.get("agv_dry_events", 0) + 1
                 yield from self._recover_from_depletion()
             yield from self._maybe_charge()          # ⑪ 待命补电（规则 / C 决策）
-            yield from self._wait_up()
+            yield from self._wait_up_or_failover()
             t0 = self.env.now
             frm, to, item, path = yield q.get()
             if self.con.charging:                    # ⑪ 待命也耗电（三态口径）
                 self._drain_idle(self.env.now - t0, AGV_IDLE_KW)
             self.stats["tasks_get"] += 1
+            if self.failover and self.down:
+                # ⑨ failover **检查点 2**（腿间、不持锁）：等任务期间趴窝 ⟹ 刚取到的任务
+                # 不留在车上（今日行为是"带着货跑完整趟"，不真实）。
+                yield from self._requeue_hand([(frm, to, item, path)])
+                continue
             a = self.machines[frm].pad.dock_node
             b = self.machines[to].pad.dock_node
             # ── 空载段：当前停位 → 取货点 ──
@@ -852,6 +951,12 @@ class AgvSim:
             # ── 负载段：取货点 → 卸货点（整批一趟）──
             # 快照跟踪（P2 Task 1）：取货后负载行驶，本趟在运件数 = 批次大小（F5：in_flight 的"车上"部分）
             self.track.set_load(self.aid, len(batch))
+            if self.failover and self.down:
+                # ⑨ failover **检查点 3**（腿间、不持锁）：空载段期间趴窝 ⟹ 整批退回，
+                # 不带货趴窝（今日行为是照跑负载段）。
+                self.track.set_load(self.aid, 0)
+                yield from self._requeue_hand(batch)
+                continue
             ok, self.pos_node = yield from self._drive(a, b, "loaded")
             if not ok:
                 # 快照跟踪（P2 Task 1）：退回队列 = **当场**卸空——车要带着"空车"的状态在
@@ -947,7 +1052,7 @@ class SimWorld:
         ⚠️ `charger_res` 存成活引用（`self.charger_res`）：`snapshot()` 要按它报**当时**的桩占用
         （C 头的候选特征原料）——不存的话快照只能看到空表，占用维恒 0（静默死维）。
         """
-        fleet = self._fleet()
+        specs = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
         zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
         events_q = simpy.Store(env)
@@ -961,12 +1066,15 @@ class SimWorld:
             tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]   # L 层绑定：每车一队列
         else:
             tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
-        agvs = [AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in, entities,
-                       self.g, zm, self.constraints, fleet[a],
-                       np.random.default_rng([seed_chain, 1000 + a]),      # ⑨ 每车独立流
-                       track, chargers=self.layout.chargers, charger_res=charger_res,
-                       bound=bound, route=route, charge=charge)
-                for a in range(self.cfg.n_agv)]
+        # ⚠️ 车队列表**边建边填**（每个 AgvSim 拿同一份列表的引用）：⑨ failover 转交前要查
+        #    目标车是否停机。`run()` 在所有车建好之后才启动，故运行时列表一定是满的。
+        agvs: list[AgvSim] = []
+        for a in range(self.cfg.n_agv):
+            agvs.append(AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in,
+                               entities, self.g, zm, self.constraints, specs[a],
+                               np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
+                               track, chargers=self.layout.chargers, charger_res=charger_res,
+                               bound=bound, route=route, charge=charge, fleet=agvs))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
@@ -1202,6 +1310,8 @@ class SimWorld:
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
                  # ⑪ 模型修复的读数：任务边界上发现本车耗尽的次数（"不可用"事件的计数）
                  "agv_dry_events": 0,
+                 # ⑨ failover 的记账：故障期间被退回/转交的任务件数（默认关 ⟹ 恒 0）
+                 "agv_failover_tasks": 0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
@@ -1259,6 +1369,8 @@ class SimWorld:
                 "trips": stats["trips"], "charge_events": stats["charge_events"],
                 "agv_fail_events": stats["agv_fail_events"],
                 "agv_dry_events": stats["agv_dry_events"],
+                # ⑨ failover：故障期间退回/转交的任务件数（默认关 ⟹ 恒 0）
+                "agv_failover_tasks": stats["agv_failover_tasks"],
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
@@ -1373,6 +1485,8 @@ class SimWorld:
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
                  # ⑪ 模型修复的读数：任务边界上发现本车耗尽的次数（"不可用"事件的计数）
                  "agv_dry_events": 0,
+                 # ⑨ failover 的记账：故障期间被退回/转交的任务件数（默认关 ⟹ 恒 0）
+                 "agv_failover_tasks": 0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
@@ -1429,6 +1543,8 @@ class SimWorld:
                 "trips": stats["trips"], "charge_events": stats["charge_events"],
                 "agv_fail_events": stats["agv_fail_events"],
                 "agv_dry_events": stats["agv_dry_events"],
+                # ⑨ failover：故障期间退回/转交的任务件数（默认关 ⟹ 恒 0）
+                "agv_failover_tasks": stats["agv_failover_tasks"],
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "fail_events": stats["fail_events"],
