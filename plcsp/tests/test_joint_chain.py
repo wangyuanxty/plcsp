@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 
 import numpy as np
 import torch
 import pytest
 
-from plcsp.algo.group_rel import chain_logp, joint_chain_step, roll_chain
+import plcsp.algo.group_rel as group_rel
+from plcsp.algo.group_rel import (chain_logp, decisions_logp, joint_chain_step,
+                                  roll_chain, sampled_decisions_logp, sampled_logp)
 from plcsp.algo.policy import PolicyNet
 from plcsp.algo.setup import build_layout_and_dm, build_setup
 from plcsp.env.constraints import ABLATION_GROUPS, ConstraintConfig
@@ -228,36 +231,107 @@ def test_clipped_path_ratio_uses_sampling_time_logp():
     """裁剪路径（**唯一**用 `old` 的分支）的 ratio 基准必须与采样那一刻同源。
 
     判据用 `lr=0`（不更新参数）把它变成**确定性**的：`new` 与 `old` 同参数 ⇒ `ratio ≡ 1`
-    （若 `old` 来自别处/别的时刻，这里立刻 ≠1）。顺带说明：`epochs=1` 的裁剪正是同一个
-    恒等式，故那条路是空转（由 `test_clip_epoch_combinations_are_guarded` 拒收）。
+    （若 `old` 来自别处/别的时刻，这里立刻 ≠1）。⚠️ 修复后裁剪是**逐决策**的（旧实现按整条
+    链裁剪——见 `test_clip_band_is_per_decision_not_per_chain`），`ratio ≡ 1` 因此还是
+    **逐决策张量的严格恒等**（`new_flat` 与 `old_flat` 逐位相同），不只是近似；故这里的
+    `ratio` 断言用**精确** 1.0，`clipped_frac` 读的是"出界的**决策**占比"（此处置 0）。
+    顺带说明：`epochs=1` 的裁剪正是同一个恒等式，故那条路是空转（由
+    `test_clip_epoch_combinations_are_guarded` 拒收）。
 
     ⚠️ 原 `test_ratio_is_one_for_unchanged_policy`（同策略两遍 `chain_logp` 比大小）已删：
     同策略 + 同决策 + 无 dropout ⇒ `b − a` **恒为 0**、`exp(0)` **恒为 1**，对任何实现缺陷
     都不能变红（评审 F3 的恒真判据）。本测试的 `lr=0` 判据才是该性质的**真守卫**。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
-    # ⚠️ 本配置必然触发 F1 的"多 epoch 饱和"警告（那正是为什么这里要配 lr=0）——显式收下它，
-    # 免得测试输出带噪；警告本身由 `test_multi_epoch_clip_warns_about_saturation` 负责钉。
-    with pytest.warns(UserWarning, match="链级"):
-        r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
-                                   ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
+    r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
+                               ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
     assert -1e9 < r < 0.0, "裁剪路径的组均值奖励不有限"
-    assert diag["ratio"] == pytest.approx(1.0, abs=1e-6), "old 与 new 不同源——省法算错了"
+    assert diag["ratio"] == 1.0, "old 与 new 不同源——逐决策恒等不成立（ratio 有假 delta）"
     assert diag["clipped_frac"] == 0.0, "参数没动却报出界——clipped_frac 口径错"
     assert diag["grad_norm"] > 0.0, "裁剪路径梯度范数为 0——诊断退化"
 
 
 @pytest.mark.unit
-def test_multi_epoch_clip_warns_about_saturation():
-    """⚠️ F1（评审裁定）：`epochs>1` 在链级尺度上是**静默烧算力**——链级 logp 是求和，一次更新
-    （默认 lr）就把每条链的 Δlogp 推过 `log(1+clip_eps)`，之后 `∂obj/∂new ≡ 0`，多出来的
-    epoch 一个参数都不会变。**不能硬禁**（lr 足够小则合法），故必须**警告**：消息要点明机理
-    与出路（调小 lr / 按链长放大 clip_eps）。这里用 `lr=1e-6` 演示"合法用法"仍会警告。
+def test_multi_epoch_clip_trust_region_is_live():
+    """⚠️ 训练方法缺陷修复的**头号判据**：`epochs>1` 的信任域必须真的在起作用。
+
+    症状（修复前实测，MK01、G=2、`epochs=2, clip_eps=0.2, lr=1e-3`）：裁剪施加在**链级**
+    ratio 上，而 `logp` 是整条链的求和（约定 2，链长 100–460）——一次 Adam 更新就把每条链的
+    Δlogp 推过 `log(1.2)`，于是**全部**链出界、`∂obj/∂new ≡ 0`：`clipped_frac=1.0`、
+    `grad_norm=0.0`，第 2 个 epoch 的损失面是平的（只剩 Adam 动量的余波），却照样付链前向
+    + 反向。裁剪下沉到**每个决策**后：单个决策的漂移约 0.002–0.05 nats，带内大多数决策仍在
+    带内 ⇒ `clipped_frac < 1.0`、`grad_norm > 0`（`grad_norm` 取的是**末轮**裁剪前的梯度
+    范数，故 `> 0` 直接说明第 2 个 epoch 的梯度信号非零）。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
-    with pytest.warns(UserWarning, match="链级"):
-        joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
-                         ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=1e-6)
+    r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
+                               ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=1e-3)
+    assert -1e9 < r < 0.0, "裁剪路径的组均值奖励不有限"
+    assert diag["clipped_frac"] < 1.0, (
+        f"全部决策都被裁掉（clipped_frac={diag['clipped_frac']}）——信任域仍按链级算，"
+        "第 2 个 epoch 的梯度恒 0")
+    assert diag["grad_norm"] > 0.0, "末轮梯度范数为 0——第 2 个 epoch 没有梯度信号"
+
+
+@pytest.mark.unit
+def test_per_decision_logp_vector_is_bitwise_same_source():
+    """⚠️ 逐决策裁剪的**逐位**前提（`lr=0` 时 ratio≡1 靠它才是严格等式、不是近似）：
+
+    1. `decisions_logp`（带梯度重算）与 `sampled_decisions_logp`（采样回放）**逐位相同**
+       ——元素级 `torch.equal`（不是 approx）：两者同序、同 dtype（float32），中间不换精度；
+    2. `chain_logp` 仍是**逐步 float32 顺序求和**（与 `sampled_logp` 逐位相同）——求和口径
+       只定义**链级** logp，不能图省事改成向量 `.sum()`（归约次序一变，末位差 ~1e-5 就会
+       把首轮 ratio 从"严格 1"变成"近似 1"，在裁剪边界上给出无意义的翻转）。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
+    new_vec = decisions_logp(decisions, pol)
+    old_vec = sampled_decisions_logp(decisions)
+    assert new_vec.shape == (len(decisions),), f"逐决策向量形状 {tuple(new_vec.shape)} 不对"
+    assert torch.equal(new_vec.detach(), old_vec), \
+        "逐决策重算与采样回放不同位——分决策裁剪的 ratio≡1 不再是严格等式"
+    assert float(chain_logp(decisions, pol).detach()) == float(sampled_logp(decisions)), \
+        "chain_logp 的累加口径变了（必须保持 float32 顺序累加、与采样回放逐位相同）"
+
+
+@pytest.mark.unit
+def test_clip_band_is_per_decision_not_per_chain(monkeypatch):
+    """⚠️ `clip_eps` 的**粒度**判据：带是加在**每个决策**的 ratio 上，不是整条链的。
+
+    构造一条**合成链**（复用真实链的决策，但不跑仿真：`roll_chain` 被打桩）：逐个决策把
+    存下的 logp 改成 `重算值 − δ`（δ=0.15 nats）。于是同一份数据上
+    - 每个决策的 ratio = e^δ ≈ 1.162 ∈ [0.8, 1.2]（**带内**）；
+    - 链级 Δlogp = n·δ ≥ 3·0.15 = 0.45 > log(1.2) ≈ 0.182（**出界**）。
+
+    旧实现（链级裁剪）会把整条链裁掉：`clipped_frac=1.0`、`grad_norm=0`、`ratio=e^{nδ}`。
+    分决策裁剪才给出 `clipped_frac=0`、`ratio≈e^δ`、`grad_norm>0`。`lr=0` 保证两轮同参数，
+    ratio 只由 δ 决定（不掺参数更新的漂移）。两条链用**不同** seed 的真实决策，否则
+    `ΣA=0` 会让两条同源链的梯度逐位抵消，`grad_norm>0` 失去意义。
+    """
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    dec_a, met_a = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
+    dec_b, met_b = roll_chain(inst, lay, dm, cfg, pol, seed=1, ctx=ctx)
+    assert len(dec_a) >= 3 and len(dec_b) >= 3, "链太短——n·δ 盖不过 log(1.2)"
+    delta = 0.15
+    with torch.no_grad():
+        for d in (*dec_a, *dec_b):
+            # 单决策的 `chain_logp` = 零 + 该项 ⇒ 恰是该决策带梯度重算 logp 的逐位同源值
+            d.logp = float(chain_logp([d], pol)) - delta
+    calls = {"g": 0}
+
+    def _fake_roll(*_args, **_kwargs):
+        g, calls["g"] = calls["g"], calls["g"] + 1
+        dec, met = (dec_a, met_a) if g == 0 else (dec_b, met_b)
+        # 两条链奖励拉开（makespan 差 10）⇒ 组内 z 化后 A≠0，裁剪才有非零梯度可言
+        return dec, dict(met, makespan=float(met["makespan"]) + 10.0 * g)
+
+    monkeypatch.setattr(group_rel, "roll_chain", _fake_roll)
+    _r, diag = joint_chain_step(pol, inst, lay, dm, cfg, ctx, _ref(inst, cfg),
+                                seed=0, G=2, epochs=2, clip_eps=0.2, lr=0.0)
+    assert diag["clipped_frac"] == 0.0, "每个决策都在带内，却报出界——裁剪还是链级的"
+    assert diag["ratio"] == pytest.approx(math.exp(delta), abs=1e-6), \
+        "ratio 不是逐决策比的均值（链级比值会是 e^{nδ}）"
+    assert diag["grad_norm"] > 0.0, "整链出界被裁 ⇒ 梯度恒 0——裁剪没有下沉到决策"
 
 
 @pytest.mark.unit
