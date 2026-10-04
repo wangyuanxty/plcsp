@@ -175,6 +175,14 @@ def main() -> None:
                          "batch 1**，GPU eager 在那一档反而慢（kernel 启动开销，"
                          "见 progress-log §36.3）⟹ 本开关是「整策略」粒度，"
                          "不是最优分工；分工方案（roll 在 CPU、重算在 GPU）见 §36")
+    ap.add_argument("--parallel", action="store_true",
+                    help="链级多进程（2026-10-04 并行批次）：G 条链铺到 worker 进程，worker "
+                         "只跑 CPU（仿真 + 在线前向），主进程继续用 --device 做重算/反向。"
+                         "默认关（原串行路径，读数逐位不变）。⚠️ 开启后采样流改为**逐链"
+                         "独立**（否则消费次序不确定）⟹ 与串行档同 seed 的数值不同"
+                         "（第九次读数作废，见 progress-log §39）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="并行档的 worker 进程数（默认 min(核数, G)）")
     args = ap.parse_args()
 
     # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
@@ -207,7 +215,8 @@ def main() -> None:
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}"
-          f"｜route_k={args.route_k}｜pm_head={args.pm_head}｜device={pol.device}")
+          f"｜route_k={args.route_k}｜pm_head={args.pm_head}｜device={pol.device}"
+          f"｜parallel={args.parallel}(workers={args.workers or 'auto'})")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
@@ -221,6 +230,7 @@ def main() -> None:
                                   pm_head=args.pm_head),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
+                 parallel=args.parallel, n_workers=args.workers,
                  eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule,
                                         constraints=constraints, route_k=args.route_k,
                                         pm_head=args.pm_head)

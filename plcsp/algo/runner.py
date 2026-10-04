@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -46,12 +47,23 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
                  step_fn=joint_chain_step, step_kwargs: dict | None = None,
                  seed0: int = 0, run_dir: str = "checkpoints/run_0",
                  save_every: int = 10, resume: bool = False,
-                 eval_fn=None, eval_every: int | None = None) -> dict:
+                 eval_fn=None, eval_every: int | None = None,
+                 parallel: bool = False, n_workers: int | None = None) -> dict:
     """训练循环+保存。step_fn(policy, inst, seed=..., **step_kwargs) → (r_mean, diag)。
 
     resume=True：run_dir 存在 ckpt.pt → 恢复续跑（覆盖 policy 参数与起始 step）。
     eval_fn(policy) → dict（可选）；eval_every 步调用并追加到 metrics.jsonl（{"step","eval",...}）。
     返回最终 {"step", "best", "r_last"}。
+
+    ⚠️ **`parallel`（2026-10-04 并行批次）：默认 `False` = 原串行路径，读数逐位不变。**
+    `True` 时本函数**拥有**一个常驻的 `ChainWorkerPool`（G 条链铺到 worker 进程，见
+    `algo/chain_pool.py`），随 `step_kwargs` 透传 `parallel=True, pool=…` 给
+    `joint_chain_step`；进程池在 `finally` 里 `close()`（清理路径）。
+    - 环境参数（`layout` / `dm` / `cfg` / `ctx` / `constraints` / `route_k` / `pm_head` /
+      `charge_head`）从 `step_kwargs` 原样进每个任务——池不缓存旧环境。
+    - `n_workers=None` ⇒ `min(核数, G)`（G 取自 `step_kwargs`）。
+    - ⚠️ 采样流口径随并行改变（每条链独立流）⟹ **并行档与串行档同 seed 的数值不同**
+      （第九次读数作废，见 `progress-log.md` §39）。
     """
     rd = Path(run_dir)
     rd.mkdir(parents=True, exist_ok=True)
@@ -64,8 +76,23 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
         start, best = int(ck["step"]), float(ck["best"])
         print(f"[runner] resumed: step={start} best={best}")
     mf = open(rd / METRICS_NAME, "a", encoding="utf-8")
-    t0 = time.time()
+    pool = None
     try:
+        if parallel:
+            from .chain_pool import ChainWorkerPool   # 运行时导入：默认档不加载该模块
+            missing = [k for k in ("layout", "dm", "cfg", "ctx") if k not in step_kwargs]
+            if missing:
+                raise ValueError(
+                    f"parallel=True 需要 step_kwargs 里的环境参数 {missing}（进程池按它们跑链）"
+                    "——缺了**显式报错**，不静默退回串行。")
+            if n_workers is None:
+                n_workers = min(os.cpu_count() or 1,
+                                int(step_kwargs.get("G", os.cpu_count() or 1)))
+            pool = ChainWorkerPool(policy, int(n_workers))
+            step_kwargs = {**step_kwargs, "parallel": True, "pool": pool}
+            print(f"[runner] parallel=True workers={pool.n_workers} "
+                  f"startup={pool.startup_s:.2f}s", flush=True)
+        t0 = time.time()
         for s in range(start, start + steps):
             r, diag = step_fn(policy, inst, seed=seed0 + s, **step_kwargs)
             rec = {"step": s, "r": float(r), "t": time.time() - t0,
@@ -85,6 +112,8 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
                 print(f"[runner] {s+1}/{start+steps} r={r:.2f} saved")
     finally:
         mf.close()
+        if pool is not None:
+            pool.close()          # 清理路径：正常/异常都释放 worker（close 幂等）
     return {"step": start + steps, "best": best, "r_last": float(r)}
 
 

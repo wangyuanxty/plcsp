@@ -56,11 +56,15 @@ spec §5.3.4 五条硬性约定在本模块的落点：
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from .policy import PolicyNet, v_token_index
+
+if TYPE_CHECKING:                       # 仅类型标注：运行时导入会成环（chain_pool → group_rel）
+    from .chain_pool import ChainWorkerPool
 from ..env.constraints import ConstraintConfig
 from ..env.corridors import build_corridor_graph
 from ..env.des import CHARGE_CAND_SKIP, SimConfig, SimWorld, build_zone_map
@@ -808,7 +812,9 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      constraints: ConstraintConfig | None = None,
                      adv_mode: str = "scalar",
                      route_k: int = 1, pm_head: bool = False,
-                     charge_head: bool = False) -> tuple[float, dict]:
+                     charge_head: bool = False,
+                     parallel: bool = False,
+                     pool: "ChainWorkerPool | None" = None) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
@@ -877,6 +883,22 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     （入口经 `roll_chain` 显式报错）；默认电池 2–4 kWh 在一个 episode 里放不空 ⟹
     "耗尽有后果"要在**小电池档**验证（`AgvSpec(battery_kwh=…)`，默认参数不动，见 §27.1）。
 
+    ⚠️ **`parallel`（链级多进程，2026-10-04 并行批次）默认 `False` = 原串行路径，逐位不变。**
+    `True` 时把 G 条链交给 `ChainWorkerPool`（spawn；worker 只跑 CPU）——worker 跑
+    `roll_chain` 的整段 episode（仿真 + 在线前向 + 决策记录），主进程只做重算/反向/
+    优化器步（实测 MK01、G=8 时在线部分占整步 ~79%，见 `progress-log.md` §36–§38）。
+    - **必须显式传 `pool`**（`ChainWorkerPool` 实例）：`parallel=True, pool=None`
+      **显式报错**，不静默退回串行（那会让"并行没接上"变成看不见的性能回归）。
+    - ⚠️ **采样流口径改变（第九次读数作废）**：串行档 G 条链**共用一条** `torch.Generator`、
+      按链序消费；并行档每条链自建 `torch.Generator().manual_seed(seed*SEED_STRIDE + g)`
+      （逐链独立且确定 —— 消费次序不再依赖跨进程调度）。**并行档与串行档同 seed 的数值
+      不同**，差异来自采样流，不是实现错误。
+    - ⚠️ worker 在 **CPU** 上跑：主进程在 CUDA 时，并行档的在线前向浮点路径与采样流的设备
+      都与串行 CUDA 档不同（CPU 与 CUDA 的 generator 是两条流，§36.9）——跨档读数不可逐位
+      互比。重算/反向仍在主进程、仍跟随 `policy.device`。
+    - 池常驻复用（每步只提交任务）；清理走 `pool.close()`，`runner.run_training` 的
+      `finally` 已接好。
+
     ⚠️ **信任域按决策施加**（2026-10-04 修复，此前是**链级**裁剪的缺陷）：`logp` 是整条链的
     **求和**（约定 2，链长 100–460），故 `ratio = exp(Δ链logp)` 对单决策的微小漂移极敏感——
     一次 Adam 更新（lr=1e-3）就把每条链推过 `log(1.2)`，于是 `epochs≥2` 时**全部**链出界、
@@ -912,6 +934,12 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     **末轮**裁剪前的 `‖∂L/∂θ‖`——它非零即"这一轮确有梯度信号"（旧实现 `epochs≥2` 时恒为 0）。
     """
     _check_adv_mode(adv_mode)                   # O1：白名单先于一切（写错名不得先跑几分钟仿真）
+    if parallel and pool is None:
+        # ⚠️ 硬要求：不许静默退回串行——那样"并行没接上"会变成看不见的性能回归。
+        raise ValueError(
+            "parallel=True 但 pool=None：并行档必须显式传进程池（ChainWorkerPool 实例）——"
+            "不静默退回串行。用法：pool = ChainWorkerPool(policy, n_workers=8)；"
+            "joint_chain_step(..., parallel=True, pool=pool)；用完 pool.close()。")
     if layout.layout_seed != 0:
         raise ValueError(
             f"layout_seed={layout.layout_seed} ≠ 0：奖励权重（ReferenceObjectives.of 固定 "
@@ -947,18 +975,33 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     chains: list[list[Decision]] = []
     rewards: list[float] = []
     f_objs: list[tuple[float, float, float]] = []
-    # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
-    #    （消费次序确定 ⇒ 逐位可复现），不再落到全局 torch RNG。
-    #    ⚠️ 设备跟随策略（2026-10-04 设备批次）：CUDA 上必须用 CUDA generator（见 `roll_chain`）。
-    gen = torch.Generator(device=policy.device.type).manual_seed(seed)
-    for g in range(G):
-        dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
-                              sample=True, generator=gen, constraints=cons, route_k=route_k,
-                              pm_head=pm_head, charge_head=charge_head)
-        chains.append(dec)
-        f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
-        f_objs.append(f)
-        rewards.append(scalar_reward(f, w))     # 奖励读数（诊断用；与历史同一运算次序）
+    if parallel:
+        # ⚠️ 并行档（2026-10-04 并行批次）：G 条链各一个 worker 任务，worker 只跑 CPU；
+        #    主进程只在这里收决策/指标，随后照旧做重算 + 反向 + 优化器步。
+        #    ⚠️ 必须先把**当前**参数刷进共享内存镜像（上一步的 Adam 已改过参数）。
+        assert pool is not None     # 入口已显式校验：parallel=True, pool=None 直接报错
+        pool.sync_policy(policy)
+        results = pool.run_chains(seed, G, inst=inst, layout=layout, dm=dm, cfg=cfg, ctx=ctx,
+                                  constraints=cons, route_k=route_k, pm_head=pm_head,
+                                  charge_head=charge_head)
+        for dec, met in results:
+            chains.append(dec)
+            f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
+            f_objs.append(f)
+            rewards.append(scalar_reward(f, w))     # 奖励读数（与串行档同一运算次序）
+    else:
+        # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
+        #    （消费次序确定 ⇒ 逐位可复现），不再落到全局 torch RNG。
+        #    ⚠️ 设备跟随策略（2026-10-04 设备批次）：CUDA 上必须用 CUDA generator（见 `roll_chain`）。
+        gen = torch.Generator(device=policy.device.type).manual_seed(seed)
+        for g in range(G):
+            dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
+                                  sample=True, generator=gen, constraints=cons, route_k=route_k,
+                                  pm_head=pm_head, charge_head=charge_head)
+            chains.append(dec)
+            f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
+            f_objs.append(f)
+            rewards.append(scalar_reward(f, w))     # 奖励读数（诊断用；与历史同一运算次序）
 
     # O1：两种优势口径的唯一分叉点（见 `_advantages`）。scalar 分支与历史表达式逐位相同。
     A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode)
