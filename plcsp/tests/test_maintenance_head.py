@@ -104,7 +104,7 @@ class _NoMixEncoder(torch.nn.Module):
     """
     d_model = F_MAX
 
-    def forward(self, x, seg):
+    def forward(self, x, seg, bias=None):
         return x, x.mean(dim=1)
 
 

@@ -198,7 +198,7 @@ def _worker_run_chain(task: _Task) -> tuple[list[Decision], dict]:
     条流**，数值会变（默认档不受影响）。
     """
     (_g, seed_chain, inst, layout, dm, cfg, ctx, constraints,
-     route_k, route_zones, pm_head, charge_head) = task
+     route_k, route_zones, geom_bias, pm_head, charge_head) = task
     policy = _WORKER.get("policy")
     if policy is None:
         raise RuntimeError("worker 未初始化（`_worker_init` 没跑）——这是实现错误，"
@@ -207,7 +207,7 @@ def _worker_run_chain(task: _Task) -> tuple[list[Decision], dict]:
     gen = torch.Generator(device=policy.device.type).manual_seed(seed_chain)
     dec, met = roll_chain(inst, layout, dm, cfg, policy, seed_chain, ctx,
                           sample=True, generator=gen, constraints=constraints,
-                          route_k=route_k, route_zones=route_zones,
+                          route_k=route_k, route_zones=route_zones, geom_bias=geom_bias,
                           pm_head=pm_head, charge_head=charge_head)
     return dec, met
 
@@ -369,8 +369,8 @@ class ChainWorkerPool:
     def run_chains(self, seed: int, G: int, *, inst: Instance, layout: Layout,
                    dm: np.ndarray, cfg: SimConfig, ctx: NormContext,
                    constraints: ConstraintConfig | None = None,
-                   route_k: int = 1, route_zones: bool = False, pm_head: bool = False,
-                   charge_head: bool = False,
+                   route_k: int = 1, route_zones: bool = False, geom_bias: bool = False,
+                   pm_head: bool = False, charge_head: bool = False,
                    timeout_s: float | None = None
                    ) -> list[tuple[list[Decision], dict]]:
         """跑 G 条链（每条一个 worker 任务），按链号 g = 0..G-1 返回 `[(决策, 指标), …]`。
@@ -383,7 +383,7 @@ class ChainWorkerPool:
             raise ValueError(f"G={G} 非法：至少 1 条链。")
         cons = constraints or ConstraintConfig()
         tasks = [(g, seed * SEED_STRIDE + g, inst, layout, dm, cfg, ctx, cons,
-                  route_k, route_zones, pm_head, charge_head) for g in range(int(G))]
+                  route_k, route_zones, geom_bias, pm_head, charge_head) for g in range(int(G))]
         limit = self._task_timeout_s if timeout_s is None else float(timeout_s)
         with self._sync_times.get_lock():       # 重置诊断槽位（CUDA worker 写回本轮的同步耗时）
             for i in range(self._n_workers):

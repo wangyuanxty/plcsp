@@ -73,7 +73,7 @@ from ..env.layout import Layout
 from ..env.reward import (ReferenceObjectives, objective_vector, reward_weights,
                           scalar_reward)
 from ..nn.features import NormContext
-from ..nn.state_emb import build_tok
+from ..nn.state_emb import build_geom_bias, build_tok
 
 
 # 训练流步长：第 s 步第 g 条链的仿真扰动种子 = (seed0+s)*SEED_STRIDE + g。`m13_train_a` 的
@@ -432,6 +432,10 @@ class Decision:
     # 与 `tok_idx` 同源纪律：**采样时冻结**，重算路径照它回放（`_decision_logp_terms`）。
     zone_idx: np.ndarray | None = None
     zone_mask: np.ndarray | None = None
+    # ② 几何/度量偏置（`geom_bias=True` 时）——采样那一刻由快照 + 布局算出的 `(N,N)` 矩阵，
+    # 重算路径**照它回放**（不能事后重算：实体位置随时间变，重算 = 换了一份策略输入）。
+    # 其余档 None。见 `state_emb.build_geom_bias`。
+    geom_bias: np.ndarray | None = None
 
 
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
@@ -439,7 +443,8 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                sample: bool = True,
                generator: torch.Generator | None = None,
                constraints: ConstraintConfig | None = None,
-               route_k: int = 1, route_zones: bool = False, pm_head: bool = False,
+               route_k: int = 1, route_zones: bool = False, geom_bias: bool = False,
+               pm_head: bool = False,
                charge_head: bool = False) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
@@ -476,6 +481,13 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         ⚠️ `route_zones=True` 要求 `route_k > 1`：没有 R 决策时区段 token 无人消费，
         是**死输入**，故**显式报错**（同 `route_k>1` 要求 ① 拥堵的形态）。
         ⚠️ 打开后链长 / makespan 会变——R 决策的**输入**变了，不是动力学变了。
+     ⚠️ **`geom_bias`（② 几何/度量偏置开关，2026-10-05）**：默认 `False` = **关**——编码器
+        不做任何额外加减，链路逐位等于今日；`True` = 每个决策点由**当时的快照 + 布局**算出
+        `(N,N)` 距离偏置（`state_emb.build_geom_bias`，与 `AgvSim._seg_min` 同一张距离矩阵），
+        加在每层注意力分数上（`AttnLayer._attn`）。**只作"输入"用途**：让距离/拥堵可被感知；
+        **不得**借它主张跨布局泛化（`method-transfer-candidates.md` §6.3 的裁定）。
+        ⚠️ 偏置**冻结在 `Decision` 里**（实体位置逐决策变），重算路径照它回放；偏置档跳过
+        CUDA 图快路（见 `LayoutEncoder.forward`）。
      ⚠️ **`pm_head`（⑫ 维护头开关）**：`False`（默认）= **关闭**，`MachineSim` 按规则自动保养
         （`pm_clock >= pm_interval`）、不记 M 决策、不消费采样流 ⟹ **逐位等于今日行为**
         （黄金摘要钉死，既有读数全靠它）；`True` = 一道工序加工完毕、下一件尚未上机时由策略在
@@ -550,6 +562,10 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         tok_feat, seg = build_tok(snap, inst, layout, ctx,
                                   zof=zof_tok, n_zones=n_zones)
         tok_feat = np.asarray(tok_feat, dtype=np.float32)
+        # ② 几何/度量偏置：`geom_bias=True` 时由此刻的快照 + 布局现算（实体位置逐决策变，
+        # 必须**冻结在决策里**，重算路径照它回放）。区段锚只在 R2 打开（序列里有 Z 段）时才有。
+        bias = (build_geom_bias(snap, inst, layout, ctx, dm, zof=zof_tok)
+                if geom_bias else None)
         # R2：逐候选的区段 token 下标/掩码（候选路径的区段 → 序列下标）。Z 段在**末位**，
         # 故区段 z 的 token 下标 = 前四段行数之和 + z（`sum(seg[:4])`，与 build_tok 同源）。
         zone_idx = zone_mask = None
@@ -562,7 +578,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                 zone_idx[i, :len(zs)] = [n_base + int(z) for z in zs]
                 zone_mask[i, :len(zs)] = 1.0
         with torch.no_grad():
-            tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg)
+            tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg, bias)
             head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
                     "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
                     "C": policy.charge_logits_emb}[kind]
@@ -615,7 +631,8 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                                   cand=cand, action=int(cand[k]), tok_idx=tok_idx,
                                   logp=lp_k, mach=mach_id,
                                   agv=(None if aid is None else int(aid)),
-                                  zone_idx=zone_idx, zone_mask=zone_mask))
+                                  zone_idx=zone_idx, zone_mask=zone_mask,
+                                  geom_bias=bias))
         return int(cand[k])
 
     def policy_s(snap, job, oi, cand):
@@ -707,7 +724,17 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     #    `policy.device`（`--device cuda` 时重算整段在 GPU 上）。头内的 `_to_dev` 兜底其余输入。
     tok_all = torch.stack([torch.as_tensor(d.tok, dtype=torch.float32)
                            for d in decisions]).to(policy.device)
-    emb, _ = policy.forward_enc(tok_all, decisions[0].seg)        # (B, N, d)：一次前向
+    # ⚠️ ② 几何偏置：整组决策的 `(N,N)` 堆成 `(B,N,N)`——**必须全有或全无**（半带 = 上游
+    #    接线错；静默按 None 算会让一部分决策按另一份输入重算，logp 与采样分布不同源）。
+    has_bias = [d.geom_bias is not None for d in decisions]
+    if any(has_bias) and not all(has_bias):
+        raise AssertionError(
+            "同一组决策的几何偏置有的有、有的没有——geom_bias 的接线不一致（混组会让"
+            "部分决策按错误的输入重算）。")
+    bias_all = (None if not all(has_bias) else
+                torch.as_tensor(np.stack([d.geom_bias for d in decisions]),
+                                dtype=torch.float32, device=policy.device))
+    emb, _ = policy.forward_enc(tok_all, decisions[0].seg, bias_all)   # (B, N, d)：一次前向
     # ⚠️ **打分头也批量**（2026-10-04 打分头批次）：按 `(kind, n_cand)` 分组，同组一次算完。
     #    分组而**不做 padding**：padding 会改变 `log_softmax` 的归约长度，把 1e-5 容差撑破；
     #    同 `n_cand` 的决策批在一起则归约长度不变，漂移与编码器批量化同量级（见函数 docstring）。
@@ -878,7 +905,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      epochs: int = 1,
                      constraints: ConstraintConfig | None = None,
                      adv_mode: str = "scalar",
-                     route_k: int = 1, route_zones: bool = False, pm_head: bool = False,
+                     route_k: int = 1, route_zones: bool = False, geom_bias: bool = False,
+                     pm_head: bool = False,
                      charge_head: bool = False,
                      parallel: bool = False,
                      pool: "ChainWorkerPool | None" = None) -> tuple[float, dict]:
@@ -942,6 +970,10 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     **逐位等于今日**（含 `route_k=2` 的既有读数）；`True`（要求 `route_k>1`）时序列末位追加
     Z 段，R 头逐候选读该路径途经区段的 token。打开后链变长、决策输入变——makespan 变化是
     **预期**的（不是动力学变了）。见 `roll_chain` 的说明。
+
+    ⚠️ **`geom_bias`（② 几何/度量偏置开关，2026-10-05）**：默认 `False` = 关闭，链与训练步
+    **逐位等于今日**；`True` = 每个决策点的编码器前向加一份由**当时快照 + 布局**算出的
+    `(N,N)` 距离偏置（只作"输入"用途，不得主张跨布局泛化）。偏置随决策冻结、随重算回放。
 
     ⚠️ **`pm_head`（⑫ 维护头开关，2026-10-04）**：默认 `False` = 规则自动保养，链与训练步
     **逐位等于今日**；`True` 启用——机台在两件之间由策略选 {现在保养, 不保养}（M 决策与
@@ -1056,7 +1088,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         pool.sync_policy(policy)
         results = pool.run_chains(seed, G, inst=inst, layout=layout, dm=dm, cfg=cfg, ctx=ctx,
                                   constraints=cons, route_k=route_k, route_zones=route_zones,
-                                  pm_head=pm_head, charge_head=charge_head)
+                                  geom_bias=geom_bias, pm_head=pm_head, charge_head=charge_head)
         for dec, met in results:
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
@@ -1070,8 +1102,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         for g in range(G):
             dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
                                   sample=True, generator=gen, constraints=cons, route_k=route_k,
-                                  route_zones=route_zones, pm_head=pm_head,
-                                  charge_head=charge_head)
+                                  route_zones=route_zones, geom_bias=geom_bias,
+                                  pm_head=pm_head, charge_head=charge_head)
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)

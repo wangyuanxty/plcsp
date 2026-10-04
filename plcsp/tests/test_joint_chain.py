@@ -462,11 +462,11 @@ def test_recompute_batches_all_chains_into_one_encoder_forward(monkeypatch):
     calls = {"n": 0, "sizes": []}
     orig = pol.forward_enc
 
-    def _counting(tok_feat, seg):
+    def _counting(tok_feat, seg, bias=None):
         x = tok_feat if torch.is_tensor(tok_feat) else torch.as_tensor(tok_feat)
         calls["n"] += 1
         calls["sizes"].append(int(x.shape[0]))
-        return orig(tok_feat, seg)
+        return orig(tok_feat, seg, bias)      # 透传几何偏置（默认 None）
 
     monkeypatch.setattr(pol, "forward_enc", _counting)
     lp = chains_logp(chains, pol)

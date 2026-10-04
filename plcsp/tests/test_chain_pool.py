@@ -64,11 +64,12 @@ def test_decision_pickle_roundtrip_keeps_all_fields():
                  cand_feat=np.full((3, 1), 0.5, dtype=np.float32), cand=(0, 1, 2),
                  action=2, tok_idx=np.asarray([5, 6, 7]), logp=-1.25, mach=None, agv=1,
                  zone_idx=np.asarray([[9, 10], [11, 0]]),      # R2 字段也要能往返
-                 zone_mask=np.asarray([[1.0, 1.0], [1.0, 0.0]], dtype=np.float32))
+                 zone_mask=np.asarray([[1.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+                 geom_bias=np.zeros((3, 3), dtype=np.float32))    # ② 字段也要能往返
     e = pickle.loads(pickle.dumps(d))
     assert (e.kind, e.seg, e.cand, e.action, e.logp, e.mach, e.agv) == \
            (d.kind, d.seg, d.cand, d.action, d.logp, d.mach, d.agv)
-    for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask"):
+    for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask", "geom_bias"):
         assert np.array_equal(getattr(e, field), getattr(d, field)), field
 
 
@@ -137,7 +138,8 @@ def _assert_chains_equal(refs, got):
         for a, b in zip(dec_r, dec_p):
             assert (a.kind, a.cand, a.action, a.logp, a.seg, a.mach, a.agv) == \
                    (b.kind, b.cand, b.action, b.logp, b.seg, b.mach, b.agv)
-            for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask"):
+            for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask",
+                          "geom_bias"):
                 va, vb = getattr(a, field), getattr(b, field)
                 if va is None or vb is None:            # R2 关档：两处都应为 None
                     assert va is None and vb is None, f"链 {g} 的 {field} 一处有、一处无"

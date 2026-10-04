@@ -49,19 +49,24 @@ class AttnLayer(nn.Module):
         self.ffn = nn.Sequential(nn.Linear(d, 2 * d), nn.GELU(), nn.Linear(2 * d, d))
         self.ln1, self.ln2 = nn.LayerNorm(d), nn.LayerNorm(d)
 
-    def _attn(self, x: torch.Tensor) -> torch.Tensor:
+    def _attn(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         B, N, _ = x.shape
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = q.view(B, N, self.h, self.dh).transpose(1, 2)
         k = k.view(B, N, self.h, self.dh).transpose(1, 2)
         v = v.view(B, N, self.h, self.dh).transpose(1, 2)
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.dh)   # 全连接：无掩码
+        if bias is not None:
+            # ② 几何/度量偏置：加在 softmax **之前**的分数上（分头广播），与 `type_emb` 正交
+            # ——类型嵌入改的是 token 初始嵌入，偏置改的是注意力分数。`bias=None`（默认）
+            # 时这一行不存在 ⟹ 默认档逐位不变。
+            scores = scores + bias.unsqueeze(1)                    # (B,N,N) → (B,1,N,N)
         w = F.softmax(scores, dim=-1)
         out = (w @ v).transpose(1, 2).reshape(B, N, self.d)
         return self.oproj(out)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.ln1(self._attn(x))
+    def forward(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.ln1(self._attn(x, bias))
         return x + self.ln2(self.ffn(x))
 
 
@@ -105,8 +110,8 @@ class LayoutEncoder(nn.Module):
             self.proj_z = nn.Linear(F_Z, d_model)            # Z 段自己的投影（分段投影纪律）
             self.zone_type_emb = nn.Parameter(torch.randn(d_model) * 0.02)
 
-    def forward(self, tok_feat: torch.Tensor, seg: tuple[int, ...]
-                ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, tok_feat: torch.Tensor, seg: tuple[int, ...],
+                bias: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_g=1[, n_zones])。
 
         返回 (token 嵌入 (B, N, d), 全局上下文 (B, d)=按 token 均值池化)。
@@ -115,6 +120,9 @@ class LayoutEncoder(nn.Module):
         ⚠️ **`seg` 允许四元或五元**（2026-10-05，R2）：四元 = 默认档（M/B/V/G，逐位等于今日）；
         五元 = `route_zones=True` 时多出的 Z 段（区段 token，类型 id 4，走独立的 `proj_z`
         与 `zone_type_emb`）。两种长度都由调用方（`build_tok`）决定。
+        ⚠️ **`bias`（② 几何/度量偏置，2026-10-05）**：`(N,N)` 或 `(B,N,N)` 的可加偏置，
+        逐层加在注意力分数上（见 `AttnLayer._attn`）。`None`（默认）⟹ 与今日**逐位相同**；
+        非空时**跳过 CUDA 图快路**（图只捕获 `tok_feat` 一个输入，见 `_graph_ok`）。
 
         ⚠️ **两维（N,F）的旧形式已不接受**：批维是重算路径的性能来源（一条链 100–460 个
         决策一次前向；本机实测 231 条批前向 ≈402 ms vs 逐条 ≈1.38 s，**吞吐 ~3.4×**），
@@ -130,6 +138,12 @@ class LayoutEncoder(nn.Module):
         # ⚠️ 守卫留在**图捕获之外**（图里不许有设备同步，`bool()` 会当场炸）——守卫本身没有
         #    削弱，只是换了位置：它查的是**进来的**张量，而图重放前正是把这个张量拷进静态缓冲。
         self._require_zero_padding(tok_feat, seg)
+        if bias is not None:
+            # 偏置档不做 CUDA 图：图只捕获 `tok_feat`，把 bias 也塞进图要再造一条静态缓冲，
+            # 收益（CPU 档为零、GPU 非默认）不抵复杂度。语义与 eager 完全一致。
+            if bias.dim() == 2:
+                bias = bias.unsqueeze(0).expand(tok_feat.shape[0], -1, -1)
+            return self._encode(tok_feat, seg, bias)
         if self._graph_ok(tok_feat):
             return self._replay(tok_feat, seg)
         return self._encode(tok_feat, seg)
@@ -160,11 +174,13 @@ class LayoutEncoder(nn.Module):
         return g.replay(tok_feat)
 
     def _encode(self, tok_feat: torch.Tensor,
-                seg: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+                seg: tuple[int, ...], bias: torch.Tensor | None = None
+                ) -> tuple[torch.Tensor, torch.Tensor]:
         """纯计算：分段投影 + 类型嵌入 + N 层注意力 + 末层 LayerNorm。
 
         **无守卫、无图**——两样都由 `forward` 负责。图快路捕获的就是本函数。
         `seg` 四元 = 默认档（既有路径，逐位等于今日）；五元 = R2（Z 段走 `proj_z`）。
+        `bias` = ② 的逐层注意力偏置（`None` = 不加，逐位等于今日）。
         """
         tid = self._type_ids(seg, tok_feat.device)
         # 分段投影：各段只取自己那几列，拼回 (B, N, d) 后再进注意力（**批维在 0 轴**）。
@@ -185,7 +201,7 @@ class LayoutEncoder(nn.Module):
             tab = torch.cat([self.type_emb, self.zone_type_emb.unsqueeze(0)], dim=0)
             x = x + tab[tid]
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, bias)
         x = self.ln(x)
         return x, x.mean(dim=1)
 

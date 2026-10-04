@@ -21,6 +21,83 @@ def _safe(x: float, lo: float, hi: float) -> float:
     return float(min(max(x, lo), hi))
 
 
+# 几何/度量偏置的固定系数（**不可学**，沿用旧 `GeomBias` 的"固定系数"约定）：
+# `b(i,j) = −W · d(anchor_i, anchor_j) / bbox_diag`。取 1.0 是因为注意力分数 `q·k/√d_h`
+# 本身就是 O(1) 量级，而归一化距离 ∈ [0, ~1.4]。负号 = 距离越近、分数越高（距离衰减先验）。
+GEOM_BIAS_W = 1.0
+
+
+def build_geom_bias(snap: Snapshot, inst: Instance, layout: Layout, ctx: NormContext,
+                    dm: np.ndarray, zof: dict[int, int] | None = None) -> np.ndarray:
+    """几何/度量偏置矩阵 `(N, N)`——**只在 `geom_bias=True` 时构造**（② 拥堵的"距离可感知"）。
+
+    口径（设计节「几何/度量偏置」定死）：
+
+        b(i, j) = −GEOM_BIAS_W · d(anchor_i, anchor_j) / bbox_diag        （两个锚都存在）
+                = 0                                                        （任一锚缺失）
+
+    - `d` 取自 `dm`（`dock_distance_matrix(build_corridor_graph(layout))`）——**与仿真
+      `AgvSim._seg_min` 的行驶时长同一张矩阵**（单位 [m]），不另造距离量；
+    - 锚：M = 该机台的 `dock_node`；B = `at_machine` 的 dock，否则 `on_agv` 所在车的
+      `node`（≥0 才有），否则**无锚**；V = 该车 `node`（`-1` = 尚未出车 ⟹ 无锚）；
+      Z（仅 R2 打开时）= 该区段的**最小成员节点**（`zof` 反查；row/col/all 粒度下一个
+      区段含多节点，取最小号是确定性的）；G = **无锚**。
+    - 缺锚的行/列全 0（**中性，不是哨兵**）；对角恒 0；不可达（`inf`）按缺锚处理
+      （不把 NaN/inf 送进 softmax）。
+
+    ⚠️ **只作"输入"**：本项只让距离/拥堵可被感知；**不得**借它主张跨布局/跨拓扑泛化
+    （`method-transfer-candidates.md` §6.3 的裁定——那是 2026-10-02 砍掉的卖点）。
+    ⚠️ `zof` 必须与 `build_tok` 的 Z 段**同一份**（否则行号对不上）；`None` = 无 Z 段。
+    """
+    n_m = int(inst.n_machines)
+    n_b = int(inst.n_jobs)
+    n_v = int(ctx.n_agv)
+    n_base = n_m + n_b + n_v + 1                      # 四段行数（G 在末位）
+    n_z = 0 if zof is None else (max(zof.values()) + 1 if zof else 0)
+    anchors: list[int | None] = [None] * (n_base + n_z)
+    for i, mp in enumerate(layout.machines):
+        anchors[i] = int(mp.dock_node)
+    for j, js in enumerate(snap.jobs):
+        if j >= n_b:
+            break
+        a: int | None = None
+        if 0 <= int(js.at_machine) < n_m:
+            a = int(layout.machines[int(js.at_machine)].dock_node)
+        elif 0 <= int(js.on_agv) < len(snap.vehicles):
+            node = int(snap.vehicles[int(js.on_agv)].node)
+            if node >= 0:
+                a = node
+        anchors[n_m + j] = a
+    for a_i, v in enumerate(snap.vehicles):
+        if a_i >= n_v:
+            break
+        node = int(v.node)
+        anchors[n_m + n_b + a_i] = node if node >= 0 else None
+    if zof is not None:                               # Z 段：区段的最小成员节点
+        members: dict[int, list[int]] = {}
+        for node, z in zof.items():
+            members.setdefault(int(z), []).append(int(node))
+        for z, ns in members.items():
+            if 0 <= z < n_z:
+                anchors[n_base + z] = min(ns)
+    N = len(anchors)
+    out = np.zeros((N, N), dtype=np.float32)
+    scale = GEOM_BIAS_W / max(ctx.bbox_diag, 1e-9)
+    for i in range(N):
+        ai = anchors[i]
+        if ai is None:
+            continue
+        for j in range(i + 1, N):
+            aj = anchors[j]
+            if aj is None:
+                continue
+            d = float(dm[ai, aj])
+            if not np.isfinite(d):
+                continue                              # 不可达 ⟹ 按缺锚（0），不传 inf
+            out[i, j] = out[j, i] = -scale * d
+    return out
+
+
 def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
     """(n_m, 7)。顺序 = FEATURE_NAMES["M"]，**不得改序**（有测试按名核对）。
 

@@ -123,7 +123,8 @@ class PolicyNet(nn.Module):
                 nn.Linear(hidden, 1))
 
     def forward_enc(self, tok_feat: torch.Tensor | np.ndarray,
-                    seg: tuple[int, ...]
+                    seg: tuple[int, ...],
+                    bias: torch.Tensor | np.ndarray | None = None
                     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """编码器前向（**五个**头共用）——**唯一的 numpy→torch 转换点**；无编码器返回 (None, None)。
 
@@ -134,6 +135,8 @@ class PolicyNet(nn.Module):
         把整组决策堆成 `(B,N,F)` 一次前向——`B` 由调用方决定，本函数不做任何跨批次的合并。
         ⚠️ **设备跟随参数**（2026-10-04 设备批次）：不硬编码 cpu/cuda——`--device cuda` 时在线
         前向与批重算都在 CUDA 上；`tok_feat` 是 CPU numpy，故这里必须搬（`_to_dev` 与之同理）。
+        ⚠️ **`bias`（② 几何/度量偏置，2026-10-05）**：`(N,N)` 或 `(B,N,N)`，同样在这里统一
+        转 tensor + 搬设备；`None`（默认）⟹ 编码器走原路径、逐位不变。
         """
         if self.enc is None:
             return None, None
@@ -144,7 +147,14 @@ class PolicyNet(nn.Module):
         if x.dim() != 3:
             raise ValueError(f"forward_enc 要 (N,F)、(1,N,F) 或 (B,N,F) 的 token 特征，"
                              f"收到 shape={tuple(x.shape)}")
-        return self.enc(x.to(self.device), seg)
+        b = None
+        if bias is not None:
+            b = (bias.float() if torch.is_tensor(bias)
+                 else torch.tensor(np.asarray(bias, dtype=np.float32)))
+            if b.dim() not in (2, 3):
+                raise ValueError(f"bias 要 (N,N) 或 (B,N,N)，收到 shape={tuple(b.shape)}")
+        return self.enc(x.to(self.device), seg,
+                        None if b is None else b.to(self.device))
 
     @property
     def device(self) -> torch.device:
