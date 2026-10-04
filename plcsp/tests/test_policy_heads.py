@@ -1,10 +1,21 @@
-"""两个头对称性的测试（P2 Task 4）。"""
+"""两个头对称性的测试（P2 Task 4）。
+
+2026-10-04 追加**生产路径**的 L 头下标守卫：`roll_chain._act` 曾把 L 的候选下标
+当成 S 的下标（车号 = 序列位置），使 L 头读的是 M 段 token——见文末测试的 docstring。
+"""
 from __future__ import annotations
 
+import copy
+
+import numpy as np
 import torch
 import pytest
 
+from plcsp.algo.group_rel import decisions_logp, roll_chain
 from plcsp.algo.policy import PolicyNet, v_token_index
+from plcsp.algo.setup import build_setup
+from plcsp.env.des import SimConfig
+from plcsp.env.instances import load_mk
 from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.features import F_MAX, SEG_SLICE
 
@@ -83,3 +94,59 @@ def test_candidate_features_change_the_score():
 def test_v_token_index_matches_seg():
     assert v_token_index((6, 10, 3, 1)) == [16, 17, 18]
     assert v_token_index((15, 20, 4, 1)) == [35, 36, 37, 38]
+
+
+class _NoMixEncoder(torch.nn.Module):
+    """逐 token **恒等**嵌入（无跨 token 注意力）——只为隔离"L 头索引了哪一行"这一件事。
+
+    真编码器（`LayoutEncoder`）是全连接注意力：扰动 V 段的行会经注意力改变 M 段 token 的
+    **上下文**嵌入，于是"读错行的头"也跟着变——判据被掩盖（本仓实测：缺陷在位时，真编码器
+    下扰动 V 段，L 的 logp 照样从 -1.0927 变到 -1.0873）。逐 token 恒等嵌入切断这条泄漏后，
+    "分数是否依赖被索引的那一行"才是可判的量，且 `_act` / 重算路径仍走生产代码。
+    `d_model = F_MAX` 使 `PolicyNet` 按 11 维 token 建头；`forward` 即 `forward_enc` 期望的
+    `enc(x, seg) -> (tok, global)` 契约。
+    """
+    d_model = F_MAX
+
+    def forward(self, x, seg):
+        return x, x.mean(dim=1)
+
+
+@pytest.mark.unit
+def test_l_head_reads_v_tokens_on_the_production_path():
+    """⚠️ L 头的候选下标在**生产路径**上必须指向 V 段 token——不得把车号当序列位置。
+
+    缺陷形态（2026-10-04 修复）：`roll_chain._act` 里 S/L 共用一个分支 `tok_idx = cand`。
+    对 S 正确（机台号 = 序列位置，M 段在最前），对 L 则把**车号**（0..n_agv-1）当序列位置，
+    取到 M 段（机台）token。后果：L 头看不到任何车辆特征（电量/载量/速度/趴窝/位置/等待），
+    只剩逐候选特征（行驶时长）区分车辆——"派车头"实际在"选机台"。`v_token_index` 于是成了
+    **只在测试里用**的函数：手搓 `agv_logits_emb(..., torch.tensor(v_token_index(seg)))` 的测试
+    自己把正确下标喂给了头，全绿；生产路径却错。故本测试必须走 `roll_chain`（`_act` 真正
+    记录下标）+ `decisions_logp`（训练真正用的重算路径），**不自己提供下标**。
+
+    判据：只扰动 L 决策记录里 **V 段的行**，重算 logp 必须变。缺陷在位时 L 头读 M 段，
+    V 段怎么改都与它的分数无关。
+
+    ⚠️ 逐行扰动必须**不同**（此处 1.0..3.0）：同一列加同一个常数只是给所有候选同样的平移，
+    `log_softmax` 对其不变——那样修好后的头也测不出变化，判据变成恒真。
+    """
+    torch.manual_seed(7)
+    pol = PolicyNet(enc=_NoMixEncoder())
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, dm, ctx = build_setup(inst, cfg)
+    dec, _met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
+    l_dec = [d for d in dec if d.kind == "L" and len(d.cand) >= 2]
+    assert l_dec, "链路里没有多候选的 L 决策——判据失去意义"
+    d = l_dec[0]
+    base = decisions_logp([d], pol).detach().clone()
+    v_rows = v_token_index(d.seg)
+    d2 = copy.deepcopy(d)
+    d2.tok[v_rows] += np.linspace(1.0, 3.0, len(v_rows), dtype=np.float32)[:, None]
+    after = decisions_logp([d2], pol).detach()
+    assert not torch.equal(base, after), (
+        f"只扰动 V 段 token 后 L 决策的 logp 不变（{base.tolist()} vs {after.tolist()}）"
+        f"——L 头读的不是 V 段（记录下标 {d.tok_idx.tolist()}，V 段下标应为 {v_rows}）")
+    # 记录的下标必须逐候选指向**该候选车的 V token**（S 才是机台号 = 序列位置）
+    assert np.array_equal(d.tok_idx, np.asarray(v_rows, dtype=np.int64)[list(d.cand)]), (
+        f"L 决策记录的 token 下标 {d.tok_idx.tolist()} 未按车号映射到 V 段 {v_rows}")

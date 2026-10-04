@@ -480,11 +480,16 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
     仓里所有已记录的读数（消融表、训练曲线）都建立在今天的 scalar 口径上——重构不得悄悄
     改动它。判据 = **捕获参照**（改造前用固定初始化在本机捕获）：
     `torch.manual_seed(1234)` → MK01 上跑一步（G=2, seed=0）→ 最终 `state_dict` 的 sha256 =
-        `2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a`
+        `9333163ad5910498e62468b0892d827cb9262274e55f9e0399607a93c843d06b`
     （同 seed 同起点下**跨进程逐位可复现**，见 `test_joint_step_bitwise_reproducible_given_seed`。）
     任一个比特被改动都会让摘要变化——这比"两次调用互相相等"强，后者对两种实现都恒真。
-    ⚠️ 2026-10-04：R 头恢复后本摘要比对时排除 `r_head_tok.*`（默认关闭档拿不到梯度）——
-    排除后重算仍 = 原捕获值，S/L/编码器的更新逐位未变（详见下方内联注）。
+    ⚠️ 2026-10-04 两次重捕获（都**不是** scalar 口径变化，是策略输入/结构的正确性修复）：
+    1. R 头恢复后比对时排除 `r_head_tok.*`（默认关闭档拿不到梯度）——排除后重算仍 = 更早的
+       捕获值；
+    2. **L 头 token 下标修复**（`_act` 把车号映射到 V 段 token，此前误索引 M 段）——L 头读的
+       特征变了、梯度随之改变，摘要必须重捕获。旧值
+       `2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a` 钉的是
+       **带缺陷的读数**（L 头看不见任何车辆特征），不得再被当成基准。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -494,18 +499,18 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
     torch.manual_seed(1234)                     # 与捕获脚本逐字对齐（ref 之前/之后各锚一次）
     pol = PolicyNet(enc=LayoutEncoder())
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
-    # ⚠️ 2026-10-04（R 头恢复）：本摘要**捕获于路线头存在之前**，故比对时排除 `r_head_tok.*`
-    # 四个新键——`route_k=1`（默认）下 R 头不参与任何决策、拿不到梯度，S/L/编码器的更新必须
-    # 逐位不变。实测：排除后重算 = 原捕获值（逐位相同），原证据链保留。全量 state_dict 的摘要
-    # 会因**新增参数**而变，那是结构变化、不是 scalar 口径变化。
+    # ⚠️ 2026-10-04（L 头下标修复）：摘要值本身已重捕获——旧值钉的是 L 头误索引 M 段的
+    # 缺陷读数（车辆特征对 L 全不可见），修复后 S/L/编码器的更新都变，必须换新基准。
+    # 排除 `r_head_tok.*` 的理由不变（R 头恢复时加的：默认关闭档它拿不到梯度，其参数是
+    # 新增结构、不进本条"scalar 口径不变"的证据链）。
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
         if k.startswith("r_head_tok."):
             continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())
-    assert h.hexdigest() == "2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a", \
-        "scalar 路径的输出与改造前不再逐位相同——既有读数不可比"
+    assert h.hexdigest() == "9333163ad5910498e62468b0892d827cb9262274e55f9e0399607a93c843d06b", \
+        "scalar 路径的输出与重捕获基准不再逐位相同——既有读数不可比"
 
 
 @pytest.mark.unit

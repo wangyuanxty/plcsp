@@ -250,10 +250,14 @@ class Decision:
     cand_feat: np.ndarray            # 逐候选特征 (n_cand, F_cand)
     cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号；R: 0..k-1 的候选序号）
     action: int                      # 所取的动作（∈ cand）
-    # 打分时**取 token 嵌入用的下标**（逐候选）。S/L 就是 `cand`（机台号=序列位置；
-    # 车号的历史口径——**不得改动**，改了会破坏既有读数与比例恒等）。R 的候选是**路径**，
-    # 序列里没有它们的 token（见 `PolicyNet.route_logits_emb`），故这里是**本车 V token 下标
-    # 广播 k 份**。单独存而不是从 `cand` 推：两类语义不同，混用会让 R 头去索引机台 token。
+    # 打分时**取 token 嵌入用的下标**（逐候选）。S = `cand`（机台号即序列位置，M 段在最前）；
+    # L = `cand` 里的**车号**经 `v_token_index(seg)` 映射后的 V 段下标；R = 本车 V token 下标
+    # 广播 k 份（路线候选是**路径**，序列里没有它们的 token，见 `PolicyNet.route_logits_emb`）。
+    # ⚠️ **L 曾与 S 共用 `tok_idx = cand`——那是缺陷，不是口径**（2026-10-04 修复）：车号
+    # 0..n_agv-1 被当成序列位置，L 头实际索引 M 段机台 token，看不到任何车辆特征
+    # （battery / capacity / speed_factor / st_down / zone_wait / 位置）。修前
+    # `v_token_index` 只在测试里被调用、生产路径从不使用，故手搓下标的测试查不出来。
+    # 改动本字段前先看 `test_policy_heads.test_l_head_reads_v_tokens_on_the_production_path`。
     tok_idx: np.ndarray
     # 采样那一刻策略在 `action` 上的 log 概率（无梯度标量）。它是 `decisions_logp` 带梯度
     # 重算值的**同源对照**：裁剪路径的 `old` 直接由它**逐决策**回放（`sampled_decisions_logp`，
@@ -327,12 +331,21 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
             tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg)
             head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
                     "R": policy.route_logits_emb}[kind]
-            if kind == "R":
+            if kind == "S":
+                # 机台号 = 序列位置（M 段在最前）——S 的候选本身就是 token 下标。
+                tok_idx = np.asarray(cand, dtype=np.int64)
+            elif kind == "L":
+                # ⚠️ L 的候选是**车号**，不是序列位置：必须经 `v_token_index` 映射到 V 段
+                # token。修复前它与 S 共用 `tok_idx = cand`（缺陷，2026-10-04 修）——车号
+                # 0..n_agv-1 被当成序列位置落在 M 段上，L 头读的是机台 token，对车辆特征
+                # （电量/载量/速度/趴窝/位置/区段等待）完全失明。当时 `v_token_index` 只在
+                # 测试里被调用、生产路径从不使用，故手搓下标的测试全绿而生产是错的。
+                v_idx = v_token_index(seg)
+                tok_idx = np.asarray([v_idx[int(a)] for a in cand], dtype=np.int64)
+            else:                                   # R
                 # 路线候选在序列里没有 token（见 `PolicyNet.route_logits_emb`）：取本车 V token
                 # 的下标、k 个候选共用同一份——打分只差在 `cand_feat`。
                 tok_idx = np.full(len(cand), v_token_index(seg)[int(aid)], dtype=np.int64)
-            else:
-                tok_idx = np.asarray(cand, dtype=np.int64)
             logits = head(tok,
                           torch.as_tensor(feat, dtype=torch.float32).reshape(1, 1, -1),
                           torch.as_tensor(cand_feat, dtype=torch.float32),
@@ -378,8 +391,11 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     `chain_logp`（求和）与 `decisions_logp`（向量化裁剪用）都从这里取项，**不可能漂开**。
     每个决策用**当时记录的** token/决策/候选特征重建打分（状态已变，不能用最新快照）。
     梯度经 `forward_enc` 同时回到**三**个头与编码器——这是"联合链"的实质（约定 1/5）。
-    ⚠️ token 下标用 `d.tok_idx`（R 与 S/L 的下标语义不同，见 `Decision.tok_idx`）——
-    S/L 的 `tok_idx` 恒等于 `cand`，故这条统一路径不改既有两头的任何一位。
+    ⚠️ token 下标用 `d.tok_idx`（三头语义各不同，见 `Decision.tok_idx`）：S = 机台号即序列
+    位置；L = 车号经 `v_token_index` 映射的 V 段下标；R = 本车 V token 广播给 k 条候选。
+    ⚠️ **L 的 `tok_idx` 修复前错记为 `cand`（缺陷，2026-10-04 修）**：那时这条统一路径
+    忠实回放的是"索引 M 段"的错误分布——它不改既有两头任何一位的保证只对 S/R 成立。
+    修复后重算路径自动跟随采样下标（`_act` 记录什么就重算什么），无需另一套映射。
     """
     out: list[torch.Tensor] = []
     for d in decisions:

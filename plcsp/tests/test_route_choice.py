@@ -30,11 +30,14 @@ from plcsp.env.snapshot import Snapshot
 from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.features import F_MAX, SEG_SLICE
 
-# 黄金摘要：**改动路线头之前**（2026-10-04，本仓 HEAD）在 MK01 上跑出的链路指纹。
-# 它把"路线头关闭 ⟹ 逐位等于今日"钉成机器可判的判据——任何对 `_drive`/`roll_chain`
-# 的改动若在关闭档下动了行为，此处立刻变红（其余测试都盖不住"多抽了一个随机数"
-# 或"路径选法变了"这类静默漂移）。
-GOLDEN_CHAIN_DIGEST = "403f68e3ba380857e14a94ada025d667a2cc7e0790abef755ca2845f371c31b0"
+# 黄金摘要：在 MK01 上跑出的链路指纹，把"路线头关闭 ⟹ 逐位等于既有行为"钉成机器可判的
+# 判据——任何对 `_drive`/`roll_chain` 的改动若在关闭档下动了行为，此处立刻变红（其余测试
+# 都盖不住"多抽了一个随机数"或"路径选法变了"这类静默漂移）。
+# ⚠️ 2026-10-04 重捕获（L 头 token 下标修复，不是路线头改动）：旧值
+# `403f68e3ba380857e14a94ada025d667a2cc7e0790abef755ca2845f371c31b0` 钉的是带缺陷的链路
+# ——`_act` 把 L 的**车号**当序列位置，L 头读 M 段机台 token、对车辆特征完全失明；修复后
+# L 的分数与采样动作都变，摘要必须换新基准。路线头关闭档本身的"逐位稳定"仍由本测试守着。
+GOLDEN_CHAIN_DIGEST = "e67a71292fe33c16e64cdcfdc6a6e8104cd06c546a3c4377ca1b9eb9dab55f79"
 
 
 def _setup(name="mk01"):
@@ -257,10 +260,13 @@ def test_route_enabled_chain_is_reproducible_and_differs():
 
 @pytest.mark.unit
 def test_route_head_off_is_bit_identical_to_baseline():
-    """判据 1：路线头**关闭**（默认 `route_k=1`）时链路逐位等于改动前——黄金摘要钉死。
+    """判据 1：路线头**关闭**（默认 `route_k=1`）时链路逐位等于既有行为——黄金摘要钉死。
 
     摘要含每条决策的 tok/feat/cand_feat/cand/action/logp 与 makespan/travel/energy。
     任何"多抽一个随机数、路径选法变了、快照多算了一个量"的漂移都会翻红。
+    ⚠️ 2026-10-04 重捕获：L 头 token 下标修复（`_act` 车号→V 段 token）改变的是 **L 决策的
+    输入**，采样动作与指标随之变化，故摘要换新基准。旧基准 `403f68e3...` 钉的是带缺陷的
+    链路（L 头读机台 token、看不见任何车辆特征）。本测试的**判据**（关闭档逐位稳定）不变。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
     torch.manual_seed(20261004)                 # 与黄金摘要生成时同一初始化
