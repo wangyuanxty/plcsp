@@ -164,3 +164,71 @@ F 敏感性  ·  G HGS  ·  E O3b（需要先做 O1 的加长实验）
 - **机制总览 + 域内现状** → `progress-log.md` **§30.0**
 - **可迁移方法与裁定** → `docs/method-transfer-candidates.md`
 - **权威设计（问题定义/约束/目标/骨架）** → `spec`（**§6 的机时账与部分结论已由本文取代**）
+
+---
+
+## 9. 冻结清单（**填满即冻结；冻结后不再改**）
+
+> 冻结 = 多实例复现的那一份配置。**冻结前把下面每格填上确切值。**
+> 状态：**未冻结**（⑩ 与 T3 未落，见 §9.5）。
+
+### 9.1 设备与并行
+
+| 项 | 值 |
+|---|---|
+| 解释器 | `D:/anaconda/envs/py312/python.exe`（GPU 档，见 `CLAUDE.md` §3） |
+| 主进程设备 | `--device cuda` |
+| 并行 | `--parallel --workers 8 --worker-device cpu`（§39/§40 实测最优） |
+| torch 线程 | `1`（包入口钉死） |
+| 池启动 | **约 21 s/run，一次性**——短跑（<10 步）不建议并行 |
+
+### 9.2 训练超参
+
+| 项 | 值 | 出处 |
+|---|---|---|
+| `--steps` | **待定** | spec 用 800；近期脚本用 300；§19.3 实测"~25 步即饱和" |
+| `--G` | 8 | `m13` 默认 |
+| `--lr` | 3e-4 | `m13` 默认 |
+| `--seed` | **0**（单 seed 阶段） | §4 |
+| `adv_mode` | `scalar`（未切） | §30.3：切换需加长实验 |
+| `epochs` / `clip_eps` | 默认（1 / None） | — |
+
+### 9.3 开关（基线档 = **全开**）
+
+| 开关 | 位置 | 基线取值 |
+|---|---|---|
+| 十约束 | `ConstraintConfig()` | **全开** |
+| `route_k` | `joint_chain_step` | **2** |
+| `route_zones`（R2） | `joint_chain_step` | **True** |
+| `geom_bias` | `joint_chain_step` | **True** |
+| `pm_head`（⑫） | `joint_chain_step` | **True** |
+| `charge_head`（⑪） | `joint_chain_step` | **True** |
+| `agv_failover`（⑨） | `SimConfig` | **True** |
+| `machine_age_failure`（③） | `SimConfig` | **True** |
+| `batch_head`（⑩） | — | ⛔ **未实现**（见 §9.5） |
+| T3 | — | ⛔ **未实现** |
+
+### 9.4 随机流口径
+
+- 每条链独立 seed：`seed*SEED_STRIDE + g`（并行档口径，§39）
+- **并行档与串行档数值不同**——冻结的必须是**同一档**
+- `layout_seed = 0`（奖励权重与特征归一化的 `m_ref` 同源）
+
+### 9.5 ⛔ 冻结的两个阻塞项
+
+1. **⑩ 拼批头未实现**——agent 按存在性判据**停手**（`1a8eea5`）：
+   放宽到整条队列后，**默认档（`n_agv=3`）可拼次数仍为 0**（取货时队列长均值 0.79）。
+   根因是**车队相对运输负荷过大**，**不是**队首连续段规则（§30.8 的诊断不完整，已订正）。
+   **三条出路待用户裁定**：换 regime / 改 multi-drop 行程模型 / 移出基线。
+2. **T3 未实现**——带两个前置（② 的激活指标 + 预算标定）。
+
+### 9.6 ⚠️ 接线缺口（做"基线全开"时必须补）
+
+`m13_train_a.py` 的 CLI **只接了 `route_k` 与 `pm_head`**；
+`route_zones` / `geom_bias` / `charge_head` 已在 `chain_pool.py` 的 task 元组里，
+但**没接到 CLI**；`agv_failover` / `machine_age_failure` 在 `SimConfig`，也没接。
+
+**而且 `_make_eval_fn` 必须同源**——`pm_head` 的 docstring 已警告：
+**"训练开、评估关 = 用另一个策略评估"**。新开关同理。
+
+**⟹ "改基线开"不是翻默认值，是接线 + 训练/评估同源 + 测试。**
