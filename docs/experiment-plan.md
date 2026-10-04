@@ -251,13 +251,32 @@ F 敏感性  ·  G HGS  ·  E O3b（需要先做 O1 的加长实验）
    **三条出路待用户裁定**：换 regime / 改 multi-drop 行程模型 / 移出基线。
 2. **T3 未实现**——带两个前置（② 的激活指标 + 预算标定）。
 
-### 9.6 ⚠️ 接线缺口（做"基线全开"时必须补）
+### 9.6 ✅ 接线缺口（**2026-10-05 已补**，`eabac82`）
 
-`m13_train_a.py` 的 CLI **只接了 `route_k` 与 `pm_head`**；
-`route_zones` / `geom_bias` / `charge_head` 已在 `chain_pool.py` 的 task 元组里，
-但**没接到 CLI**；`agv_failover` / `machine_age_failure` 在 `SimConfig`，也没接。
+**原缺口**：`m13_train_a.py` 的 CLI **只接了 `route_k` 与 `pm_head`**；
+`route_zones` / `geom_bias` / `charge_head` 已在 `chain_pool.py` 的 task 元组里但没接 CLI；
+`agv_failover` / `machine_age_failure` 在 `SimConfig`，也没接。
 
-**而且 `_make_eval_fn` 必须同源**——`pm_head` 的 docstring 已警告：
-**"训练开、评估关 = 用另一个策略评估"**。新开关同理。
+**已补**：
 
-**⟹ "改基线开"不是翻默认值，是接线 + 训练/评估同源 + 测试。**
+| 开关 | CLI | 位置 |
+|---|---|---|
+| `route_k` | `--route-k` | 链级 |
+| `route_zones` | `--route-zones` | 链级 |
+| `geom_bias` | `--geom-bias` | 链级 |
+| `pm_head` | `--pm-head` | 链级 |
+| `charge_head` | `--charge-head` | 链级 |
+| `agv_failover` | `--agv-failover` | **`SimConfig`**（在 `build_training_setup` 之前建进 `cfg`） |
+| `machine_age_failure` | `--machine-age-failure` | **`SimConfig`**（同上） |
+
+**训练/评估同源**由 `plcsp/tests/test_m13_wiring.py` 钉住（4 条，**做过变异检查**）：
+评估侧漏透传任何一个链级开关 → 测试当场红。`m13` 也新增一行打印，把全部开关列出来。
+
+**基线全开的命令**：
+
+```bash
+D:/anaconda/envs/py312/python.exe -m plcsp.m13_train_a \
+    --inst mk01 --steps 300 --seed 0 --device cuda --parallel --workers 8 \
+    --route-k 2 --route-zones --geom-bias --pm-head --charge-head \
+    --agv-failover --machine-age-failure
+```
