@@ -193,11 +193,13 @@ def test_charge_decisions_join_the_chain_and_its_logp():
     assert all(d.cand == charge_cands(n_ch) for d in c_dec), \
         f"C 的候选应是动作码 {charge_cands(n_ch)}：{ {d.cand for d in c_dec} }"
     assert all(0 <= d.action < len(d.cand) for d in c_dec)
-    # 采样回放与带梯度重算逐位同源（裁剪路径的正确性前提）
-    vec = decisions_logp(dec, pol)
+    # 采样回放与带梯度重算同源（裁剪路径的正确性前提）——
+    # ⚠️ 2026-10-04 批量重算批次：重算改成 (B,N,F) 一次批前向，与采样回放只在末位漂移内
+    # 一致（≤1e-5），不再逐位相同。见 test_joint_chain 的同源判据（旧断言是逐位相等）。
+    vec = decisions_logp(dec, pol).detach()
     assert vec.shape == (len(dec),), f"逐决策 logp 未覆盖 C：{tuple(vec.shape)}"
-    assert vec.tolist() == sampled_decisions_logp(dec).tolist(), \
-        "含 C 后逐决策 logp 的采样回放与重算不再逐位同源"
+    assert torch.allclose(vec, sampled_decisions_logp(dec), atol=1e-5), \
+        "含 C 后逐决策 logp 的采样回放与重算漂开超过 1e-5（批路径算错了？）"
     # C 决策真的进链 logp（不是只记录）
     lp_all = float(chain_logp(dec, pol).detach())
     lp_no_c = float(chain_logp([d for d in dec if d.kind != "C"], pol).detach())

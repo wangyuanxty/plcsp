@@ -15,9 +15,19 @@ R 决策，链 logp 照常求和。⚠️ **默认 `route_k=1`（关闭）**—�
 
 后接标准 GRPO：**一个**终端奖励 r → 组内 z 化（`_z`）→ 纯组内 REINFORCE（默认：
 `epochs=1, clip_eps=None`）或 PPO 式裁剪（**只在 `epochs>1` 时才有意义**——`epochs=1` 时
-`ratio ≡ 1`，裁剪项恒等、纯空转；见 `joint_chain_step` 的守卫）。信任域按**决策**施加
+`new` 与 `old` 同参数算出 ⟹ `ratio ≈ 1`（1e-5 内，见下），裁剪项近乎恒等、纯空转；
+见 `joint_chain_step` 的守卫）。信任域按**决策**施加
 （每个决策一个 ratio）：2026-10-04 修复——此前按**整条链**裁剪，而链 logp 是求和（100–460
 项）⇒ 一次更新就把全部链推出带外、后续 epoch 梯度恒 0，clip 形同虚设（见 `joint_chain_step`）。
+
+⚠️ **重算路径的编码器前向已批量化**（2026-10-04，性能批次）：`_decision_logp_terms` 把
+**整组 G 条链的全部决策**堆成 `(B, N, F_MAX)`，**一次** `forward_enc`（在线路径不能批——每个
+决策依赖上一刻的仿真状态；重算是事后的，可以批）。编码器是耗时主项，实测（MK01、本机、
+`torch.set_num_threads(1)`）：单条前向 ≈ 6.0 ms、231 条批成一次 ≈ 402 ms（**~3.4×**），
+重算从 9.31 ms/决策降到 2.31 ms/决策，`joint_chain_step` 整步 **≈2×**。
+**代价**：批矩阵乘的分块与单条不同 ⟹ 重算的每一项有 ~2e-7 的末位漂移，`ratio ≡ 1` 因此从
+**严格等式**降为"≈1 在 1e-5 内"（逐位钉死的地方已逐个改写，见各函数 docstring 与测试）。
+⚠️ **累加次序没有变**：链级 logp 仍是逐决策 float32 顺序累加（`_sequential_float32_sum`）。
 
 ⚠️ **O1：优势有两个口径**（`joint_chain_step` 的 `adv_mode`）——`"scalar"`（默认，历史口径：
 先加权求和再组内 z 化）与 `"per_objective"`（每目标各自组内 z 化、再按 w 合成）。后者对
@@ -107,8 +117,9 @@ def _advantages(f_objs: np.ndarray, w: tuple[float, float, float],
                 adv_mode: str) -> torch.Tensor:
     """组内优势 A（G 条链，float32）——两种口径（O1）。
 
-    - `scalar`：r_g = Σᵢ wᵢ(−f_{g,i})，A = z(r)。⚠️ 这是**今日**的表达式（逐位兼容，
-      由 `test_scalar_adv_mode_is_bitwise_unchanged` 的捕获摘要钉死）。z 只消掉加权和的
+    - `scalar`：r_g = Σᵢ wᵢ(−f_{g,i})，A = z(r)。⚠️ 这是**今日**的表达式（**公式**未变，
+      由 `test_scalar_adv_mode_regression_pin` 的捕获摘要钉死——注意该摘要已于 2026-10-04
+      批量重算批次**重捕获**：优势公式一字未动，变的是重算前向的末位）。z 只消掉加权和的
       **总尺度**，消不掉**目标之间的相对尺度**——w 只把**参考点**上的三项贡献拉平
       （wᵢ·fᵢ^ref ≡ 1/Σ），管不住三者在组内的**方差**：谁方差大谁主导 A，问题因此隐蔽。
     - `per_objective`：A = Σᵢ wᵢ·zᵢ(−fᵢ)。每个目标**各自**组内 z 化——z 对逐目标正缩放不变
@@ -393,8 +404,10 @@ class Decision:
     tok_idx: np.ndarray
     # 采样那一刻策略在 `action` 上的 log 概率（无梯度标量）。它是 `decisions_logp` 带梯度
     # 重算值的**同源对照**：裁剪路径的 `old` 直接由它**逐决策**回放（`sampled_decisions_logp`，
-    # 省掉一整遍"重算 old"的链前向），逐位一致性由测试钉死。既然取自采样那一刻，它天然不受
+    # 省掉一整遍"重算 old"的链前向），一致性由测试钉死。既然取自采样那一刻，它天然不受
     # "采样之后再算 old"这类重排的影响。
+    # ⚠️ 2026-10-04（批量重算批次）：重算改成 (B,N,F) 一次批前向，故它与重算值只在 **1e-5 内**
+    # 一致、不再逐位相同（旧命题是逐位）。实测 max|Δ| ≈ 2.4e-7；详见 `decisions_logp`。
     logp: float
     # M 决策决定的是**哪台机台**（其余头 None）——决策点逐机台触发，而候选是**动作码**
     # （0/1），机台身份在 `cand` 里表达不了。生产路径写入（`_act` 的 `mach_id`），
@@ -418,8 +431,13 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
 
     ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
        **带梯度重算**（SimPy 栈不参与反向传播，见模块头）。
-    ⚠️ 每个决策存**当时的** token/决策/候选特征——仿真状态在变，用事后最新快照重建等于把
-       策略输入换成另一个状态（决策与 logp 不再对应）。
+    ⚠️ **每个决策存**当时的** token/决策/候选特征——仿真状态在变，用事后最新快照重建等于把
+       策略输入换成另一个状态（决策与 logp 不再对应）。存的都是 **CPU numpy**（重算时再搬到
+       参数设备，见 `_decision_logp_terms`）——决策日志不占显存。
+    ⚠️ **设备跟随策略**（2026-10-04 设备批次）：在线前向经 `forward_enc` 搬到 `policy.device`；
+       动作采样流的设备也跟随策略（CUDA 上 `torch.multinomial` 不接受 CPU generator）——故
+       `--device cuda` 时整条链在 GPU 上跑，默认档逐位不变（`torch.Generator(device='cpu')`）。
+
     ⚠️ 布局由调用方给（本函数**不采样布局**）：`layout.layout_seed` 必须与奖励侧参考运行同源
        ——`ReferenceObjectives.of` 固定 seed_layout=0，而特征归一化的 `m_ref` 取自**该布局**的
        参考运行（`build_setup`）。两者不同源则策略看到的刻度与 w 的刻度来自两次参考调度。
@@ -484,7 +502,11 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
             "根本不存在（决策点不存在）——给策略一个死动作只会污染链 logp。"
             "请开 ⑪ 或传 charge_head=False。")
     decisions: list[Decision] = []
-    gen = generator if generator is not None else torch.Generator().manual_seed(seed)
+    # ⚠️ 采样流的设备**跟随策略**（2026-10-04 设备批次）：CUDA 上 `torch.multinomial` 不接受
+    #    CPU generator（`--device cuda` 时过去会直接报错）。CPU 档 `device='cpu'` 与旧行为
+    #    逐位相同（`torch.Generator()` 的默认设备就是 cpu）。
+    gen = (generator if generator is not None
+           else torch.Generator(device=policy.device.type).manual_seed(seed))
     world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout),
                      constraints=constraints)
     # 区段映射（R 头争用特征的原料）：与 `SimWorld` 内部 `build_zone_map(layout, cfg.zone_granularity)`
@@ -598,15 +620,43 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     ⚠️ **L 的 `tok_idx` 修复前错记为 `cand`（缺陷，2026-10-04 修）**：那时这条统一路径
     忠实回放的是"索引 M 段"的错误分布——它不改既有两头任何一位的保证只对 S/R 成立。
     修复后重算路径自动跟随采样下标（`_act` 记录什么就重算什么），无需另一套映射。
+
+    ⚠️ **编码器前向批量化**（2026-10-04，本批的性能改动）：把本列表**全部**决策的 token 堆成
+    `(B, N, F_MAX)`，**一次** `forward_enc`（在线路径不能批——每个决策依赖上一刻的仿真状态；
+    重算是事后的，可以批）。编码器是耗时主项：本机实测（MK01、`torch.set_num_threads(1)`、
+    20 token × d=128 × 8 层）单条前向 ≈ 6.0 ms、231 条批成一次 ≈ 402 ms（每条约 1.74 ms，
+    即**吞吐 ~3.4×**）；`chain_logp` 原先每个决策一次前向，就是那 2×链长 次的来源。
+    - **形状前提**：全部决策的 token 形状与 `seg` 必须相同。`build_tok` 的行数是实例级常量
+      （`n_m + n_jobs + n_agv + 1`，四段长度取自 `NormContext`），故在本项目的调用面上恒成立
+      （`test_all_decisions_in_a_step_share_one_token_shape` 钉住）。不同则**显式报错**——
+      不静默退回逐条，那会让"批没接上"变成看不见的性能回归，且掩盖上游契约变化。
+    - **打分头仍逐决策**：候选数逐决策不同（机台 / 车 / k 条路径 / 2 个动作码 / 桩数+1），
+      批它们要 padding+masking；而头只是 `d_model+F → 64 → 1` 的两层 MLP，编码器才是主项
+      （见 `joint_chain_step` 的批量说明）。故头保持逐决策，语义不变。
+    - **末位漂移**：批前向与单条前向的矩阵乘分块不同 ⟹ 结果在 1e-5 内一致、不是逐位相同。
+      故 `Decision.logp`（采样时逐条算出）与这里的重算不再逐位同源，裁剪的 `ratio ≡ 1`
+      随之从**严格等式**降为"≈1 在 1e-5 内"（见 `decisions_logp` 的说明）。
     """
+    if not decisions:
+        return []
+    shapes = {d.tok.shape for d in decisions}
+    segs = {d.seg for d in decisions}
+    if len(shapes) != 1 or len(segs) != 1:
+        raise ValueError(
+            f"批量重算要求全部决策的 token 形状与 seg 相同，实得形状 {shapes}、seg {segs}。"
+            "形状唯一性由 `build_tok` 的实例级常量保证（行数 = n_m+n_jobs+n_agv+1）；"
+            "若上游真的让 seg 随决策变，须先改回逐决策前向并同步批量判据，不得静默错算。")
+    # ⚠️ 设备跟随参数（2026-10-04 设备批次）：决策记录是 CPU numpy，这里**一次**搬到
+    #    `policy.device`（`--device cuda` 时重算整段在 GPU 上）。头内的 `_to_dev` 兜底其余输入。
+    tok_all = torch.stack([torch.as_tensor(d.tok, dtype=torch.float32)
+                           for d in decisions]).to(policy.device)
+    emb, _ = policy.forward_enc(tok_all, decisions[0].seg)        # (B, N, d)：一次前向
     out: list[torch.Tensor] = []
-    for d in decisions:
-        tok, _ = policy.forward_enc(
-            torch.as_tensor(d.tok, dtype=torch.float32).unsqueeze(0), d.seg)
+    for i, d in enumerate(decisions):
         head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
                 "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
                 "C": policy.charge_logits_emb}[d.kind]
-        logits = head(tok,
+        logits = head(emb[i:i + 1],
                       torch.as_tensor(d.feat, dtype=torch.float32).reshape(1, 1, -1),
                       torch.as_tensor(d.cand_feat, dtype=torch.float32),
                       torch.as_tensor(d.tok_idx, dtype=torch.long))
@@ -615,37 +665,84 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     return out
 
 
+def _sequential_float32_sum(terms) -> torch.Tensor:
+    """Σ terms——**逐步 float32 顺序累加**（链级 logp 的唯一累加口径）。
+
+    ⚠️ 不许换成 `torch.stack(terms).sum()`：`Tensor.sum()` 的归约次序与逐步相加不同
+    （上一批实测末位差 ~1.5e-5），而 `joint_chain_step` 的 `ratio` 判据就是拿链级 logp
+    与采样回放比的——归约次序一变，"同源"就只剩近似（见 `chain_logp` / `decisions_logp`
+    的 1e-5 口径说明）。
+    """
+    total = torch.zeros(())
+    for term in terms:
+        total = total + term
+    return total
+
+
 def decisions_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
     """**逐决策** logπ(a_t) 向量 `(n_decisions,)`，**带梯度**——裁剪的信任域就建在它上面。
 
     它是 `chain_logp` 去掉最后那步求和：同一个打分体（`_decision_logp_terms`）、同一批
-    "当时的"上下文。裁剪按**决策**而非整条链施加（见 `joint_chain_step` 的信任域段落）。
-    ⚠️ **不要**反过来用 `... .sum()` 定义 `chain_logp`：`Tensor.sum()` 的归约次序与逐步
-    float32 相加不同（实测末位差 ~1e-5），会破坏 `chain_logp` 与 `sampled_logp` 的**逐位
-    同源**——裁剪首轮 `ratio ≡ 1` 是**严格等式**的前提。
+    "当时的"上下文——而现在也是**同一次编码器批前向**（整条链一次，见 `_decision_logp_terms`）。
+    裁剪按**决策**而非整条链施加（见 `joint_chain_step` 的信任域段落）。
+
+    ⚠️ **2026-10-04 批量重算后，本函数与 `sampled_decisions_logp` 只在 1e-5 内一致、不再
+    逐位相同**（旧断言是 `torch.equal`）：
+    - 旧命题：重算与采样回放**逐位**相同（两者都是逐决策单条前向，同一串浮点运算）；
+    - 新命题：**≤1e-5 内相同**（重算改成一次 `(B,N,F)` 批前向，矩阵乘分块与单条不同，
+      本机实测 `max|Δlogp| = 2.4e-7`）；
+    - 理由：编码器前向是耗时主项（本机实测单条 ≈6.0 ms；231 条批前向 ≈402 ms，吞吐 ~3.4×，
+      重算整段从 9.31 ms/决策降到 2.31 ms/决策）。裁剪的 `ratio ≡ 1` 随之从严格等式降为
+      "≈1 在 1e-5 内"，由 `test_per_decision_logp_vector_is_same_source_within_tolerance` 钉住。
+    ⚠️ **不要**反过来用 `... .sum()` 定义 `chain_logp`：归约次序与逐步 float32 相加不同
+    （实测末位差 ~1.5e-5），会把这个 1e-5 带撑破（见 `_sequential_float32_sum`）。
     """
     return torch.stack(_decision_logp_terms(decisions, policy))
+
+
+def all_decisions_logp(chains: list[list[Decision]], policy: PolicyNet) -> torch.Tensor:
+    """G 条链的**展平逐决策** logp `(Σn_g,)`，**带梯度**——裁剪路径用它，**一次**编码器前向。
+
+    ⚠️ 与 `decisions_logp` 的区别只有覆盖面：后者一次一条链，本函数一次覆盖**全部 G 条链的
+    全部决策**（批大小 = Σn_g）。两条路径的打分体、累加口径、1e-5 容差完全相同。
+    """
+    return torch.stack(_decision_logp_terms([d for ch in chains for d in ch], policy))
 
 
 def chain_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
     """Σ_t logπ_S(a_t) + Σ_t logπ_L(a_t)——**求和**（spec §5.3.4 约定 2），**带梯度**。
 
-    ⚠️ 累加**必须逐步 float32**（与 `sampled_logp` 同序、同 dtype ⇒ 参数未变时**逐位相同**，
-    裁剪首轮 ratio 才严格 ≡1）。逐决策的值见 `decisions_logp`；两者共用同一打分体。
+    ⚠️ 累加**必须逐步 float32**（`_sequential_float32_sum`）：与 `sampled_logp` 同序、同 dtype。
+    参数未变时两者**在 1e-5 内相同**——不再是逐位相同（旧命题），因为每项的来源已从"逐决策
+    单条前向"改成"(B,N,F) 一次批前向（见 `_decision_logp_terms`）；累加**次序**没变，
+    变的只是各项的末位（批矩阵乘分块不同）。逐决策的值见 `decisions_logp`；两者共用同一打分体。
     """
-    total = torch.zeros(())
-    for term in _decision_logp_terms(decisions, policy):
-        total = total + term
-    return total
+    return _sequential_float32_sum(_decision_logp_terms(decisions, policy))
+
+
+def chains_logp(chains: list[list[Decision]], policy: PolicyNet) -> torch.Tensor:
+    """G 条链的**链级** logp `(G,)`，**带梯度**——无裁剪训练路径用它，**一次**编码器前向。
+
+    ⚠️ 每条链内仍是 `_sequential_float32_sum`（逐步 float32 顺序累加，与 `chain_logp`
+    **同源**：单链调用时逐位相同）；批量化只动"token 嵌入算在哪"，不动"链内怎么累加"。
+    """
+    lengths = [len(ch) for ch in chains]
+    terms = _decision_logp_terms([d for ch in chains for d in ch], policy)
+    parts, r = [], 0
+    for n in lengths:
+        parts.append(_sequential_float32_sum(terms[r:r + n]))
+        r += n
+    return torch.stack(parts)
 
 
 def sampled_decisions_logp(decisions: list[Decision]) -> torch.Tensor:
     """**逐决策**回放采样那一刻的 logp：向量 `(n_decisions,)`，无梯度——裁剪路径的 `old`。
 
-    ⚠️ 与 `decisions_logp` **同序、同 dtype**（float32），故"参数未变"时两者**逐位相同**
-    ——`ratio = exp(new − old) ≡ 1` 才是严格成立（而非近似）。别图省事改用 float64：
-    那会引入 ~1e-5 的假 delta（实测 1.0000114），在裁剪边界上给出无意义的翻转。
-    本函数没有可省的前向：值在 `roll_chain` 采样时就已算好（`Decision.logp`）。
+    ⚠️ 与 `decisions_logp` **同序、同 dtype**（float32），故"参数未变"时两者在 **1e-5 内**
+    相同——`ratio ≈ 1` 是**近似**成立（不再是严格等式：重算已改成 `(B,N,F)` 一次批前向，
+    每项有 ~2e-7 的末位漂移，见 `_decision_logp_terms` / `decisions_logp`）。别图省事改用
+    float64：那会引入 ~1e-5 的假 delta（实测 1.0000114），在裁剪边界上给出无意义的翻转。
+    ⚠️ 值在 `roll_chain` 采样时就已算好（`Decision.logp`），本函数没有可省的前向。
     """
     return torch.stack([torch.tensor(d.logp, dtype=torch.float32) for d in decisions])
 
@@ -654,7 +751,9 @@ def sampled_logp(decisions: list[Decision]) -> torch.Tensor:
     """Σ `Decision.logp`——**链级** logp 的采样时刻值（`chain_logp` 的无梯度对照）。
 
     ⚠️ 裁剪路径已改**逐决策**（`sampled_decisions_logp`），本函数不再是裁剪基准；保留为
-    链级口径的定义对照与逐位同源的回归判据（测试用）。累加保持逐步 float32（同 `chain_logp`）。
+    链级口径的定义对照与同源回归判据（测试用）。累加保持逐步 float32（同 `chain_logp`）。
+    ⚠️ 与 `chain_logp` 的差在 **1e-5·n** 量级内（各项末位漂移之和），不再逐位相同——
+    见 `chain_logp` 的说明。
     """
     total = torch.zeros(())
     for d in decisions:
@@ -718,11 +817,21 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
 
     ⚠️ **裁剪只在 `epochs > 1` 时才有意义**（默认 `epochs=1, clip_eps=None` = 纯组内 REINFORCE，
     即 spec §5.3.4/理论骨架的「纯版本」）：`epochs=1` 时 `new` 与 `old` 都在**同一组参数**
-    上算出 ⇒ `ratio ≡ 1` ⇒ `clamp(1, 1±ε) ≡ 1`，裁剪项**恒等**、纯空转（`test_clipped_path_
-    ratio_uses_sampling_time_logp` 的 `lr=0` 判据测的就是这个恒等式）。故此处显式**拒收**
+    上算出 ⇒ `ratio ≈ 1` ⇒ `clamp(1, 1±ε) ≈ 1`，裁剪项**近乎恒等**、纯空转（`test_clipped_path_
+    ratio_uses_sampling_time_logp` 的 `lr=0` 判据测的就是这个恒等性）。故此处显式**拒收**
     "epochs=1 + clip_eps"这个组合，
+    ⚠️ `ratio` 不再是**精确** 1，因为 `old` 是采样时逐决策算的、`new` 是事后 `(B,N,F)` 一次批
+    前向算的——末位漂移约 2e-7（2026-10-04 批量重算批次，见 `_decision_logp_terms`）；
+    判据容差 1e-5。
     并在 `epochs=1` 时**连 `old` 都不算**——省掉一整遍链前向；`epochs>1` 时 `old` 直接取
     `Decision.logp`（采样那一刻已存，`sampled_decisions_logp` **逐决策**回放），**不额外重算**。
+
+    ⚠️ **重算的批量口径**（2026-10-04）：两条路径都**一次**编码器前向覆盖 **G 条链的全部
+    决策**——无裁剪路径用 `chains_logp`（返回 `(G,)`，链内仍逐步 float32 顺序累加），
+    裁剪路径用 `all_decisions_logp`（返回展平的 `(Σn_g,)`）。**打分头不批**：候选数逐决策
+    不同（机台 / 车 / k 条路径 / 2 个动作码 / 桩数+1），批它们要 padding+masking，而头只是
+    两层 MLP——实测（MK01、231 个决策）编码器批前向 402 ms、全部 231 次头调用合计 45 ms
+    （≈11%），且批头会改变 `log_softmax` 的归约长度、把 1e-5 的漂移带撑大。故头保持逐决策。
 
     ⚠️ **`route_k`（R 层开关，2026-10-04 恢复路线头）**：默认 `1` = 关闭，链与训练步
     **逐位等于今日**（既有读数全靠它）；传 `2` 启用——每次行驶在 2 条候选路径里由策略选，
@@ -803,8 +912,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         raise ValueError("epochs>1 必须配 clip_eps：无裁剪时同一批数据重复计算，"
                          "结果与 epochs=1 相同（纯浪费）。")
     if clip_eps is not None and epochs <= 1:
-        raise ValueError("epochs=1 配 clip_eps 是空转：new 与 old 同参数算出 ⇒ ratio≡1 "
-                         "⇒ clamp 恒等。请用 epochs>1，或 clip_eps=None（纯组内 REINFORCE）。")
+        raise ValueError("epochs=1 配 clip_eps 是空转：new 与 old 同参数算出 ⇒ ratio≈1 "
+                         "⇒ clamp 近乎恒等。请用 epochs>1，或 clip_eps=None（纯组内 REINFORCE）。")
     if policy.optim is None:
         policy.optim = torch.optim.Adam(policy.parameters(), lr=lr)
 
@@ -813,7 +922,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     f_objs: list[tuple[float, float, float]] = []
     # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
     #    （消费次序确定 ⇒ 逐位可复现），不再落到全局 torch RNG。
-    gen = torch.Generator().manual_seed(seed)
+    #    ⚠️ 设备跟随策略（2026-10-04 设备批次）：CUDA 上必须用 CUDA generator（见 `roll_chain`）。
+    gen = torch.Generator(device=policy.device.type).manual_seed(seed)
     for g in range(G):
         dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
                               sample=True, generator=gen, constraints=cons, route_k=route_k,
@@ -825,25 +935,35 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
 
     # O1：两种优势口径的唯一分叉点（见 `_advantages`）。scalar 分支与历史表达式逐位相同。
     A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode)
+    # ⚠️ 设备跟随参数（2026-10-04 设备批次）：优势 / 逐决策回放都必须在**参数设备**上参与
+    #    损失（`--device cuda` 时 `ratio`、`obj` 全在 GPU 上）；`A` 本身留在 CPU 供诊断。
+    A_dev = A.detach().to(policy.device)
 
     # 裁剪路径的信任域基准 = 采样那一刻 logp 的**逐决策**回放（`Decision.logp`，无梯度）——
-    # 不重算，且与 `decisions_logp` 同序同 dtype（见 `sampled_decisions_logp`），故首轮
-    # ratio 逐位严格 = 1。组内链长不等：把 G 条链的全部决策拼成一个长向量，每个决策经
+    # 不重算，且与 `decisions_logp` / `all_decisions_logp` 同序同 dtype，故首轮
+    # ratio ≈ 1（**1e-5 内**：重算已是批前向，末位与采样时逐条算出的值不同，见 `decisions_logp`）。
+    # 组内链长不等：把 G 条链的全部决策拼成一个长向量，每个决策经
     # `repeat_interleave` 拿到**它那条链**的优势。
     if clip_eps is not None:
         lengths = torch.tensor([len(ch) for ch in chains], dtype=torch.long)
-        old_flat = torch.cat([sampled_decisions_logp(ch) for ch in chains])
-        adv_flat = A.detach().repeat_interleave(lengths)
+        old_flat = torch.cat([sampled_decisions_logp(ch) for ch in chains]).to(policy.device)
+        # ⚠️ `repeat_interleave` 的 repeats 必须与输入**同设备**（CUDA 上否则 RuntimeError：
+        #    index is on cpu, different from other tensors on cuda）。`lengths` 本身留在 CPU
+        #    供 `_chain_mean` 的 `.split()` 用（那是纯 Python 侧）。
+        adv_flat = A_dev.repeat_interleave(lengths.to(A_dev.device))
     else:
         old_flat = adv_flat = None
 
     loss_val, ratio_mean, clipped_frac, grad_norm = 0.0, 1.0, 0.0, 0.0
     for _ in range(max(epochs, 1)):
         if clip_eps is None:
-            new = torch.stack([chain_logp(d, policy) for d in chains])
-            obj = A.detach() * new           # 纯组内 REINFORCE（理论骨架的「纯版本」）
+            # ⚠️ `chains_logp` 把 **G 条链的全部决策**堆成一次编码器前向（重算的批量口径，
+            #    见 `_decision_logp_terms`）——不是每条链各一次。
+            new = chains_logp(chains, policy)
+            obj = A_dev * new                # 纯组内 REINFORCE（理论骨架的「纯版本」）
         else:
-            new_flat = torch.cat([decisions_logp(d, policy) for d in chains])
+            # 同一次批前向覆盖全部链的全部决策（展平序与 `old_flat` / `adv_flat` 一致）
+            new_flat = all_decisions_logp(chains, policy)
             ratio = torch.exp(new_flat - old_flat)   # 逐**决策**概率比（与链长无关）
             obj = torch.min(ratio * adv_flat,
                             torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_flat)

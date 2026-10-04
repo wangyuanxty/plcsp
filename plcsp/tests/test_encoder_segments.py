@@ -26,6 +26,63 @@ def test_forward_shapes():
     assert ctx.shape == (1, enc.d_model)
 
 
+def _tok_batch(B, n_m=6, n_b=10, n_v=3):
+    """按补齐规则造一张 **(B, N, F_MAX)**：各段只填自己的有效列，第 b 行整行加 b。
+
+    逐 batch 元素取值**不同**（否则"批次只读了第 0 个元素"的缺陷会被掩盖：批输出的每一行
+    都等于同一个单条结果）。
+    """
+    from plcsp.nn.features import F_MAX, SEG_SLICE
+    t = torch.zeros(B, n_m + n_b + n_v + 1, F_MAX)
+    for b in range(B):
+        for start, n, key in ((0, n_m, "M"), (n_m, n_b, "B"), (n_m + n_b, n_v, "V"),
+                              (n_m + n_b + n_v, 1, "G")):
+            t[b, start:start + n, SEG_SLICE[key]] = float(b + 1)
+    return t, (n_m, n_b, n_v, 1)
+
+
+@pytest.mark.unit
+def test_forward_accepts_a_batch_and_treats_every_element_independently():
+    """⚠️ 编码器必须支持 **(B, N, F)** 批次，且逐元素结果与单条前向**数值一致**（≤1e-5）。
+
+    为什么（本批的动机）：训练的重算路径把一条链（乃至整组 G 条链）的全部决策堆成
+    `(B, N, F)` **一次**前向——本机实测（MK01、`num_threads=1`）231 个决策的重算从
+    9.31 ms/决策降到 2.31 ms/决策（单条编码器前向 ≈ 6.0 ms，231 条批成一次 ≈ 402 ms）。
+    `forward` 原先写死读 `tok_feat[0]`：批输入会被**静默忽略**（只算第 0 行、返回 (1,N,d)），
+    重算分布与采样分布脱钩，且不报错。故这里同时钉形状（带 B）与逐元素等价。
+    容差 1e-5：批矩阵乘的 BLAS 分块与单条不同，末位允许漂移（见 `group_rel` 的批量重算说明）。
+    """
+    enc = LayoutEncoder().eval()
+    B = 5
+    tok, seg = _tok_batch(B)
+    n_m, n_b, n_v, n_g = seg
+    N = n_m + n_b + n_v + n_g
+    with torch.no_grad():
+        out, ctx = enc(tok, seg)
+        assert out.shape == (B, N, enc.d_model), f"批次输出形状应为 (B,N,d)，实得 {tuple(out.shape)}"
+        assert ctx.shape == (B, enc.d_model), f"全局上下文形状应为 (B,d)，实得 {tuple(ctx.shape)}"
+        for b in range(B):
+            single, single_ctx = enc(tok[b:b + 1], seg)
+            d_emb = float((out[b:b + 1] - single).abs().max())
+            d_ctx = float((ctx[b:b + 1] - single_ctx).abs().max())
+            assert d_emb < 1e-5, f"第 {b} 个 batch 元素与单条前向不一致（最大差 {d_emb}）"
+            assert d_ctx < 1e-5, f"第 {b} 个 batch 元素的池化上下文不一致（最大差 {d_ctx}）"
+
+
+@pytest.mark.unit
+def test_zero_padding_is_checked_on_every_batch_element():
+    """补零列守卫必须**逐 batch 元素**检查——只查第 0 行等于对批次其余元素开门。
+
+    批量重算把几百个决策堆在一起：任一条决策的上游列偏移写错，都必须当场炸出来
+    （快速失败纪律，见 `_require_zero_padding`），不能因为"它不在第 0 行"被静默吞掉。
+    """
+    enc = LayoutEncoder().eval()
+    tok, seg = _tok_batch(3)
+    tok[2, 0, F_M:] = 99.0                       # 第 2 个 batch 元素的 M 段补零列
+    with pytest.raises(ValueError):
+        enc(tok, seg)
+
+
 @pytest.mark.unit
 def test_per_segment_projection():
     """每段一个**自己的** Linear（2026-10-04 改；**推翻 P2 的"单个 Linear"决定**）。

@@ -34,6 +34,17 @@ def v_token_index(seg: tuple[int, int, int, int]) -> list[int]:
     return list(range(n_m + n_b, n_m + n_b + n_v))
 
 
+def _to_dev(t: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    """把打分输入搬到 `like`（token 嵌入）所在设备——五个头共用的**唯一搬运点**。
+
+    见 `PolicyNet.device`：策略可以整体跑在 CUDA 上（`m13_train_a --device cuda`），而决策
+    记录里的 token/特征一律是 **CPU numpy**（`roll_chain` 采样时存的），重算时在
+    `_decision_logp_terms` 统一搬到参数设备。头里的这一层是**兜底**：外部调用方（测试、
+    诊断脚本）手搓张量时不至于因设备不匹配而报错——`.to()` 在同设备时是 no-op。
+    """
+    return t.to(like.device)
+
+
 class PolicyNet(nn.Module):
     """π = π_S(机台候选) · π_L(AGV 派车) · π_R(路线候选) · π_M(⑫ 何时保养) · π_C(⑪ 充电)；无 critic。
 
@@ -105,8 +116,13 @@ class PolicyNet(nn.Module):
                     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """编码器前向（**五个**头共用）——**唯一的 numpy→torch 转换点**；无编码器返回 (None, None)。
 
-        `build_tok`（Task 2）产 numpy `(N, F_MAX)`，编码器要 torch `(1, N, F_MAX)`：
-        numpy/列表 → float32 张量，2 维 → 补 batch 维，在此**一处**统一（其余调用方只传 torch）。
+        `build_tok`（Task 2）产 numpy `(N, F_MAX)`，编码器要 torch **(B, N, F_MAX)**：
+        numpy/列表 → float32 张量，2 维 → 补 batch 维，**最后搬到参数设备**，在此**一处**统一
+        （其余调用方只传 torch）。
+        ⚠️ **三维即原样透传**（2026-10-04 批量重算批次）：单条在线决策传 `(1,N,F)`，重算路径
+        把整组决策堆成 `(B,N,F)` 一次前向——`B` 由调用方决定，本函数不做任何跨批次的合并。
+        ⚠️ **设备跟随参数**（2026-10-04 设备批次）：不硬编码 cpu/cuda——`--device cuda` 时在线
+        前向与批重算都在 CUDA 上；`tok_feat` 是 CPU numpy，故这里必须搬（`_to_dev` 与之同理）。
         """
         if self.enc is None:
             return None, None
@@ -114,10 +130,20 @@ class PolicyNet(nn.Module):
              else torch.tensor(np.asarray(tok_feat, dtype=np.float32)))  # 复制：不共享上游 numpy 内存
         if x.dim() == 2:                                    # (N, F_MAX) → (1, N, F_MAX)
             x = x.unsqueeze(0)
-        if x.dim() != 3 or x.shape[0] != 1:
-            raise ValueError(f"forward_enc 要 (N,F) 或 (1,N,F) 的 token 特征，"
+        if x.dim() != 3:
+            raise ValueError(f"forward_enc 要 (N,F)、(1,N,F) 或 (B,N,F) 的 token 特征，"
                              f"收到 shape={tuple(x.shape)}")
-        return self.enc(x, seg)
+        return self.enc(x.to(self.device), seg)
+
+    @property
+    def device(self) -> torch.device:
+        """参数所在设备（**唯一真相**）——重算/采样一律跟随它，不硬编码 cpu/cuda。
+
+        无参数的退化策略（`enc=None` 且未建头）回落到 cpu：那种策略没有任何张量语义，
+        调用方本就走不到前向。
+        """
+        p = next(self.parameters(), None)
+        return p.device if p is not None else torch.device("cpu")
 
     def mach_logits_emb(self, tok: torch.Tensor, feat_op: torch.Tensor,
                         feat_cand: torch.Tensor, cand_idx: torch.Tensor) -> torch.Tensor:
@@ -128,9 +154,9 @@ class PolicyNet(nn.Module):
         （也收 `(n_cand, F_cand)`）——⑤ 换型代价是 `(机台, 作业)` 的交互量，只能走这个槽
         （spec §5.3.1②），塞不进 M token。
         """
-        tok_c = tok[0, cand_idx.long()]                      # (n_cand, d)
-        op = feat_op.expand(1, tok_c.shape[0], -1)[0]        # (n_cand, F_op)
-        cand = feat_cand[0] if feat_cand.dim() == 3 else feat_cand     # (n_cand, F_cand)
+        tok_c = tok[0, _to_dev(cand_idx, tok).long()]        # (n_cand, d)
+        op = _to_dev(feat_op.expand(1, tok_c.shape[0], -1)[0], tok)   # (n_cand, F_op)
+        cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (n_cand,F_cand)
         return self.s_head_tok(torch.cat([tok_c, op, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def agv_logits_emb(self, tok: torch.Tensor, feat_task: torch.Tensor,
@@ -143,9 +169,9 @@ class PolicyNet(nn.Module):
         2026-10-03 新增：此前 L 头吃 `des.py` 手搓的 11 维扁平向量、**不走编码器**，
         导致它对生产侧结构性失明（看不到机台状态/计划/布局，n_agv≥3 时看不到 2 号以后的车）。
         """
-        tok_c = tok[0, cand_idx.long()]                       # (n_cand, d)
-        ft = feat_task.expand(1, tok_c.shape[0], -1)[0]       # (n_cand, F_task)
-        cand = feat_cand[0] if feat_cand.dim() == 3 else feat_cand     # (n_cand, F_cand)
+        tok_c = tok[0, _to_dev(cand_idx, tok).long()]                 # (n_cand, d)
+        ft = _to_dev(feat_task.expand(1, tok_c.shape[0], -1)[0], tok)  # (n_cand, F_task)
+        cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (n_cand,F_cand)
         return self.l_head_tok(torch.cat([tok_c, ft, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def route_logits_emb(self, tok: torch.Tensor, feat_drive: torch.Tensor,
@@ -164,9 +190,9 @@ class PolicyNet(nn.Module):
         上下文只经 GELU 的非线性调节对各维的敏感度；要表达"同一辆车在不同状态下偏好不同路"，
         须等 R2 给区段/路径加 token（`progress-log.md` §27.2 的配对项）。
         """
-        cand = feat_cand[0] if feat_cand.dim() == 3 else feat_cand     # (k, F_cand)
-        tok_c = tok[0, cand_idx.long()]                                # (k, d)
-        fd = feat_drive.expand(1, tok_c.shape[0], -1)[0]               # (k, F_route)
+        cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (k,F_cand)
+        tok_c = tok[0, _to_dev(cand_idx, tok).long()]                  # (k, d)
+        fd = _to_dev(feat_drive.expand(1, tok_c.shape[0], -1)[0], tok)  # (k, F_route)
         return self.r_head_tok(torch.cat([tok_c, fd, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def pm_logits_emb(self, tok: torch.Tensor, feat_mach: torch.Tensor,
@@ -184,9 +210,9 @@ class PolicyNet(nn.Module):
 
         `feat_mach` = 该机台的状态摘要（与候选无关，broadcast 给两个动作）。
         """
-        tok_c = tok[0, cand_idx.long()]                                # (2, d)
-        fm = feat_mach.expand(1, tok_c.shape[0], -1)[0]                # (2, F_dec)
-        cand = feat_cand[0] if feat_cand.dim() == 3 else feat_cand     # (2, F_cand)
+        tok_c = tok[0, _to_dev(cand_idx, tok).long()]                  # (2, d)
+        fm = _to_dev(feat_mach.expand(1, tok_c.shape[0], -1)[0], tok)  # (2, F_dec)
+        cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (2, F_cand)
         return self.pm_head_tok(torch.cat([tok_c, fm, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def charge_logits_emb(self, tok: torch.Tensor, feat_agv: torch.Tensor,
@@ -212,7 +238,7 @@ class PolicyNet(nn.Module):
 
         `feat_agv` = 本车状态摘要（电量占比 / 待办任务占比 / episode 进度，与候选无关）。
         """
-        tok_c = tok[0, cand_idx.long()]                                # (m, d)
-        fa = feat_agv.expand(1, tok_c.shape[0], -1)[0]                 # (m, F_dec)
-        cand = feat_cand[0] if feat_cand.dim() == 3 else feat_cand     # (m, F_cand)
+        tok_c = tok[0, _to_dev(cand_idx, tok).long()]                  # (m, d)
+        fa = _to_dev(feat_agv.expand(1, tok_c.shape[0], -1)[0], tok)   # (m, F_dec)
+        cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (m, F_cand)
         return self.c_head_tok(torch.cat([tok_c, fa, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)

@@ -231,13 +231,18 @@ def test_clip_epoch_combinations_are_guarded():
 def test_clipped_path_ratio_uses_sampling_time_logp():
     """裁剪路径（**唯一**用 `old` 的分支）的 ratio 基准必须与采样那一刻同源。
 
-    判据用 `lr=0`（不更新参数）把它变成**确定性**的：`new` 与 `old` 同参数 ⇒ `ratio ≡ 1`
+    判据用 `lr=0`（不更新参数）把它变成**确定性**的：`new` 与 `old` 同参数 ⇒ `ratio ≈ 1`
     （若 `old` 来自别处/别的时刻，这里立刻 ≠1）。⚠️ 修复后裁剪是**逐决策**的（旧实现按整条
-    链裁剪——见 `test_clip_band_is_per_decision_not_per_chain`），`ratio ≡ 1` 因此还是
-    **逐决策张量的严格恒等**（`new_flat` 与 `old_flat` 逐位相同），不只是近似；故这里的
-    `ratio` 断言用**精确** 1.0，`clipped_frac` 读的是"出界的**决策**占比"（此处置 0）。
+    链裁剪——见 `test_clip_band_is_per_decision_not_per_chain`）。
     顺带说明：`epochs=1` 的裁剪正是同一个恒等式，故那条路是空转（由
     `test_clip_epoch_combinations_are_guarded` 拒收）。
+
+    ⚠️ **旧命题 → 新命题（2026-10-04，批量重算批次）**：
+    - 旧：`ratio` 是**精确** 1.0（断言写 `== 1.0`）；理由 = `new` 与 `old` 逐位相同。
+    - 新：`ratio` 在 **1e-5 内**等于 1；理由 = `new` 改由 `(B,N,F)` 一次批前向算出，
+      而 `old` 是采样时逐决策单条前向的值——批矩阵乘的分块不同 ⟹ 末位漂移约 2e-7
+      （实测 ratio ∈ [0.99999976, 1.00000024]）。容差取 1e-5 与硬要求 1 一致。
+    - `clipped_frac` / `grad_norm` 的判据不受影响（带是 [0.8, 1.2]，漂移差几个数量级）。
 
     ⚠️ 原 `test_ratio_is_one_for_unchanged_policy`（同策略两遍 `chain_logp` 比大小）已删：
     同策略 + 同决策 + 无 dropout ⇒ `b − a` **恒为 0**、`exp(0)` **恒为 1**，对任何实现缺陷
@@ -247,7 +252,8 @@ def test_clipped_path_ratio_uses_sampling_time_logp():
     r, diag = joint_chain_step(pol, inst, lay, dm, seed=0, G=2, cfg=cfg, ctx=ctx,
                                ref=_ref(inst, cfg), epochs=2, clip_eps=0.2, lr=0.0)
     assert -1e9 < r < 0.0, "裁剪路径的组均值奖励不有限"
-    assert diag["ratio"] == 1.0, "old 与 new 不同源——逐决策恒等不成立（ratio 有假 delta）"
+    assert diag["ratio"] == pytest.approx(1.0, abs=1e-5), \
+        "old 与 new 不同源——逐决策同源不再成立（ratio 有超出末位漂移的假 delta）"
     assert diag["clipped_frac"] == 0.0, "参数没动却报出界——clipped_frac 口径错"
     assert diag["grad_norm"] > 0.0, "裁剪路径梯度范数为 0——诊断退化"
 
@@ -274,25 +280,187 @@ def test_multi_epoch_clip_trust_region_is_live():
     assert diag["grad_norm"] > 0.0, "末轮梯度范数为 0——第 2 个 epoch 没有梯度信号"
 
 
-@pytest.mark.unit
-def test_per_decision_logp_vector_is_bitwise_same_source():
-    """⚠️ 逐决策裁剪的**逐位**前提（`lr=0` 时 ratio≡1 靠它才是严格等式、不是近似）：
+# ================= 批量重算（编码器一次前向覆盖 G 条链的全部决策） =================
+# 背景（本批的动机，docs/progress-log.md §34）：`roll_chain` 的在线前向是**逐决策**的
+# （每个决策依赖上一刻的仿真状态），不能批；但 `chain_logp` / `decisions_logp` 的重算是
+# **事后**的——全部决策的 token 形状相同（实例级常量），可堆成 (B,N,F) 一次前向。
+# 编码器是耗时主项（本机实测单条 ≈6.0 ms、231 条批成一次 ≈402 ms，吞吐 ~3.4×），
+# 故它是唯一值得批的环节；
+# 打分头候选数逐决策不同（机台/车/路径/动作码），保持逐决策（见 `_decision_logp_terms`）。
 
-    1. `decisions_logp`（带梯度重算）与 `sampled_decisions_logp`（采样回放）**逐位相同**
-       ——元素级 `torch.equal`（不是 approx）：两者同序、同 dtype（float32），中间不换精度；
-    2. `chain_logp` 仍是**逐步 float32 顺序求和**（与 `sampled_logp` 逐位相同）——求和口径
-       只定义**链级** logp，不能图省事改成向量 `.sum()`（归约次序一变，末位差 ~1e-5 就会
-       把首轮 ratio 从"严格 1"变成"近似 1"，在裁剪边界上给出无意义的翻转）。
+
+def _reference_terms(decisions, policy):
+    """**旧路径**的参照实现：逐决策单条前向——只存在于测试里，不参与生产。
+
+    它是"批量重算没有改变算出来是多少"的对照物：生产路径已改成一次批前向，
+    没有第二份实现就分不清"批算对了但有末位漂移"与"批路径接错了"。
+    """
+    out = []
+    for d in decisions:
+        tok, _ = policy.forward_enc(
+            torch.as_tensor(d.tok, dtype=torch.float32).unsqueeze(0), d.seg)
+        head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
+                "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
+                "C": policy.charge_logits_emb}[d.kind]
+        logits = head(tok,
+                      torch.as_tensor(d.feat, dtype=torch.float32).reshape(1, 1, -1),
+                      torch.as_tensor(d.cand_feat, dtype=torch.float32),
+                      torch.as_tensor(d.tok_idx, dtype=torch.long))
+        out.append(torch.log_softmax(logits.flatten(), -1)[d.cand.index(d.action)])
+    return out
+
+
+@pytest.mark.unit
+def test_all_decisions_in_a_step_share_one_token_shape():
+    """⚠️ 批量重算的**形状前提**（先验证、再依赖）：整组决策的 token 形状与 `seg` 必须**唯一**。
+
+    依据：`build_tok` 的行数 = n_m + n_jobs + n_agv + 1，四段长度都是**实例级常量**
+    （`NormContext` 的 n_m/n_jobs/n_agv 在一次运行里不变），故形状不随决策变。
+    这条把"可以堆成 (B,N,F)"钉成机器可判的判据：日后若有人让 `seg` 随决策变（如逐决策
+    增删 token），`_decision_logp_terms` 的批量路径会**显式报错**，而不是静默算错。
+    ⚠️ 两条不同 seed 的链都查：批量要跨 G 条链，前提是跨链也同形。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
+    dec_a, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
+    dec_b, _ = roll_chain(inst, lay, dm, cfg, pol, seed=1, ctx=ctx, route_k=2)
+    shapes = {(d.tok.shape, d.seg) for d in (*dec_a, *dec_b)}
+    assert len(shapes) == 1, f"决策的 token 形状/seg 不唯一——批量前提不成立：{shapes}"
+    assert dec_a[0].seg == (inst.n_machines, inst.n_jobs, cfg.n_agv, 1), \
+        f"seg 不是实例级常量：{dec_a[0].seg}"
+
+
+@pytest.mark.unit
+def test_batched_recompute_matches_the_per_decision_reference_logp():
+    """⚠️ 硬要求 1（前向侧）：批量重算的 logp 必须与逐决策重算一致（≤1e-5）。
+
+    (B,N,F) 批前向与单条前向的矩阵乘分块不同 ⟹ 末位漂移（实测嵌入层 ~2e-6）。这是本批
+    **刻意**接受的代价（换来编码器调用次数从 ~2×链长 降到 1），故把"漂移量级"钉成判据：
+    超过 1e-5 就说明批路径真的算错了（批维接错 / seg 混用 / 漏了某条决策），不是浮点末位。
+    ⚠️ 用 route_k=2：S/L/R 三类决策都走同一条重算路径。
+    """
+    from plcsp.algo.group_rel import _decision_logp_terms
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    dec, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
+    assert len(dec) >= 50, f"链太短（{len(dec)} 个决策）——判据失去意义"
+    batched = torch.stack(_decision_logp_terms(dec, pol)).detach()
+    reference = torch.stack(_reference_terms(dec, pol)).detach()
+    d = float((batched - reference).abs().max())
+    assert d < 1e-5, f"批量与逐决策重算的 logp 最大差 {d}——批路径算错了（非浮点末位）"
+
+
+@pytest.mark.unit
+def test_batched_recompute_matches_the_per_decision_reference_gradients():
+    """⚠️ 硬要求 1（梯度侧）：批量重算回传的**每个参数**的梯度必须与逐决策一致（≤1e-5）。
+
+    只比 logp 不够：批量路径若在反传里接错（detach、漏项、批维错位），前向值可能仍然接近，
+    梯度却少了一路或错位。判据取全部参数上的最大逐元素差。
+    """
+    from plcsp.algo.group_rel import _decision_logp_terms
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    dec, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
+
+    def _grads(build):
+        pol.zero_grad(set_to_none=True)
+        torch.stack(build(dec, pol)).sum().backward()
+        return {k: p.grad.detach().clone() for k, p in pol.named_parameters()
+                if p.grad is not None}
+
+    g_batched = _grads(_decision_logp_terms)
+    g_reference = _grads(_reference_terms)
+    assert set(g_batched) == set(g_reference) and g_batched, "两条路径的参数集不同——判据失去意义"
+    worst = max(float((g_batched[k] - g_reference[k]).abs().max()) for k in g_batched)
+    assert worst < 1e-5, f"批量与逐决策的梯度最大差 {worst}——反传路径算错了（非浮点末位）"
+
+
+@pytest.mark.unit
+def test_recompute_batches_all_chains_into_one_encoder_forward(monkeypatch):
+    """⚠️ 硬要求：批量必须跨 **G 条链的全部决策**一次前向，不是一条链一次。
+
+    判据 = 数 `forward_enc` 的调用次数与批大小。若重算仍写在"每条链一次"的循环里，编码器
+    调用次数会是 G（本判据当场红），G× 的墙钟也就省不下来。两条训练路径（链级 `chains_logp`
+    与展平 `all_decisions_logp`）都要覆盖。
+    """
+    from plcsp.algo.group_rel import (all_decisions_logp, _decision_logp_terms,
+                                      chains_logp)
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    dec_a, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
+    dec_b, _ = roll_chain(inst, lay, dm, cfg, pol, seed=1, ctx=ctx, route_k=2)
+    chains = [dec_a, dec_b]
+    n_total = len(dec_a) + len(dec_b)
+
+    calls = {"n": 0, "sizes": []}
+    orig = pol.forward_enc
+
+    def _counting(tok_feat, seg):
+        x = tok_feat if torch.is_tensor(tok_feat) else torch.as_tensor(tok_feat)
+        calls["n"] += 1
+        calls["sizes"].append(int(x.shape[0]))
+        return orig(tok_feat, seg)
+
+    monkeypatch.setattr(pol, "forward_enc", _counting)
+    lp = chains_logp(chains, pol)
+    assert calls["n"] == 1 and calls["sizes"] == [n_total], \
+        f"链级重算的编码器调用 {calls}——不是一次覆盖全部 {n_total} 个决策"
+    assert lp.shape == (2,), f"chains_logp 形状应为 (G,)，实得 {tuple(lp.shape)}"
+    calls["n"], calls["sizes"] = 0, []
+    flat = all_decisions_logp(chains, pol)
+    assert calls["n"] == 1 and calls["sizes"] == [n_total], \
+        f"逐决策重算的编码器调用 {calls}——不是一次覆盖全部决策"
+    assert flat.shape == (n_total,), f"展平向量形状应为 (N,)，实得 {tuple(flat.shape)}"
+    assert calls["sizes"] == [n_total], "第二次调用不是单次批前向"
+    # 同一批输入下，chains_logp / all_decisions_logp / _decision_logp_terms 必须互相一致：
+    # 三条入口共用同一个打分体，漂开就是"两条训练路径口径不同"（本项目反复出现的一类缺陷）。
+    terms = _decision_logp_terms([d for ch in chains for d in ch], pol)
+    assert float(chains_logp([dec_a], pol)[0].detach()) == \
+        float(chain_logp(dec_a, pol).detach()), \
+        "chains_logp 与 chain_logp 的累加口径不同源——两条训练路径会漂开"
+    assert torch.allclose(lp.detach()[0], chain_logp(dec_a, pol).detach(), atol=1e-5)
+    assert torch.allclose(flat.detach(), torch.stack(terms).detach(), atol=1e-5)
+
+
+@pytest.mark.unit
+def test_per_decision_logp_vector_is_same_source_within_tolerance():
+    """⚠️ 逐决策裁剪的**同源**前提（`lr=0` 时 ratio≈1 靠它才是成立的近似）：
+
+    1. `decisions_logp`（带梯度重算）与 `sampled_decisions_logp`（采样回放）在 **1e-5 内**
+       相同（元素级 `torch.allclose`）；
+    2. `chain_logp` 仍是**逐步 float32 顺序求和**——与手写逐步累加**逐位相同**，且该累加与
+       `torch.stack(...).sum()` 在当前数据上**确实不同**（否则归约次序的判据恒真、失去区分力）。
+
+    ⚠️ **旧命题 → 新命题（2026-10-04，批量重算批次）**：
+    - 旧：重算与采样回放**逐位相同**（`torch.equal`）。理由 = 两者都走"逐决策单条前向"，
+      同一串浮点运算、同一个归约次序。
+    - 新：重算与采样回放**在 1e-5 内相同**。理由 = 重算改成 `(B,N,F)` **一次批前向**
+      （编码器前向是耗时主项：实测 231 个决策的重算从 9.31 ms/决策降到 2.31 ms/决策，
+      整步 ~2×）。批矩阵乘的分块与单条不同 ⟹ 每项有约 2e-7 的末位漂移（本仓实测
+      `max|Δlogp| = 2.38e-7`）——这是**刻意接受**的代价，不是缺陷。裁剪首轮 `ratio ≡ 1`
+      随之从**严格等式**降为"≈1 在 1e-5 内"。
+    ⚠️ 累加**次序**没变（第 2 条仍逐位钉死）——变的只是每一项的末位。
+    """
+    from plcsp.algo.group_rel import _decision_logp_terms
+    inst, lay, dm, cfg, ctx, pol = _setup()
     decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    new_vec = decisions_logp(decisions, pol)
+    new_vec = decisions_logp(decisions, pol).detach()
     old_vec = sampled_decisions_logp(decisions)
     assert new_vec.shape == (len(decisions),), f"逐决策向量形状 {tuple(new_vec.shape)} 不对"
-    assert torch.equal(new_vec.detach(), old_vec), \
-        "逐决策重算与采样回放不同位——分决策裁剪的 ratio≡1 不再是严格等式"
-    assert float(chain_logp(decisions, pol).detach()) == float(sampled_logp(decisions)), \
-        "chain_logp 的累加口径变了（必须保持 float32 顺序累加、与采样回放逐位相同）"
+    d = float((new_vec - old_vec).abs().max())
+    assert d < 1e-5, (
+        f"逐决策重算与采样回放的最大差 {d} ≥ 1e-5——分决策裁剪的 ratio≈1 前提不成立"
+        "（超过 1e-5 说明批路径算错了，不是浮点末位）")
+    # 累加口径：chain_logp 必须仍是**逐步 float32 顺序累加**——与手写逐步和逐位相同。
+    terms = _decision_logp_terms(decisions, pol)
+    manual = torch.zeros(())
+    for t in terms:
+        manual = manual + t
+    vec_sum = torch.stack(terms).sum()
+    assert torch.equal(chain_logp(decisions, pol).detach(), manual.detach()), \
+        "chain_logp 不再是逐步 float32 顺序累加（换成了 .sum() 之类的归约？）"
+    assert not torch.equal(manual.detach(), vec_sum.detach()), \
+        "本数据上逐步累加与 .sum() 恰好逐位相同——归约次序的判据在此失去区分力"
+    # 链级：顺序累加 + 各项末位漂移 ⟹ 与采样回放不再逐位相同，只在 n·2e-7 量级内一致。
+    assert float(chain_logp(decisions, pol).detach()) == pytest.approx(
+        float(sampled_logp(decisions)), abs=1e-3), \
+        "chain_logp 与采样回放的链级口径漂开——累加次序或 dtype 变了"
 
 
 @pytest.mark.unit
@@ -393,6 +561,47 @@ def test_joint_step_uses_adam_and_returns_diagnostics():
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="本环境 torch 无 CUDA（CPU-only 构建）——GPU 侧须用 "
+                           "D:/anaconda/envs/py312/python.exe 显式跑")
+def test_gpu_recompute_matches_cpu_and_follows_the_device():
+    """⚠️ CUDA 侧验收（默认门禁里**自动跳过**）：策略搬上 GPU 后
+
+    1. 批重算的逐决策 logp 与 CPU 在 1e-5 内一致（同一份权重、同一批决策）；
+    2. 张量确实落在 CUDA 上（"设备跟随参数"，而不是悄悄退回 CPU）；
+    3. `chains_logp` / `joint_chain_step` 在 GPU 上跑得通（含 CUDA 动作采样流）。
+
+    ⚠️ **跨设备不可逐位复现**（如实记下）：动作采样流的设备跟随策略，CPU 与 CUDA 的
+    `torch.Generator` 是两条不同的流 ⟹ 同 seed 在 CPU / GPU 上采样出**不同**的链。
+    "同 seed 逐位可复现"的既有承诺因此是**逐设备**的；论文的种子对照必须在同一设备上做。
+    """
+    from plcsp.algo.group_rel import _decision_logp_terms, chains_logp
+    inst, lay, dm, cfg, ctx, _ = _setup()
+    torch.manual_seed(11)
+    pol_cpu = PolicyNet(enc=LayoutEncoder())
+    dec, _met = roll_chain(inst, lay, dm, cfg, pol_cpu, seed=0, ctx=ctx, route_k=2)
+    pol_gpu = PolicyNet(enc=LayoutEncoder()).to("cuda")
+    pol_gpu.load_state_dict(pol_cpu.state_dict())
+    with torch.no_grad():
+        terms_cpu = torch.stack(_decision_logp_terms(dec, pol_cpu))
+        terms_gpu = torch.stack(_decision_logp_terms(dec, pol_gpu))
+        assert terms_gpu.device.type == "cuda", "重算没有跟随参数设备（仍在 CPU？）"
+        d = float((terms_cpu - terms_gpu.cpu()).abs().max())
+    assert d < 1e-5, f"GPU 与 CPU 的批重算最大差 {d}——跨设备批路径算错了"
+    assert chains_logp([dec], pol_gpu).device.type == "cuda", "链级 logp 没落在 GPU 上"
+    r, diag = joint_chain_step(pol_gpu, inst, lay, dm, cfg, ctx, _ref(inst, cfg),
+                               seed=0, G=2, route_k=2)
+    assert math.isfinite(r) and math.isfinite(float(diag["grad_norm"])), \
+        f"GPU 训练步给出非有限读数：r={r} diag={diag}"
+    # ⚠️ 裁剪路径也必须过一遍：它的 `repeat_interleave` / `old_flat` 是**另一条**设备路径
+    #    （实测漏改一次：repeats 留在 CPU ⟹ `index is on cpu, different from cuda:0`）。
+    r2, diag2 = joint_chain_step(pol_gpu, inst, lay, dm, cfg, ctx, _ref(inst, cfg),
+                                 seed=0, G=2, route_k=2, epochs=2, clip_eps=0.2, lr=0.0)
+    assert math.isfinite(r2) and diag2["clipped_frac"] == 0.0, \
+        f"GPU 裁剪路径读数异常：r={r2} diag={diag2}"
+
+
+@pytest.mark.unit
 def test_joint_step_bitwise_reproducible_given_seed():
     """⚠️ 评审 I-3：`joint_chain_step` 在**同 seed + 同起点**下逐位可复现（训练入口的判据）。
 
@@ -474,28 +683,31 @@ def test_adv_mode_rejects_unknown_value():
 
 
 @pytest.mark.unit
-def test_scalar_adv_mode_is_bitwise_unchanged():
-    """⚠️ O1 硬要求 1：`adv_mode="scalar"` 必须与改造前**逐位相同**。
+def test_scalar_adv_mode_regression_pin():
+    """⚠️ O1 硬要求 1（**改写版**）：`adv_mode="scalar"` 的**优势公式**不得被重构改动。
 
     仓里所有已记录的读数（消融表、训练曲线）都建立在今天的 scalar 口径上——重构不得悄悄
-    改动它。判据 = **捕获参照**（改造前用固定初始化在本机捕获）：
-    `torch.manual_seed(1234)` → MK01 上跑一步（G=2, seed=0）→ 最终 `state_dict` 的 sha256 =
-        `9333163ad5910498e62468b0892d827cb9262274e55f9e0399607a93c843d06b`
+    改动它。判据 = **捕获参照**（固定初始化跑一步，比 `state_dict` 的 sha256）：
+    `torch.manual_seed(1234)` → MK01 上跑一步（G=2, seed=0）→ 最终 `state_dict` 的 sha256
     （同 seed 同起点下**跨进程逐位可复现**，见 `test_joint_step_bitwise_reproducible_given_seed`。）
     任一个比特被改动都会让摘要变化——这比"两次调用互相相等"强，后者对两种实现都恒真。
-    ⚠️ 2026-10-04 三次重捕获（都**不是** scalar 口径变化，是策略输入/结构的正确性修复）：
-    1. R 头恢复后比对时排除 `r_head_tok.*`（默认关闭档拿不到梯度）——排除后重算仍 = 更早的
-       捕获值；
-    2. **L 头 token 下标修复**（`_act` 把车号映射到 V 段 token，此前误索引 M 段）——L 头读的
-       特征变了、梯度随之改变，摘要必须重捕获。旧值
-       `2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a` 钉的是
-       **带缺陷的读数**（L 头看不见任何车辆特征），不得再被当成基准。
-    3. **⑫ 维护头（M）新增**（`pm_head_tok.*`）——默认 `pm_head=False` 档它一次都不被调用、
-       拿不到梯度，与 R 头同理**排除**；排除后重算 = 上一条的捕获值（本次未变）。
-    4. **⑪ 充电头（C）新增**（`c_head_tok.*`）——默认 `charge_head=False` 档同理不被调用、
-       拿不到梯度，**排除**。排除后重算 = 上一条的捕获值（实测逐位相同：
-       `…9333163a…`）。⚠️ 这条同时证明新头**建在 `pm_head_tok` 之后**——若插在既有头之前，
-       初始化抽签次序会移位，S/L 的参数（**在**摘要里）会变、本判据当场翻红。
+
+    ⚠️ **旧命题 → 新命题（2026-10-04，批量重算批次）**：
+    - 旧：摘要 `9333163ad5910498e62468b0892d827cb9262274e55f9e0399607a93c843d06b`，主张
+      "scalar 路径的**输出**与改造前**逐位**相同"。
+    - 新：摘要 `6a50aafcd51e4d7c7e0679557869a729ab46766d72759d913ccac2cfaa8ade4a`，主张
+      "scalar 的**优势公式**未变（`r = Σwᵢ(−fᵢ)` → `A = z(r)` 一字未动），参数更新自本批起逐位稳定"。
+    - 理由：本批把重算的编码器前向从"逐决策单条"改成 `(B,N,F)` **一次批前向**（编码器是
+      耗时主项，实测整步 ~2×）。批矩阵乘的分块与单条不同 ⟹ 反传梯度有 ~3.6e-6 的末位差
+      ⟹ Adam 更新后的参数末位不同 ⟹ 摘要**必然**改变。这是刻意接受的代价，不是公式变了。
+    - ⚠️ **后果（如实写明）**：既往**训练曲线不再逐位可复现**（末位差随步数放大）；
+      但**同 seed 的奖励序列不受影响**——动作采样路径（`roll_chain` 的在线前向）一行未动，
+      `r` 逐位相同。短程对照与"同 seed 可复现"仍成立，长程数字须重跑才能引用。
+
+    ⚠️ 2026-10-04 早先的三次重捕获（R 头恢复排除 / L 头 token 下标修复 / ⑫⑪ 新头排除）见
+    `docs/progress-log.md`；本条只记**本批**（批量重算）引起的变化。三个新头
+    （`r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*`）的排除理由不变：默认关闭档它们
+    拿不到梯度，其参数是新增结构、不进本条"scalar 口径"的证据链。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -505,18 +717,14 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
     torch.manual_seed(1234)                     # 与捕获脚本逐字对齐（ref 之前/之后各锚一次）
     pol = PolicyNet(enc=LayoutEncoder())
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
-    # ⚠️ 2026-10-04（L 头下标修复）：摘要值本身已重捕获——旧值钉的是 L 头误索引 M 段的
-    # 缺陷读数（车辆特征对 L 全不可见），修复后 S/L/编码器的更新都变，必须换新基准。
-    # 排除 `r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*` 的理由不变（三个头恢复/新增时
-    # 加的：默认关闭档它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径不变"的证据链）。
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
         if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.")):
             continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())
-    assert h.hexdigest() == "9333163ad5910498e62468b0892d827cb9262274e55f9e0399607a93c843d06b", \
-        "scalar 路径的输出与重捕获基准不再逐位相同——既有读数不可比"
+    assert h.hexdigest() == "6a50aafcd51e4d7c7e0679557869a729ab46766d72759d913ccac2cfaa8ade4a", \
+        "scalar 路径的输出与捕获参照不再逐位相同——训练轨迹的回归基准变了"
 
 
 @pytest.mark.unit

@@ -46,6 +46,52 @@ def _enc_inputs(n_m=6, n_b=10, n_v=3):
 
 
 @pytest.mark.unit
+def test_forward_enc_accepts_batches_and_rejects_other_shapes():
+    """⚠️ `forward_enc` 的入口守卫必须接受 **(B, N, F)**（B ≥ 1），其余形状**显式报错**。
+
+    旧守卫只认 `(N,F)` / `(1,N,F)`——批量重算把 G 条链的全部决策堆成 (B,N,F) 一次前向
+    （见 `LayoutEncoder.forward`），旧守卫会把这条路**当场拒收**。同时保留两条旧形式的
+    兼容（单条 (N,F) 仍自动补批维），并守住"四维/一维张量不得静默通过"。
+    """
+    pol = PolicyNet(enc=LayoutEncoder())
+    tok_feat, seg = _enc_inputs()
+    n_m, n_b, n_v, n_g = seg
+    N = n_m + n_b + n_v + n_g
+    with torch.no_grad():
+        t3, _ = pol.forward_enc(tok_feat, seg)                     # (1, N, F)
+        t2, _ = pol.forward_enc(tok_feat[0], seg)                  # (N, F) → 补批维
+        tb, _ = pol.forward_enc(tok_feat.repeat(4, 1, 1), seg)     # (4, N, F)
+        assert t3.shape == (1, N, pol.enc.d_model)
+        assert t2.shape == t3.shape, "(N,F) 的补批维口径变了"
+        assert tb.shape == (4, N, pol.enc.d_model), f"批形状不对：{tuple(tb.shape)}"
+        assert torch.allclose(tb[0:1], t3, atol=1e-5), \
+            "批里第 0 条与单条结果不一致（容差 1e-5：批矩阵乘分块不同，末位漂移）"
+    with pytest.raises(ValueError, match="forward_enc"):
+        pol.forward_enc(tok_feat.unsqueeze(0), seg)                # (1,1,N,F) 四维
+    with pytest.raises(ValueError, match="forward_enc"):
+        pol.forward_enc(tok_feat[0, 0], seg)                       # (F,) 一维
+
+
+@pytest.mark.unit
+def test_forward_enc_and_heads_follow_the_policys_device():
+    """⚠️ 设备跟随（2026-10-04 设备批次）：编码器输出与打分头都在 `policy.device` 上。
+
+    `--device cuda` 时策略整体在 GPU 上跑：`forward_enc` 把输入（CPU numpy）搬到参数设备，
+    五个头再把各自的 `cand_idx` / 决策特征 / 候选特征搬到 token 嵌入的设备——没有任何一处
+    硬编码 cpu。本仓**默认**测试解释器是 CPU-only，故这里只能钉"输出落在参数设备"（同设备时
+    `.to()` 是 no-op）；CUDA 侧的实质验收见 `test_joint_chain.test_gpu_recompute_*`（自动 skip）。
+    """
+    pol = PolicyNet(enc=LayoutEncoder())
+    assert pol.device.type == "cpu", f"默认策略应在 cpu，实得 {pol.device}"
+    tok_feat, seg = _enc_inputs()
+    tok, _ = pol.forward_enc(tok_feat, seg)
+    assert tok.device == pol.device, "编码器输出没落在参数设备上"
+    idx = torch.tensor(v_token_index(seg))
+    logits = pol.agv_logits_emb(tok, torch.zeros(1, 1, F_TASK), _cand_feat(len(idx)), idx)
+    assert logits.device == pol.device, "打分头输出没落在参数设备上"
+
+
+@pytest.mark.unit
 def test_both_heads_read_the_same_encoder():
     """⚠️ Review Focus #5：L 头必须走编码器——这是'联合链'的前提。"""
     pol = PolicyNet(enc=LayoutEncoder())

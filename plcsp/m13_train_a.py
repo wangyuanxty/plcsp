@@ -14,14 +14,25 @@ ckpt 每 `--save-every` 步落盘）。
    构造 `PolicyNet` **之前**）；
 2. **仿真扰动流**：第 s 步第 g 条链的 `seed_chain = (args.seed + s) * SEED_STRIDE + g`
    （`runner.py` 传 `seed0+s`；步长常量在 `group_rel.py`）；
-3. **动作采样**：`joint_chain_step` 用 `torch.Generator().manual_seed(seed0+s)` 采样并透传给
-   `roll_chain`——**不再走全局 torch RNG**。旧实现（Task 7）走 `torch.multinomial` 的全局流，
-   `--seed` 锁不住动作 ⇒ 多进程各跑各的、且**不可复现**，"同 seed 对照 / 种子矩阵"两件事
-   都不成立。
+3. **动作采样**：`joint_chain_step` 用 `torch.Generator(device=策略设备).manual_seed(seed0+s)`
+   采样并透传给 `roll_chain`——**不再走全局 torch RNG**。旧实现（Task 7）走
+   `torch.multinomial` 的全局流，`--seed` 锁不住动作 ⇒ 多进程各跑各的、且**不可复现**，
+   "同 seed 对照 / 种子矩阵"两件事都不成立。
 
 故**同 seed 同调用序列 ⇒ 逐位可复现**，跨进程亦然（CPU 上 torch 的 RNG 由 seed 完全确定；
-SimPy + 每条链独立的 numpy 流亦然）。**唯一例外**：`--resume` 续跑——ckpt 不存优化器状态、
-`--lr` 以当次为准，故"续跑段"与"一次跑完"不同（种子对照请用同一起点、同一预算）。
+SimPy + 每条链独立的 numpy 流亦然）。**两个例外**：
+① `--resume` 续跑——ckpt 不存优化器状态、`--lr` 以当次为准，故"续跑段"与"一次跑完"不同
+（种子对照请用同一起点、同一预算）；
+② **跨设备**（`--device cpu` vs `cuda`）——动作采样流跟随策略设备，CPU 与 CUDA 的
+`torch.Generator` 是两条不同的流 ⟹ 同 seed 采出**不同**的链。种子对照必须在**同一设备**上做。
+
+⚠️ **`--device`（2026-10-04，GPU 批次）默认 `cpu`**：CUDA 只影响**算在哪**，不影响任何公式。
+本仓测试环境是 CPU-only torch（`cuda.is_available()=False`）；GPU 训练用
+`D:/anaconda/envs/py312/python.exe`（torch 2.13.0+cu126，RTX 4060 8 GB）。实测（MK01、
+`route_k=2`、G=1/G=4，本批的数据见 `progress-log` §34）：批重算的批大小是 Σn_g（数百到
+数千），GPU 在这一档对 CPU 有优势；但**在线前向是 batch 1**（CPU 更快），故"整策略上 GPU"
+并非最优——**分工**（roll 在 CPU、重算在 GPU）本机实测再快约 1.4×，但那需要两模型/搬模型的
+机制，**本批未实现**（`--device` 是"整策略"粒度，如实声明）。
 
 输出**一律落 `run_dir`（默认 = **仓库根**的 `checkpoints/a_<inst>`，锚 `__file__` 而非 CWD，
 故在包目录里执行也不会建出包内 `checkpoints/`；该目录已被 `.gitignore` 排除），不落包目录**：
@@ -155,6 +166,12 @@ def main() -> None:
                     help="⑫ 维护头（M）：默认关（规则自动保养，逐位等于既有读数）；"
                          "开启后机台在两件之间由策略选 {现在保养, 不保养}（要求 ⑫ 维护开启；"
                          "MK01 默认 pm_interval=120 从不逾期，机制验证请配短间隔档）")
+    ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
+                    help="策略所在设备：默认 cpu（本仓测试环境是 CPU-only torch）。"
+                         "cuda = 整步（在线前向 + 批重算）都在 GPU 上——重算的批大小是 "
+                         "Σn_g（数百到数千），GPU 在这一档对 CPU 有数十倍优势；"
+                         "在线前向是 batch 1（CPU 更快），但只有把策略搬上 GPU 才能批重算，"
+                         "故本开关是「整策略」粒度（实测见 progress-log §34）")
     args = ap.parse_args()
 
     # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
@@ -170,7 +187,16 @@ def main() -> None:
     # ⚠️ 必须在 build_training_setup **之前**：`PolicyNet` 的初始化吃全局 torch RNG。
     #    动作采样自评审 I-3 起由 `seed0+s` 派生的 `torch.Generator` 负责，与本流互不干扰。
     torch.manual_seed(args.seed)
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit(
+            "[m13] --device cuda 但当前解释器的 torch 不可用 CUDA（cuda.is_available()=False）。"
+            "本仓测试环境（D:/anaconda/python.exe）是 CPU-only 构建；GPU 训练请用 "
+            "D:/anaconda/envs/py312/python.exe（torch 2.13.0+cu126）。")
     inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst)
+    # ⚠️ 设备在**建好策略之后**统一搬（`--device cuda` 时整步在 GPU 上：在线前向经
+    #    `forward_enc`、批重算经 `_decision_logp_terms`、动作采样流经 `policy.device` 三处
+    #    全部跟随参数设备，没有任何一处硬编码 cpu）。
+    pol = pol.to(args.device)
     ref = ReferenceObjectives.of(inst, cfg)     # ref 进训练入口（评审 F5：w 由 ref 派生）
     w = reward_weights(ref.as_tuple())          # 仅为日志打印
     # ⚠️ rule 与 f^ref 都锚在**全约束**参考运行（`reference_run` 的既定语义，des.py），
@@ -178,11 +204,12 @@ def main() -> None:
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}"
-          f"｜route_k={args.route_k}｜pm_head={args.pm_head}")
+          f"｜route_k={args.route_k}｜pm_head={args.pm_head}｜device={pol.device}")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
-          "（跨进程亦然；唯一例外是 --resume 续跑，见模块 docstring）", flush=True)
+          "（同设备跨进程亦然；例外：--resume 续跑，以及跨设备——CPU/CUDA 的动作采样流不同，"
+          "见模块 docstring）", flush=True)
 
     run_training(pol, inst, steps=args.steps,
                  step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref,

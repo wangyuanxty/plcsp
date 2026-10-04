@@ -235,10 +235,14 @@ def test_route_decisions_join_the_chain_and_its_logp():
     assert all(d.cand == tuple(range(len(d.cand))) for d in r_dec), \
         "R 决策的候选应是 0..k-1 的序号（路径没有 token，动作即候选序号）"
     assert all(0 <= d.action < len(d.cand) for d in r_dec)
-    vec = decisions_logp(dec, pol)
+    vec = decisions_logp(dec, pol).detach()
     assert vec.shape == (len(dec),), f"逐决策 logp 未覆盖 R：{tuple(vec.shape)}"
     old = sampled_decisions_logp(dec)
-    assert vec.tolist() == old.tolist(), "含 R 后逐决策 logp 的采样回放与重算不再逐位同源"
+    # ⚠️ 同源口径（2026-10-04 批量重算批次）：重算改成 (B,N,F) 一次批前向 ⟹ 与采样回放
+    # 只在末位漂移内一致（实测 R 链 max|Δ| ≈ 2.4e-7），不再逐位相同。见 test_joint_chain 的
+    # `test_per_decision_logp_vector_is_same_source_within_tolerance`（旧断言是逐位相等）。
+    assert torch.allclose(vec, old, atol=1e-5), \
+        "含 R 后逐决策 logp 的采样回放与重算漂开超过 1e-5（批路径算错了？）"
     lp_all = float(chain_logp(dec, pol).detach())
     lp_no_r = float(chain_logp([d for d in dec if d.kind != "R"], pol).detach())
     assert lp_all != lp_no_r, "R 决策没有进链 logp——路线头是名义上的"
