@@ -28,11 +28,13 @@ SimPy + 每条链独立的 numpy 流亦然）。**两个例外**：
 
 ⚠️ **`--device`（2026-10-04，GPU 批次）默认 `cpu`**：CUDA 只影响**算在哪**，不影响任何公式。
 本仓测试环境是 CPU-only torch（`cuda.is_available()=False`）；GPU 训练用
-`D:/anaconda/envs/py312/python.exe`（torch 2.13.0+cu126，RTX 4060 8 GB）。实测（MK01、
-`route_k=2`、G=1/G=4，本批的数据见 `progress-log` §34）：批重算的批大小是 Σn_g（数百到
-数千），GPU 在这一档对 CPU 有优势；但**在线前向是 batch 1**（CPU 更快），故"整策略上 GPU"
-并非最优——**分工**（roll 在 CPU、重算在 GPU）本机实测再快约 1.4×，但那需要两模型/搬模型的
-机制，**本批未实现**（`--device` 是"整策略"粒度，如实声明）。
+`D:/anaconda/envs/py312/python.exe`（torch 2.13.0+cu126，RTX 4060 8 GB）。本机实测（MK01、
+`route_k=2`、G=1/G=4、预热后中位 3 次）：批重算的批量是 Σn_g（数百到数千），GPU 在这一档
+有优势；但**在线前向是 batch 1，GPU eager 在那一档更慢**（kernel 启动开销，见
+`progress-log` §36.3）⟹ "整策略上 GPU" 只与 CPU 批量化打平（G=1 1.68 vs 1.55 s/步），
+**不是最优**；把两段分设备的"分工"档（roll 在 CPU、重算在 GPU）实测约 **2.6×**（G=1 1.17、
+G=4 5.00 s/步，基准 3.00/12.75），**本批未实现为开关**（需两模型或逐步搬模型的机制，
+如实声明）。本节数字与 `progress-log` §36 的三段成本表可互相对照。
 
 输出**一律落 `run_dir`（默认 = **仓库根**的 `checkpoints/a_<inst>`，锚 `__file__` 而非 CWD，
 故在包目录里执行也不会建出包内 `checkpoints/`；该目录已被 `.gitignore` 排除），不落包目录**：
@@ -169,9 +171,10 @@ def main() -> None:
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="策略所在设备：默认 cpu（本仓测试环境是 CPU-only torch）。"
                          "cuda = 整步（在线前向 + 批重算）都在 GPU 上——重算的批大小是 "
-                         "Σn_g（数百到数千），GPU 在这一档对 CPU 有数十倍优势；"
-                         "在线前向是 batch 1（CPU 更快），但只有把策略搬上 GPU 才能批重算，"
-                         "故本开关是「整策略」粒度（实测见 progress-log §34）")
+                         "Σn_g（数百到数千），GPU 在这一档对 CPU 有优势；但**在线前向是 "
+                         "batch 1**，GPU eager 在那一档反而慢（kernel 启动开销，"
+                         "见 progress-log §36.3）⟹ 本开关是「整策略」粒度，"
+                         "不是最优分工；分工方案（roll 在 CPU、重算在 GPU）见 §36")
     args = ap.parse_args()
 
     # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
