@@ -278,13 +278,18 @@ def test_route_head_works_on_the_matrix_caliber():
     ⚠️ 矩阵口径的绕行**不改公式**：逐段时长 = 矩阵整段时长 × 该段几何 ÷ 最短路几何，
     绕行的总时长因此自动按几何比变长（见 `AgvSim._drive` 的"矩阵口径"段）。本判据要求
     "跑得通、有 R 决策、不掐表"——把矩阵分支被路线改动打坏（如时长按几何口径重算）挡在门外。
+    ⚠️ ⑪ 充电**必须关**：矩阵只覆盖机台与装卸站，**充电桩没有矩阵项**——⑪ 开着时
+    `_leg_min` 按 `transport_unmapped='raise'` 显式报错。这是既有口径（同
+    `test_transport_wiring._exact_caliber_constraints`），与本机制无关。
     """
     inst = load_mkt("mk01").base
     cfg = SimConfig()
-    lay, dm, ctx = build_setup(inst, cfg)
+    cons = ConstraintConfig().with_off("charging")
+    lay, dm, ctx = build_setup(inst, cfg, constraints=cons)
     torch.manual_seed(5)
     pol = PolicyNet(enc=LayoutEncoder())
-    dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
+    dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx,
+                          constraints=cons, route_k=2)
     assert any(d.kind == "R" for d in dec), "矩阵口径下没有产生 R 决策"
     assert met["horizon_hit"] is False and met["jobs_done"] == inst.n_jobs, \
         f"矩阵口径 + 路线头跑不完：horizon_hit={met['horizon_hit']}，jobs={met['jobs_done']}"
