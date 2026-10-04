@@ -240,20 +240,34 @@ def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
     return float(reference_run(inst, cfg, seed_layout)["makespan"])
 
 
+# ⑫ 维护头（M）的候选（动作码）：0 = 现在保养，1 = 不保养。**动作语义的唯一真相在此**
+# ——`MachineSim._pm_after_op` 按它执行，`algo/group_rel._pm_cand_feat` 按同一行序造候选
+# 特征（行 0 = 现在保养）。候选**是动作**而不是实体（机台）：两个候选都属于同一台机台。
+PM_CAND_NOW = 0
+PM_CAND_DEFER = 1
+PM_CANDS: tuple[int, int] = (PM_CAND_NOW, PM_CAND_DEFER)
+
+
 class MachineSim:
     """机台：输入缓冲 → 换型 → 加工（故障中断-恢复）→ 保养 → 输出缓冲（满则阻塞）。
 
     **开关一律从 `ConstraintConfig` 读**（逐个传 bool 会在约束变多时漏参数）。
     开关关闭时**不得消耗随机数**——否则故障流被移位，"该约束从未存在"的语义就不成立。
+
+    ⚠️ **`pm`（⑫ 维护头，M）**：`None`（默认）= 规则驱动，保养在主轴工时到点时**自动**触发
+    ——逐位等于今日行为；非 None = 策略驱动，一道工序加工完毕、下一件尚未上机时问它
+    {现在保养, 不保养}（见 `_pm_after_op`）。回调只拿机台号，快照与特征由 `algo/` 层自取
+    （层次纪律：`env/` 不得依赖 `nn/`）。
     """
 
     def __init__(self, env, pad: MachinePad, rng, cfg: SimConfig, stats: dict, completes: dict,
-                 events_q: simpy.Store, constraints, track: SimTrack):
+                 events_q: simpy.Store, constraints, track: SimTrack, pm=None):
         self.env, self.pad, self.rng, self.cfg, self.stats = env, pad, rng, cfg, stats
         self.completes = completes
         self.events_q = events_q
         self.con = constraints
         self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
+        self.pm = pm                    # ⑫ 维护头回调（None = 规则驱动，见类 docstring）
         # SimPy 的 Store 不接受 capacity=None；无界用 inf（且下游的"缓冲满"检查须能识别 inf）
         cap_in = pad.in_cap if constraints.finite_buffer else float("inf")
         cap_out = pad.out_cap if constraints.finite_buffer else float("inf")
@@ -290,10 +304,33 @@ class MachineSim:
             # ⑫ 预防性维护：主轴工时到点 → 计划停机（占机台槽，工件在外面等着）
             if self.con.maintenance:
                 self.pm_clock += op.time
-                if self.pm_clock >= self.cfg.pm_interval:
-                    yield self.env.timeout(self.cfg.pm_duration)
-                    self.stats["pm_events"] += 1
-                    self.pm_clock = 0.0
+                if self.pm is None:                     # 规则驱动（默认）——逐位等于今日
+                    if self.pm_clock >= self.cfg.pm_interval:
+                        yield self.env.timeout(self.cfg.pm_duration)
+                        self.stats["pm_events"] += 1
+                        self.pm_clock = 0.0
+                else:                                   # 策略驱动（⑫ 维护头）
+                    yield from self._pm_after_op()
+
+    def _pm_after_op(self):
+        """⑫ 维护头（M）的**决策点**（策略档）：一道工序**加工完毕、下一件尚未上机**。
+
+        ⚠️ 时点**就是规则档检查的那个时点**（`_process` 里主轴工时累加后、`run` 把工件交输出
+        缓冲前）：此刻工件仍占着加工槽、下一件进不来——"要停机才能保养"的唯一窗口。放在同一
+        时点，使"规则 → 策略"只改**谁决定**，不改时点语义：
+        - **逾期**（`pm_clock >= pm_interval`）→ 强制保养，且**不产生决策**：规则是硬底线，
+          策略只能把保养提前，不能推迟过强制点（设计 §⑫「推迟：强制停机落在更晚」的语义
+          = 让强制停机落在规则原本的位置）；
+        - 未逾期 → 回调答 {现在保养, 不保养}（候选动作码见 `PM_CANDS`）。
+
+        ⚠️ 回调**只拿机台号**：快照与候选特征由 `algo/` 层自取（层次纪律，同 `run_gated`），
+        且它必须与规则同记账（`pm_events` / `pm_duration` / `pm_clock` 归零）——否则两条
+        驱动路径的指标不可比。
+        """
+        if self.pm_clock >= self.cfg.pm_interval or self.pm(self.pad.id) == PM_CAND_NOW:
+            yield self.env.timeout(self.cfg.pm_duration)
+            self.stats["pm_events"] += 1
+            self.pm_clock = 0.0
 
     def run(self):
         while True:
@@ -784,7 +821,7 @@ class SimWorld:
         return fleet
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
-                        seed_chain: int = 0, charger_res=(), route=None) -> tuple[
+                        seed_chain: int = 0, charger_res=(), route=None, pm=None) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -799,6 +836,8 @@ class SimWorld:
 
         ⚠️ `route`（R 层）：`None` = 不启用路线决策（`run()` / `_cold_start()` 恒如此）；
         `run_gated` 传 `_make_route_fn(...)` 的返回值。透传给每台 `AgvSim`，`_drive` 消费。
+        ⚠️ `pm`（⑫ 维护头）：同上，`None` = 规则驱动；`run_gated` 传 `_make_pm_fn(...)` 的
+        返回值。透传给每台 `MachineSim`，`_pm_after_op` 消费。
         """
         fleet = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -806,7 +845,7 @@ class SimWorld:
         events_q = simpy.Store(env)
         track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints, track)
+                               events_q, self.constraints, track, pm=pm)
                     for i in range(self.inst.n_machines)]
         lu = LuStation(env, self.layout.lu, self.inst.n_machines, completes, track)
         entities = machines + [lu]
@@ -1079,7 +1118,7 @@ class SimWorld:
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
-                  policy_r=None, route_k: int = 2) -> dict:
+                  policy_r=None, route_k: int = 2, policy_m=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1103,11 +1142,20 @@ class SimWorld:
         ⚠️ `policy_r` 非空但 ① 拥堵关闭 → **显式报错**：① 关时区段机制不存在、选远路严格
         更差（spec §5.3 的原始理由），给一个死动作只会污染链 logp。
 
+        ⚠️ **`policy_m`（⑫ 维护头，M）**：`None`（默认）= 规则驱动 ⟹ 逐位等于今日行为；
+        非空 = **策略驱动**：一道工序加工完毕、下一件尚未上机时（`MachineSim._pm_after_op`）
+        由策略在 {现在保养, 不保养} 里选。契约与 S/L/R 对称：
+        `policy_m(snap, mach, PM_CANDS) -> 动作码`（`PM_CANDS[0]` = 现在保养）。
+        ⚠️ 逾期（`pm_clock >= pm_interval`）**不进回调**——强制保养由仿真直接执行，
+        不产生决策：规则是硬底线，策略只能把保养提前、不能推迟过点。
+        ⚠️ `policy_m` 非空但 ⑫ `maintenance` 关闭 → **显式报错**：⑫ 关时 `pm_clock` 根本
+        不累加（决策点不存在），给策略一个死动作只会污染链 logp。同 `policy_r` 的形态。
+
         ⚠️ 两个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
         `algo/` 层做。决策留痕同理：`group_rel.roll_chain` 自记自己的 `Decision` 链
         （旧的 `dict["decision_log"]` 回传因零消费者已删，评审 M-2）。
         """
-        if policy_l is None and not online_s:
+        if policy_l is None and not online_s and policy_m is None:
             return self.run(seed_chain=seed_chain, op_choices=op_choices)
         if online_s and policy_s is None:
             raise ValueError("online_s=True 需要 policy_s 回调（S 层决策入口）")
@@ -1122,6 +1170,14 @@ class SimWorld:
                     "（spec §5.3 砍掉路线头的原始理由）——那会是一个死动作。请开 ① 或传 "
                     "policy_r=None。")
             route_fn = self._make_route_fn(policy_r, route_k)
+        pm_fn = None
+        if policy_m is not None:
+            if not self.constraints.maintenance:
+                raise ValueError(
+                    "policy_m 非空但 ⑫ 维护关闭：⑫ 关时 `pm_clock` 根本不累加、保养事件恒 0"
+                    "（决策点不存在），给策略一个死动作只会污染链 logp。"
+                    "请开 ⑫ 或传 policy_m=None。")
+            pm_fn = self._make_pm_fn(policy_m)
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -1157,7 +1213,7 @@ class SimWorld:
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
-                                          route=route_fn)
+                                          route=route_fn, pm=pm_fn)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1262,6 +1318,28 @@ class SimWorld:
             return list(cands[idx])
 
         return route
+
+    def _make_pm_fn(self, policy_m):
+        """构造 **⑫ 维护决策（M）** 的回调 `pm(mach) -> 动作码`（一局一个）。
+
+        契约与 S/L/R 对称：`env/` 只给**原始快照**（此刻的活状态）与机台号，**不构造特征**
+        （层次纪律：`env/` 不得依赖 `nn/`）——M 头的决策特征与逐候选特征由 `algo/` 侧从
+        快照自造（见 `group_rel.pm_feat` / `_pm_cand_feat`）。
+
+        ⚠️ 逾期（`pm_clock >= pm_interval`）**不进本函数**：强制保养在
+        `MachineSim._pm_after_op` 里直接执行、不产生决策——规则是硬底线。
+        ⚠️ 非候选动作**显式报错**（同 `policy_s` / `policy_l` / `policy_r`）：静默回退会
+        掩盖策略/候选集不一致，让整条链的 logp 与动作错位而无人察觉。
+        """
+        def pm(mach: int) -> int:
+            snap = self.snapshot()                  # 只读（见 `snapshot()` 的契约）
+            choice = int(policy_m(snap, int(mach), PM_CANDS))
+            if choice not in PM_CANDS:
+                raise ValueError(f"policy_m 选了非候选动作 {choice}；候选={PM_CANDS}"
+                                 f"（机台 {mach}）")
+            return choice
+
+        return pm
 
     @staticmethod
     def _release(env, store, item):

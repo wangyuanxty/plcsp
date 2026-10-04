@@ -1,4 +1,4 @@
-"""策略网络——机台选择（S 层）+ AGV 派车（L 层）+ **路线选择（R 层）**三个头。
+"""策略网络——机台选择（S 层）+ AGV 派车（L 层）+ **路线选择（R 层）** + **维护时机（M 层）**四个头。
 
 **无 critic**：组内相对优势用组内基线（见 `group_rel.py`），不需要价值网络。
 2026-10-02：分批（B 层）头已删（分批环节砍除）；2026-10-03：critic 头 `v_head` 随 PPO 变体一并删除。
@@ -9,6 +9,10 @@
 2026-10-04：**R 头（`route_logits_emb`）恢复**——`route_logits` 当初随 ① 拥堵一并被砍
 （"无拥堵时选远路严格更差"，spec §5.3），但 ① 后来在 `eb1d1da` 恢复而路线头漏恢复
 （`docs/progress-log.md` §27.3/§28）。R 头是那次遗漏的补建，不是新发明。
+2026-10-04（⑫ 维护头）：**M 头（`pm_logits_emb`）新增**——把"何时停机保养"从
+`MachineSim` 的自动规则（`pm_clock >= pm_interval`）交还策略：候选 = {现在保养, 不保养}，
+两个候选同属**一台**机台（候选是**动作**不是实体，故 `cand_idx` 两个候选共用该机台的
+M token，见该方法的说明）。默认关闭，逐位等于今日行为。
 """
 from __future__ import annotations
 
@@ -26,21 +30,24 @@ def v_token_index(seg: tuple[int, int, int, int]) -> list[int]:
 
 
 class PolicyNet(nn.Module):
-    """π = π_S(机台候选) · π_L(AGV 派车) · π_R(路线候选)；无 critic。
+    """π = π_S(机台候选) · π_L(AGV 派车) · π_R(路线候选) · π_M(⑫ 何时保养)；无 critic。
 
-    三个头读**同一份** token 嵌入（spec §5.3.1）：S 头 `mach_logits_emb` / L 头
-    `agv_logits_emb` / R 头 `route_logits_emb`，嵌入均由 `forward_enc` 产出。
+    四个头读**同一份** token 嵌入（spec §5.3.1）：S 头 `mach_logits_emb` / L 头
+    `agv_logits_emb` / R 头 `route_logits_emb` / M 头 `pm_logits_emb`，嵌入均由
+    `forward_enc` 产出。
     ⚠️ `enc=None` 时**没有可用的头**——旧的扁平特征 MLP 回退路径（`s_head` / `mach_logits`）
     已在 P2 Task 4 删除，不存在第二条打分通路。
 
-    三个头的打分输入同构：`token 嵌入 ⊕ 决策特征 ⊕ **候选特征**`。
-    - **决策特征**（`feat_op` / `feat_task` / `feat_route`，形参 `n_feat_op` / `n_feat_task` /
-      `n_feat_route`）与候选**无关**，broadcast 给所有候选；
-    - **候选特征**（`feat_cand`，形参 `n_feat_cand` / `n_feat_route_cand`）**逐候选**——S 头放
-      换型代价 `setup(prev_job_of_m, j)`、L 头放"该车到取货点的预计行驶时长"、R 头放
-      "该路径的长度比 / 区段数 / 当前争用"。spec §5.3.1②：换型是 `(机台, 作业)` 的**交互量**，
-      塞不进 M token，只能走这个槽（旧 MLP 路径本有 `feat_cand`，重写时不可丢）；R 头同理，
-      候选是路径，在序列里没有 token（见 `route_logits_emb`）。
+    四个头的打分输入同构：`token 嵌入 ⊕ 决策特征 ⊕ **候选特征**`。
+    - **决策特征**（`feat_op` / `feat_task` / `feat_route` / `feat_mach`，形参 `n_feat_op` /
+      `n_feat_task` / `n_feat_route` / `n_feat_pm`）与候选**无关**，broadcast 给所有候选；
+    - **候选特征**（`feat_cand`，形参 `n_feat_cand` / `n_feat_route_cand` / `n_feat_pm_cand`）
+      **逐候选**——S 头放换型代价 `setup(prev_job_of_m, j)`、L 头放"该车到取货点的预计行驶
+      时长"、R 头放"该路径的长度比 / 区段数 / 当前争用"、M 头放两个**动作**的后果（现在保养
+      vs 不保养的停机余量/代价/进度）。spec §5.3.1②：换型是 `(机台, 作业)` 的**交互量**，
+      塞不进 M 段 token，只能走这个槽（旧 MLP 路径本有 `feat_cand`，重写时不可丢）；R 头同理，
+      候选是路径，在序列里没有 token（见 `route_logits_emb`）；M 头候选是**动作码**，
+      两次候选同属一台机台（见 `pm_logits_emb`）。
 
     ⚠️ **无 `n_agv` 形参**（评审 M-4 删）：车队规模由 `seg` 的 V 段长度定（`v_token_index`），
     网络结构里没有任何一处随车队规模变——旧的 `n_agv` 形参与其 `self.n_agv` 属性**全仓零
@@ -49,7 +56,8 @@ class PolicyNet(nn.Module):
     def __init__(self, n_feat_op: int = 3,
                  hidden: int = 64, enc: LayoutEncoder | None = None,
                  n_feat_task: int = 4, n_feat_cand: int = 1,
-                 n_feat_route: int = 4, n_feat_route_cand: int = 3):
+                 n_feat_route: int = 4, n_feat_route_cand: int = 3,
+                 n_feat_pm: int = 3, n_feat_pm_cand: int = 3):
         super().__init__()
         self.enc = enc
         self.optim: torch.optim.Optimizer | None = None   # 由训练器在首步惰性创建（Adam）
@@ -65,6 +73,12 @@ class PolicyNet(nn.Module):
             # 逐候选特征 = 长度比/区段数/争用（见 `route_logits_emb` 的"候选没有 token"说明）
             self.r_head_tok = nn.Sequential(
                 nn.Linear(enc.d_model + n_feat_route + n_feat_route_cand, hidden), nn.GELU(),
+                nn.Linear(hidden, 1))
+            # 编码器打分头（⑫ 维护，M）：决策特征 = 该机台状态摘要；逐候选特征 =
+            # {现在保养, 不保养} 两个**动作**的后果（见 `pm_logits_emb`）。
+            # ⚠️ 建在最后：既有三头的初始化抽签次序不得变（默认关闭档的黄金摘要靠它）。
+            self.pm_head_tok = nn.Sequential(
+                nn.Linear(enc.d_model + n_feat_pm + n_feat_pm_cand, hidden), nn.GELU(),
                 nn.Linear(hidden, 1))
 
     def forward_enc(self, tok_feat: torch.Tensor | np.ndarray,
@@ -135,3 +149,23 @@ class PolicyNet(nn.Module):
         tok_c = tok[0, cand_idx.long()]                                # (k, d)
         fd = feat_drive.expand(1, tok_c.shape[0], -1)[0]               # (k, F_route)
         return self.r_head_tok(torch.cat([tok_c, fd, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
+
+    def pm_logits_emb(self, tok: torch.Tensor, feat_mach: torch.Tensor,
+                      feat_cand: torch.Tensor, cand_idx: torch.Tensor) -> torch.Tensor:
+        """(1,N,d) × (1,1,F_dec) × (2,F_cand) × (2,) → (1,1,2) 候选**动作**分数（⑫ 维护头，M）。
+
+        ⚠️ **与 S/L 的关键差别——候选不是实体，是同一台机台的两个动作**：
+        {0 = 现在保养, 1 = 不保养}（动作码见 `des.PM_CANDS`）。故：
+        - `cand_idx` 对两个候选**取同一个下标** = 该机台的 M 段 token（机台号 = 序列位置，
+          与 S 头同源）；**不是** `cand`（0/1 是动作码，拿去索引会读到 0/1 号机台的 token
+          ——维护头就会给别的机器打分，与 2026-10-04 修的 L 头缺陷同型，见 progress-log §31）；
+        - 候选之间的分数差只能来自 `feat_cand`：两个动作的"距停机余量 / 停机代价 / 进度"
+          逐行不同（见 `group_rel._pm_cand_feat`）。若两行相同，两个候选的分数**恒等**，
+          决策退化成不可学的掷硬币。
+
+        `feat_mach` = 该机台的状态摘要（与候选无关，broadcast 给两个动作）。
+        """
+        tok_c = tok[0, cand_idx.long()]                                # (2, d)
+        fm = feat_mach.expand(1, tok_c.shape[0], -1)[0]                # (2, F_dec)
+        cand = feat_cand[0] if feat_cand.dim() == 3 else feat_cand     # (2, F_cand)
+        return self.pm_head_tok(torch.cat([tok_c, fm, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)

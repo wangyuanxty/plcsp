@@ -114,18 +114,20 @@ def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
 
 
 def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
-                  constraints: ConstraintConfig | None = None, route_k: int = 1):
+                  constraints: ConstraintConfig | None = None, route_k: int = 1,
+                  pm_head: bool = False):
     """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。
 
     ⚠️ `constraints` 必须与训练同一份（R2）：评估跑的是训练后的策略，动力学口径不一致
     （如训练 ③ 关、评估全开）会让读数对不上训练环境，且**静默**。
     ⚠️ `route_k` 同理（R 头恢复后）：训练开路线头（`route_k=2`）而评估关着 = 用**另一个策略**
     评估（恒走最短路的那一个），读数与训练不对应，且**静默**——故与 `constraints` 一样必须透传。
+    ⚠️ `pm_head`（⑫ 维护头）同型：训练开、评估关 = 用规则保养的策略评估一个学出来的策略。
     """
     def eval_fn(policy) -> dict:
         ms = [float(roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
                                ctx=ctx, sample=False, constraints=constraints,
-                               route_k=route_k)[1]["makespan"])
+                               route_k=route_k, pm_head=pm_head)[1]["makespan"])
               for s in range(seeds)]
         return {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                 "rule_makespan": rule}
@@ -149,6 +151,10 @@ def main() -> None:
     ap.add_argument("--route-k", type=int, default=1,
                     help="路线头（R）候选条数：1 = 关闭（默认，逐位等于既有读数）；"
                          "2 = 每次行驶在 2 条候选里选（① 拥堵必须开）")
+    ap.add_argument("--pm-head", action="store_true",
+                    help="⑫ 维护头（M）：默认关（规则自动保养，逐位等于既有读数）；"
+                         "开启后机台在两件之间由策略选 {现在保养, 不保养}（要求 ⑫ 维护开启；"
+                         "MK01 默认 pm_interval=120 从不逾期，机制验证请配短间隔档）")
     args = ap.parse_args()
 
     # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
@@ -172,7 +178,7 @@ def main() -> None:
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
           f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}"
-          f"｜route_k={args.route_k}")
+          f"｜route_k={args.route_k}｜pm_head={args.pm_head}")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
@@ -181,11 +187,13 @@ def main() -> None:
     run_training(pol, inst, steps=args.steps,
                  step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref,
                                   constraints=constraints,   # R2：与 ctx 同一份（入口校验同源）
-                                  G=args.G, lr=args.lr, route_k=args.route_k),
+                                  G=args.G, lr=args.lr, route_k=args.route_k,
+                                  pm_head=args.pm_head),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule,
-                                        constraints=constraints, route_k=args.route_k)
+                                        constraints=constraints, route_k=args.route_k,
+                                        pm_head=args.pm_head)
                           if args.eval_every > 0 else None),
                  eval_every=(args.eval_every or None))
     print(f"[m13] 完成：{run_dir / 'metrics.ndjson'}（每步一行）｜{run_dir / 'ckpt.pt'}")

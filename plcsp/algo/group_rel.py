@@ -1,7 +1,9 @@
 """联合链 GRPO（spec §5.3.4，P2 Task 7）——一条链 = 一个完整 episode 的**全部**决策。
 
     链 = (机台计划序列 a_S[1..n_ops]) ⊕ (派车序列 a_L[1..n_tasks]) ⊕ (路线序列 a_R[1..n_drives])
-    logp(链) = Σ_t log π_S(a_S[t]) + Σ_t log π_L(a_L[t]) + Σ_t log π_R(a_R[t])   ← 三类都取【求和】
+         ⊕ (维护序列 a_M[1..n_pm_decisions])
+    logp(链) = Σ_t log π_S(a_S[t]) + Σ_t log π_L(a_L[t]) + Σ_t log π_R(a_R[t]) + Σ_t log π_M(a_M[t])
+                                                                          ← 四类都取【求和】
 
 ⚠️ **R（路线）是恢复出来的第三个决策，不是新发明**：`route_logits` 当初随 ① 拥堵一并取消
 （理由"无拥堵时选远路严格更差"，spec §5.3），但 ① 后来在 `eb1d1da` 恢复、**路线头没跟着
@@ -21,11 +23,11 @@ R 决策，链 logp 照常求和。⚠️ **默认 `route_k=1`（关闭）**—�
 **逐目标单位缩放不变** ⇒ w 真正控制各目标的权衡；见 `_advantages` 的 docstring。
 
 spec §5.3.4 五条硬性约定在本模块的落点：
-1. **联合链、单一优势** —— `roll_chain` 把**三头**的决策记在**同一条**链上（同一 episode），
+1. **联合链、单一优势** —— `roll_chain` 把**四头**的决策记在**同一条**链上（同一 episode），
    `joint_chain_step` 只算**一个** A（不按头分组、不按层归一化）；
-2. **logp 一律取求和** —— `chain_logp` = `Σ logπ_S + Σ logπ_L + Σ logπ_R`（**不除决策数**：旧实现
-   S 取平均、L 取求和，同一个 `ratio=exp(Δ)` 在两边含义不同）。⚠️ 求和只定义**链级** logp；
-   裁剪的信任域不看它，按**逐决策**的 `decisions_logp` 算（修复，见上段）；
+2. **logp 一律取求和** —— `chain_logp` = `Σ logπ_S + Σ logπ_L + Σ logπ_R + Σ logπ_M`（**不除
+   决策数**：旧实现 S 取平均、L 取求和，同一个 `ratio=exp(Δ)` 在两边含义不同）。⚠️ 求和只
+   定义**链级** logp；裁剪的信任域不看它，按**逐决策**的 `decisions_logp` 算（修复，见上段）；
 3. **J=1，预算全给 G** —— `joint_chain_step` 只有 G（J 个扰动取均值留给**评估**，不混进训练）；
 4. **优化器 Adam** —— `policy.optim` 惰性创建为 `torch.optim.Adam`（旧的"手写 SGD + 逐元素
    clamp ±1.0"无动量无自适应，已随旧训练器删除）；
@@ -64,6 +66,11 @@ SEED_STRIDE = 1000
 # 宽度，两处漂开即报错）。
 ROUTE_FEAT_DRIVE = 4      # `route_feat`：起点/终点/负载标志/本车号
 ROUTE_FEAT_CAND = 3       # `_route_cand_feat`：长度比/区段数占比/被别的车占着的区段占比
+
+# M（⑫ 维护）头两个特征槽的宽度（**唯一真相**，与 `PolicyNet` 的 `n_feat_pm*` 形参对应——
+# `test_maintenance_head.test_pm_feature_widths_match_the_head` 按它核对打分头的输入宽度）。
+PM_FEAT_DEC = 3       # `pm_feat`：该机台状态摘要（与候选无关）
+PM_FEAT_CAND = 3      # `_pm_cand_feat`：逐候选（两个**动作**的后果，行序 = `des.PM_CANDS`）
 
 
 def _z(vals: np.ndarray) -> np.ndarray:
@@ -233,6 +240,49 @@ def _route_cand_feat(snap, zof: dict[int, int], n_zones: int, cands, dm: np.ndar
     return out
 
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    """M 头特征用的 [lo, hi] 截断（与 `state_emb._safe` 同口径，两处都在归一化边界上）。"""
+    return float(min(max(x, lo), hi))
+
+
+def pm_feat(snap, mach: int, ctx: NormContext) -> list[float]:
+    """M 头的**决策特征**（`PM_FEAT_DEC` = 3 维）：**该机台的状态摘要**（与候选无关）。
+
+    `[pm_used_frac, in_q_fill, out_q_fill]`——"这个保养周期的进度 + 机台手上的压力"：
+    - `pm_used_frac` = `pm_clock / pm_interval`：距上次保养已累计的主轴工时占比
+      （与 M 段 token 的 `pm_left` 维互补：那是"还剩多少"，这是"已经用掉多少"）；
+    - `in_q_fill` / `out_q_fill` = 输入/输出缓冲占用比（无界缓冲时恒 0，`_safe` 同口径）。
+
+    ⚠️ 候选特征里的"当前积压量（现在停机的代价）"与这里的 `in_q_fill` 不同源：那里是
+    **工时口径**（`backlog_min / 全实例总工时`），这里是**占位口径**（件数/容量）。
+    """
+    ms = snap.machines[int(mach)]
+    return [_clamp(ms.pm_used_min / max(ctx.pm_interval, 1e-9), 0.0, 1.0),
+            _clamp(ms.in_q_len / max(ms.in_cap, 1.0), 0.0, 1.0),
+            _clamp(ms.out_q_len / max(ms.out_cap, 1.0), 0.0, 1.0)]
+
+
+def _pm_cand_feat(snap, mach: int, ctx: NormContext) -> np.ndarray:
+    """M 头的**逐候选**特征 `(2, PM_FEAT_CAND)`——行序 = `des.PM_CANDS`（0 现在保养 / 1 不保养）。
+
+    三个槽（设计 §⑫ 的候选特征表）：
+    - **0 距停机的主轴余量**（该候选**导致的**停机还有多少主轴工时）：行 0（现在保养）=
+      `0.0`（停机就在此刻）；行 1（不保养）= `pm_left / pm_interval`（强制点还在前面）。
+      ⚠️ 这一维是"选择非平凡"的**唯一来源**——它在两行上恒不同（未逾期 ⟹ `pm_left > 0`），
+      故两个候选的分数不会恒等。它也是设计文档说的 `pm_left`：对"不保养"候选，
+      距强制保养正是 `pm_left`；
+    - **1 当前积压量** = `backlog_min / total_work_min`（该机台输入队列的**工时**）——
+      "现在停机"的代价。两个候选共享同一行值：它是**当下的处境**，不是候选的后果。
+    - **2 episode 进度** = `now / m_ref`（与 G 段 `time_progress` 同口径与同截断）。
+    """
+    ms = snap.machines[int(mach)]
+    pm_left = _clamp(1.0 - ms.pm_used_min / max(ctx.pm_interval, 1e-9), 0.0, 1.0)
+    backlog = ms.backlog_min / max(ctx.total_work_min, 1e-9)
+    progress = _clamp(snap.now / max(ctx.m_ref, 1e-9), 0.0, 4.0)
+    return np.array([[0.0, backlog, progress],
+                     [pm_left, backlog, progress]], dtype=np.float32)
+
+
 @dataclass
 class Decision:
     """一个决策点的**全部打分输入**（采样时冻结）——`chain_logp` 据此带梯度重算 logp。
@@ -243,27 +293,34 @@ class Decision:
     时长"、R 头放路径的"长度比/区段数/争用"。少了它，`chain_logp` 重算的分布与采样时的分布
     **不是同一个**（ratio≠1 的假象）。
     """
-    kind: str                        # "S"（选机台）| "L"（派车）| "R"（选路）
+    kind: str                        # "S"（选机台）| "L"（派车）| "R"（选路）| "M"（维护时机）
     tok: np.ndarray                  # 当时的四段 token 特征 (N, F_MAX)
     seg: tuple[int, int, int, int]   # 当时的段长 (n_m, n_jobs, n_agv, 1)
-    feat: np.ndarray                 # 决策特征 (F_dec,)：S=`op_feat` / L=`task_feat` / R=`route_feat`
+    feat: np.ndarray                 # 决策特征 (F_dec,)：S=`op_feat` / L=`task_feat` / R=`route_feat` / M=`pm_feat`
     cand_feat: np.ndarray            # 逐候选特征 (n_cand, F_cand)
-    cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号；R: 0..k-1 的候选序号）
+    cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号；R: 0..k-1 的候选序号；M: 动作码 PM_CANDS）
     action: int                      # 所取的动作（∈ cand）
     # 打分时**取 token 嵌入用的下标**（逐候选）。S = `cand`（机台号即序列位置，M 段在最前）；
     # L = `cand` 里的**车号**经 `v_token_index(seg)` 映射后的 V 段下标；R = 本车 V token 下标
-    # 广播 k 份（路线候选是**路径**，序列里没有它们的 token，见 `PolicyNet.route_logits_emb`）。
+    # 广播 k 份（路线候选是**路径**，序列里没有它们的 token，见 `PolicyNet.route_logits_emb`）；
+    # M = **该机台**的 M token 下标，两个动作候选共用（候选是动作码 0/1，不是序列位置——
+    # 照 S 写 `tok_idx = cand` 会去读 0/1 号机台的 token，与 L 头缺陷同型）。
     # ⚠️ **L 曾与 S 共用 `tok_idx = cand`——那是缺陷，不是口径**（2026-10-04 修复）：车号
     # 0..n_agv-1 被当成序列位置，L 头实际索引 M 段机台 token，看不到任何车辆特征
     # （battery / capacity / speed_factor / st_down / zone_wait / 位置）。修前
     # `v_token_index` 只在测试里被调用、生产路径从不使用，故手搓下标的测试查不出来。
-    # 改动本字段前先看 `test_policy_heads.test_l_head_reads_v_tokens_on_the_production_path`。
+    # 改动本字段前先看 `test_policy_heads.test_l_head_reads_v_tokens_on_the_production_path`
+    # 与 `test_maintenance_head.test_pm_head_reads_the_deciding_machines_token_on_the_production_path`。
     tok_idx: np.ndarray
     # 采样那一刻策略在 `action` 上的 log 概率（无梯度标量）。它是 `decisions_logp` 带梯度
     # 重算值的**同源对照**：裁剪路径的 `old` 直接由它**逐决策**回放（`sampled_decisions_logp`，
     # 省掉一整遍"重算 old"的链前向），逐位一致性由测试钉死。既然取自采样那一刻，它天然不受
     # "采样之后再算 old"这类重排的影响。
     logp: float
+    # M 决策决定的是**哪台机台**（其余头 None）——决策点逐机台触发，而候选是**动作码**
+    # （0/1），机台身份在 `cand` 里表达不了。生产路径写入（`_act` 的 `mach_id`），
+    # 守卫测试据此只扰动**该机台**的 M 段 token 行（见 test_maintenance_head）。
+    mach: int | None = None
 
 
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
@@ -271,7 +328,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                sample: bool = True,
                generator: torch.Generator | None = None,
                constraints: ConstraintConfig | None = None,
-               route_k: int = 1) -> tuple[list[Decision], dict]:
+               route_k: int = 1, pm_head: bool = False) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
     ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
@@ -294,11 +351,20 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
        简单路径，"选路"不构成决策——记一条单候选的假决策只会给链 logp 添一个恒为 0 的项。
        ⚠️ `route_k > 1` 要求 ① 拥堵开：① 关时区段机制根本不存在，选远路**严格更差**，
        那正是当年砍掉路线头的理由；给一个"可选的死动作"会污染链 logp，故**显式报错**。
+     ⚠️ **`pm_head`（⑫ 维护头开关）**：`False`（默认）= **关闭**，`MachineSim` 按规则自动保养
+        （`pm_clock >= pm_interval`）、不记 M 决策、不消费采样流 ⟹ **逐位等于今日行为**
+        （黄金摘要钉死，既有读数全靠它）；`True` = 一道工序加工完毕、下一件尚未上机时由策略在
+        `des.PM_CANDS`（现在保养 / 不保养）里选。⚠️ 逾期（`pm_clock >= pm_interval`）时
+        **强制**保养且不产生决策——规则是硬底线，策略只能把保养提前。
+        ⚠️ MK01 默认 `pm_interval=120` 在 episode 内从不**逾期**（每机 ~25.5 主轴分钟）——
+        机制验证须传显式短间隔档 `SimConfig(pm_interval=…)`（默认参数**不动**，见 §27.1）。
+        ⚠️ `pm_head=True` 要求 ⑫ `maintenance` 开：⑫ 关时决策点不存在，给一个死动作只会
+        污染链 logp，故**显式报错**（同 `route_k>1` 要求 ① 拥堵的形态）。
      ⚠️ **动作采样流**（评审 I-3）：`generator=None` ⇒ 按 `torch.Generator().manual_seed(seed)`
         现建——同 seed 同调用序列的动作**逐位相同**；显式传入者自备种子（`joint_chain_step`
         自建一条并透传，组内 G 条链顺序共享）。`sample=False`（argmax）不消费该流。
-        ⚠️ R 与 S/L 共享**同一条**动作流（谁先决策谁先消费）——三头是一条链上的联合策略，
-        不各开一条流（那会让"同 seed 可复现"变成分头可复现）。
+        ⚠️ R 与 S/L（以及 ⑫ 的 M）共享**同一条**动作流（谁先决策谁先消费）——四头是一条链上的
+        联合策略，不各开一条流（那会让"同 seed 可复现"变成分头可复现）。
      ⚠️ **`constraints` 必须透传进 `SimWorld`**（评审 F1）：省略 = 十约束全开，而 spec §6.2 的
         5 组消融正是靠这个形参区分——不透传时 5 组跑出**完全相同**的链且零报错（"约束不重要"
         的假阴性）。`None` = `ConstraintConfig()`（全开，与 `SimWorld` 的 None 语义一致）。
@@ -315,6 +381,10 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         raise ValueError(
             f"route_k={route_k} 需要 ① 拥堵开启：① 关时区段机制不存在，选远路**严格更差**"
             "（spec §5.3 的原始理由）——给策略一个死动作只会污染链 logp。请开 ① 或传 route_k=1。")
+    if pm_head and not cons.maintenance:
+        raise ValueError(
+            "pm_head=True 需要 ⑫ 维护开启：⑫ 关时 `pm_clock` 根本不累加、保养事件恒 0"
+            "（决策点不存在）——给策略一个死动作只会污染链 logp。请开 ⑫ 或传 pm_head=False。")
     decisions: list[Decision] = []
     gen = generator if generator is not None else torch.Generator().manual_seed(seed)
     world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout),
@@ -324,13 +394,14 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
     zof, n_zones = build_zone_map(layout, cfg.zone_granularity) if route_k > 1 else ({}, 0)
 
     def _act(kind: str, snap, feat: list[float], cand_feat: np.ndarray,
-             cand: tuple[int, ...], aid: int | None = None) -> int:
+             cand: tuple[int, ...], aid: int | None = None,
+             mach_id: int | None = None) -> int:
         tok_feat, seg = build_tok(snap, inst, layout, ctx)
         tok_feat = np.asarray(tok_feat, dtype=np.float32)
         with torch.no_grad():
             tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg)
             head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
-                    "R": policy.route_logits_emb}[kind]
+                    "R": policy.route_logits_emb, "M": policy.pm_logits_emb}[kind]
             if kind == "S":
                 # 机台号 = 序列位置（M 段在最前）——S 的候选本身就是 token 下标。
                 tok_idx = np.asarray(cand, dtype=np.int64)
@@ -342,6 +413,12 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                 # 测试里被调用、生产路径从不使用，故手搓下标的测试全绿而生产是错的。
                 v_idx = v_token_index(seg)
                 tok_idx = np.asarray([v_idx[int(a)] for a in cand], dtype=np.int64)
+            elif kind == "M":
+                # ⚠️ M 的候选是**动作码**（`des.PM_CANDS`：0 现在保养 / 1 不保养），不是序列
+                # 位置、也不是机台号：两个候选同属**一台**机台（`mach_id`），故都读该机台的
+                # M 段 token。照 S 写 `tok_idx = cand` 会让候选 0/1 去读 0/1 号机台的 token——
+                # 维护头给别的机器打分（与 2026-10-04 修的 L 头缺陷同型，progress-log §31）。
+                tok_idx = np.full(len(cand), int(mach_id), dtype=np.int64)
             else:                                   # R
                 # 路线候选在序列里没有 token（见 `PolicyNet.route_logits_emb`）：取本车 V token
                 # 的下标、k 个候选共用同一份——打分只差在 `cand_feat`。
@@ -360,7 +437,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                                   feat=np.asarray(feat, dtype=np.float32),
                                   cand_feat=np.asarray(cand_feat, dtype=np.float32),
                                   cand=cand, action=int(cand[k]), tok_idx=tok_idx,
-                                  logp=lp_k))
+                                  logp=lp_k, mach=mach_id))
         return int(cand[k])
 
     def policy_s(snap, job, oi, cand):
@@ -379,9 +456,17 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                     _route_cand_feat(snap, zof, n_zones, cands, dm, aid),
                     tuple(range(len(cands))), aid=int(aid))
 
+    def policy_m(snap, mach, cand):
+        # 候选 = **动作码**（`des.PM_CANDS`：0 现在保养 / 1 不保养），两个候选同属该机台。
+        # `mach_id` 是**决定保养的那台机台**——`_act` 据此把两个候选的 token 下标都指向它
+        # （候选不是序列位置，见 `_act` 的 M 分支与 `PolicyNet.pm_logits_emb`）。
+        return _act("M", snap, pm_feat(snap, mach, ctx), _pm_cand_feat(snap, mach, ctx),
+                    cand, mach_id=int(mach))
+
     metrics = world.run_gated(seed_chain=seed, online_s=True,
                               policy_s=policy_s, policy_l=policy_l,
-                              policy_r=None if route_k == 1 else policy_r)
+                              policy_r=None if route_k == 1 else policy_r,
+                              policy_m=None if not pm_head else policy_m)
     return decisions, metrics
 
 
@@ -391,8 +476,9 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     `chain_logp`（求和）与 `decisions_logp`（向量化裁剪用）都从这里取项，**不可能漂开**。
     每个决策用**当时记录的** token/决策/候选特征重建打分（状态已变，不能用最新快照）。
     梯度经 `forward_enc` 同时回到**三**个头与编码器——这是"联合链"的实质（约定 1/5）。
-    ⚠️ token 下标用 `d.tok_idx`（三头语义各不同，见 `Decision.tok_idx`）：S = 机台号即序列
-    位置；L = 车号经 `v_token_index` 映射的 V 段下标；R = 本车 V token 广播给 k 条候选。
+    ⚠️ token 下标用 `d.tok_idx`（四头语义各不同，见 `Decision.tok_idx`）：S = 机台号即序列
+    位置；L = 车号经 `v_token_index` 映射的 V 段下标；R = 本车 V token 广播给 k 条候选；
+    M = 决定保养的那台机台的 M token，广播给 2 个动作候选。
     ⚠️ **L 的 `tok_idx` 修复前错记为 `cand`（缺陷，2026-10-04 修）**：那时这条统一路径
     忠实回放的是"索引 M 段"的错误分布——它不改既有两头任何一位的保证只对 S/R 成立。
     修复后重算路径自动跟随采样下标（`_act` 记录什么就重算什么），无需另一套映射。
@@ -402,7 +488,7 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
         tok, _ = policy.forward_enc(
             torch.as_tensor(d.tok, dtype=torch.float32).unsqueeze(0), d.seg)
         head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
-                "R": policy.route_logits_emb}[d.kind]
+                "R": policy.route_logits_emb, "M": policy.pm_logits_emb}[d.kind]
         logits = head(tok,
                       torch.as_tensor(d.feat, dtype=torch.float32).reshape(1, 1, -1),
                       torch.as_tensor(d.cand_feat, dtype=torch.float32),
@@ -481,7 +567,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      epochs: int = 1,
                      constraints: ConstraintConfig | None = None,
                      adv_mode: str = "scalar",
-                     route_k: int = 1) -> tuple[float, dict]:
+                     route_k: int = 1, pm_head: bool = False) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
@@ -523,7 +609,13 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     ⚠️ **`route_k`（R 层开关，2026-10-04 恢复路线头）**：默认 `1` = 关闭，链与训练步
     **逐位等于今日**（既有读数全靠它）；传 `2` 启用——每次行驶在 2 条候选路径里由策略选，
     链长与墙钟随之上升（MK01 实测见 `docs/progress-log.md`）。R 决策与 S/L 同进链 logp、
-    同吃一条采样流、同受逐决策裁剪——**三头是一条联合链**，不是三套并行策略。
+    同吃一条采样流、同受逐决策裁剪——**四头是一条联合链**，不是四套并行策略。
+
+    ⚠️ **`pm_head`（⑫ 维护头开关，2026-10-04）**：默认 `False` = 规则自动保养，链与训练步
+    **逐位等于今日**；`True` 启用——机台在两件之间由策略选 {现在保养, 不保养}（M 决策与
+    S/L/R 同进链 logp、同吃采样流、同受逐决策裁剪）。⚠️ 需 ⑫ `maintenance` 开（入口经
+    `roll_chain` 显式报错）；默认 MK01 的 `pm_interval=120` 从不逾期 ⟹ 机制验证要传
+    `SimConfig(pm_interval=…)` 短间隔档（默认参数不动，见 §27.1）。
 
     ⚠️ **信任域按决策施加**（2026-10-04 修复，此前是**链级**裁剪的缺陷）：`logp` 是整条链的
     **求和**（约定 2，链长 100–460），故 `ratio = exp(Δ链logp)` 对单决策的微小漂移极敏感——
@@ -600,7 +692,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     gen = torch.Generator().manual_seed(seed)
     for g in range(G):
         dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
-                              sample=True, generator=gen, constraints=cons, route_k=route_k)
+                              sample=True, generator=gen, constraints=cons, route_k=route_k,
+                              pm_head=pm_head)
         chains.append(dec)
         f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
         f_objs.append(f)

@@ -483,13 +483,15 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
         `9333163ad5910498e62468b0892d827cb9262274e55f9e0399607a93c843d06b`
     （同 seed 同起点下**跨进程逐位可复现**，见 `test_joint_step_bitwise_reproducible_given_seed`。）
     任一个比特被改动都会让摘要变化——这比"两次调用互相相等"强，后者对两种实现都恒真。
-    ⚠️ 2026-10-04 两次重捕获（都**不是** scalar 口径变化，是策略输入/结构的正确性修复）：
+    ⚠️ 2026-10-04 三次重捕获（都**不是** scalar 口径变化，是策略输入/结构的正确性修复）：
     1. R 头恢复后比对时排除 `r_head_tok.*`（默认关闭档拿不到梯度）——排除后重算仍 = 更早的
        捕获值；
     2. **L 头 token 下标修复**（`_act` 把车号映射到 V 段 token，此前误索引 M 段）——L 头读的
        特征变了、梯度随之改变，摘要必须重捕获。旧值
        `2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a` 钉的是
        **带缺陷的读数**（L 头看不见任何车辆特征），不得再被当成基准。
+    3. **⑫ 维护头（M）新增**（`pm_head_tok.*`）——默认 `pm_head=False` 档它一次都不被调用、
+       拿不到梯度，与 R 头同理**排除**；排除后重算 = 上一条的捕获值（本次未变）。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -501,11 +503,11 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
     # ⚠️ 2026-10-04（L 头下标修复）：摘要值本身已重捕获——旧值钉的是 L 头误索引 M 段的
     # 缺陷读数（车辆特征对 L 全不可见），修复后 S/L/编码器的更新都变，必须换新基准。
-    # 排除 `r_head_tok.*` 的理由不变（R 头恢复时加的：默认关闭档它拿不到梯度，其参数是
-    # 新增结构、不进本条"scalar 口径不变"的证据链）。
+    # 排除 `r_head_tok.*` / `pm_head_tok.*` 的理由不变（两个头恢复/新增时加的：默认关闭档
+    # 它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径不变"的证据链）。
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
-        if k.startswith("r_head_tok."):
+        if k.startswith(("r_head_tok.", "pm_head_tok.")):
             continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())
