@@ -128,19 +128,25 @@ def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
 
 def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                   constraints: ConstraintConfig | None = None, route_k: int = 1,
-                  pm_head: bool = False):
+                  route_zones: bool = False, geom_bias: bool = False,
+                  pm_head: bool = False, charge_head: bool = False):
     """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。
 
     ⚠️ `constraints` 必须与训练同一份（R2）：评估跑的是训练后的策略，动力学口径不一致
     （如训练 ③ 关、评估全开）会让读数对不上训练环境，且**静默**。
     ⚠️ `route_k` 同理（R 头恢复后）：训练开路线头（`route_k=2`）而评估关着 = 用**另一个策略**
     评估（恒走最短路的那一个），读数与训练不对应，且**静默**——故与 `constraints` 一样必须透传。
-    ⚠️ `pm_head`（⑫ 维护头）同型：训练开、评估关 = 用规则保养的策略评估一个学出来的策略。
+    ⚠️ **`route_zones` / `geom_bias` / `pm_head` / `charge_head` 同型**（2026-10-05 基线档接线）：
+    它们每一个都改变**策略看到的输入或动作空间**——训练开、评估关 = 用**另一个策略**评估。
+    `cfg` 里的 `agv_failover` / `machine_age_failure` 是**动力学**开关，随 `cfg` 一并到达，同理必须同源。
+    **本函数的每个开关都要与 `main` 传给 `joint_chain_step` 的那一份逐字相同。**
     """
     def eval_fn(policy) -> dict:
         ms = [float(roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
                                ctx=ctx, sample=False, constraints=constraints,
-                               route_k=route_k, pm_head=pm_head)[1]["makespan"])
+                               route_k=route_k, route_zones=route_zones,
+                               geom_bias=geom_bias, pm_head=pm_head,
+                               charge_head=charge_head)[1]["makespan"])
               for s in range(seeds)]
         return {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                 "rule_makespan": rule}
@@ -168,6 +174,30 @@ def main() -> None:
                     help="⑫ 维护头（M）：默认关（规则自动保养，逐位等于既有读数）；"
                          "开启后机台在两件之间由策略选 {现在保养, 不保养}（要求 ⑫ 维护开启；"
                          "MK01 默认 pm_interval=120 从不逾期，机制验证请配短间隔档）")
+    # ── 基线档接线（2026-10-05）：以下五个开关都是**默认关 ⟹ 逐位不变** ──
+    # ⚠️ 它们每一个都改变**策略看到的输入或动作空间**，所以训练与评估**必须逐字同源**
+    #（`_make_eval_fn` 的 docstring 已写）——训练开、评估关 = 用另一个策略评估。
+    ap.add_argument("--route-zones", action="store_true",
+                    help="R2 区段 token（①）：默认关。开启后**区段**成为一段新 token，"
+                         "R 头逐候选读该路径途经区段的聚合——上下文相关的排序才成立。"
+                         "⚠️ 只在 `--route-k > 1` 时有意义，且开启后 token 行数与链长都变"
+                         "（MK01：20→33 行、单步 ×1.44，见 progress-log §41）")
+    ap.add_argument("--geom-bias", action="store_true",
+                    help="几何/度量偏置（①）：默认关。开启后把 `-W·d(i,j)/bbox` 加到注意力"
+                         "分数上（W 固定，不新增可学参数），距离取自与 `_seg_min` 同一张矩阵。"
+                         "**只作「输入」用途**——不得据此主张跨布局泛化（§6.3 的限定）")
+    ap.add_argument("--charge-head", action="store_true",
+                    help="⑪ 充电头（C）：默认关。开启后 AGV 待命时由策略选 {不去充, 各桩}"
+                         "（要求 ⑪ 充电开启）")
+    ap.add_argument("--agv-failover", action="store_true",
+                    help="⑨ 故障 failover：默认关（在途任务滞留在车上）。开启后停机期间把"
+                         "车上/队列里的任务退回、交**未停机**的别的车。**改动力学**，"
+                         "makespan 会变（高频档实测 139.09→128.40，见 progress-log §43）")
+    ap.add_argument("--machine-age-failure", action="store_true",
+                    help="③ 役龄故障率：默认关（`fail_rate` 常数、无记忆）。开启后故障率随"
+                         "`pm_clock`（主轴工时、保养归零）按 Weibull 递增风险上升 ⟹ ③ 有记忆、"
+                         "⑫ 多一重收益。**改动力学**；Weibull 形状参数标 assumed、引文待核"
+                         "（见 progress-log §44）")
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="策略所在设备：默认 cpu（本仓测试环境是 CPU-only torch）。"
                          "cuda = 整步（在线前向 + 批重算）都在 GPU 上——重算的批大小是 "
@@ -208,7 +238,13 @@ def main() -> None:
             "[m13] --device cuda 但当前解释器的 torch 不可用 CUDA（cuda.is_available()=False）。"
             "本仓测试环境（D:/anaconda/python.exe）是 CPU-only 构建；GPU 训练请用 "
             "D:/anaconda/envs/py312/python.exe（torch 2.13.0+cu126）。")
-    inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst)
+    # ⚠️ ③/⑨ 的开关是 **`SimConfig` 级**（改动力学），必须在 `build_training_setup`
+    #    **之前**建进 `cfg`——这样 `ctx`（特征归一化）与 `cfg`（仿真动力学）同源，
+    #    正是 `build_setup` 的既定纪律（F4 收敛）。其余四个开关是**链级**（改输入/动作空间），
+    #    走下面的 `step_kwargs` 与 `eval_fn`。
+    cfg = SimConfig(agv_failover=args.agv_failover,
+                    machine_age_failure=args.machine_age_failure)
+    inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst, cfg=cfg)
     # ⚠️ 设备在**建好策略之后**统一搬（`--device cuda` 时整步在 GPU 上：在线前向经
     #    `forward_enc`、批重算经 `_decision_logp_terms`、动作采样流经 `policy.device` 三处
     #    全部跟随参数设备，没有任何一处硬编码 cpu）。
@@ -223,6 +259,11 @@ def main() -> None:
           f"｜route_k={args.route_k}｜pm_head={args.pm_head}｜device={pol.device}"
           f"｜parallel={args.parallel}(workers={args.workers or 'auto'},"
           f"worker_device={args.worker_device})")
+    # 基线档的开关逐个打印——**训练与评估是否同源**只看这一行就能核（见 `_make_eval_fn`）
+    print(f"[m13] 开关（训练=评估，同源）：route_zones={args.route_zones} "
+          f"geom_bias={args.geom_bias} pm_head={args.pm_head} "
+          f"charge_head={args.charge_head} agv_failover={args.agv_failover} "
+          f"machine_age_failure={args.machine_age_failure}")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
@@ -233,14 +274,18 @@ def main() -> None:
                  step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref,
                                   constraints=constraints,   # R2：与 ctx 同一份（入口校验同源）
                                   G=args.G, lr=args.lr, route_k=args.route_k,
-                                  pm_head=args.pm_head),
+                                  route_zones=args.route_zones, geom_bias=args.geom_bias,
+                                  pm_head=args.pm_head, charge_head=args.charge_head),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  parallel=args.parallel, n_workers=args.workers,
                  worker_device=args.worker_device,
                  eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule,
                                         constraints=constraints, route_k=args.route_k,
-                                        pm_head=args.pm_head)
+                                        route_zones=args.route_zones,
+                                        geom_bias=args.geom_bias,
+                                        pm_head=args.pm_head,
+                                        charge_head=args.charge_head)
                           if args.eval_every > 0 else None),
                  eval_every=(args.eval_every or None))
     print(f"[m13] 完成：{run_dir / 'metrics.ndjson'}（每步一行）｜{run_dir / 'ckpt.pt'}")
