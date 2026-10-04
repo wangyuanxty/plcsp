@@ -29,9 +29,14 @@ def _ctx_and_snap(name="mk01", done=False):
 
 
 def _snap(now=0.0, machines=(), jobs=(), vehicles=(), n_done=0, in_flight=0):
-    """手搓快照（**不碰仿真**）——供"按名核对列序"这类需要**指定值**的断言用。"""
+    """手搓快照（**不碰仿真**）——供"按名核对列序"这类需要**指定值**的断言用。
+
+    ⚠️ `zone_holder=()`：手搓快照没有区段表（只有跑仿真的快照才有），
+    路线候选特征的争用维按"无争用"读（见 `test_route_choice.py`）。
+    """
     return Snapshot(now=now, machines=tuple(machines), jobs=tuple(jobs),
-                    vehicles=tuple(vehicles), n_done=n_done, in_flight=in_flight)
+                    vehicles=tuple(vehicles), n_done=n_done, in_flight=in_flight,
+                    zone_holder=())
 
 
 def _backlog_snap(inst, backlog_min):

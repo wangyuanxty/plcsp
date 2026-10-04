@@ -33,6 +33,11 @@ SimPy + 每条链独立的 numpy 流亦然）。**唯一例外**：`--resume` �
 ⚠️ `--lr` 只在**第一次** `joint_chain_step` 时生效（Adam 由该函数惰性创建，之后忽略新 lr）；
 `--resume` 不恢复优化器状态（ckpt 只存模型权重与步号），续跑会以**当次 `--lr`** 重建 Adam。
 
+⚠️ **`--route-k`（路线头 R，2026-10-04 恢复）默认 1 = 关闭**：`_drive` 恒走最短路，训练步与
+既有读数**逐位相同**（黄金摘要见 `tests/test_route_choice.py`）。传 2 启用——每次行驶在 2 条
+候选路径里由策略选（① 拥堵必须开，否则入口显式报错）。它同时透传进**评估**：训练开、
+评估关 = 用另一个策略评估，且**静默**（同 `constraints` 的 R2 理由）。
+
 ⚠️ `--resume` 只在 `run_dir/ckpt.pt` **已存在**时生效（`runner.resume_training` 的既有语义）：
 没有 ckpt 就**从头跑**，而 `metrics.ndjson` 是**追加**打开的——此时文件里会出现**重复的 step 号**
 （前一段是废弃的尝试）。按 step 取最新一行即可；要干净曲线就换 `--run-dir` 或先删 run_dir。
@@ -109,15 +114,18 @@ def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
 
 
 def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
-                  constraints: ConstraintConfig | None = None):
+                  constraints: ConstraintConfig | None = None, route_k: int = 1):
     """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。
 
     ⚠️ `constraints` 必须与训练同一份（R2）：评估跑的是训练后的策略，动力学口径不一致
     （如训练 ③ 关、评估全开）会让读数对不上训练环境，且**静默**。
+    ⚠️ `route_k` 同理（R 头恢复后）：训练开路线头（`route_k=2`）而评估关着 = 用**另一个策略**
+    评估（恒走最短路的那一个），读数与训练不对应，且**静默**——故与 `constraints` 一样必须透传。
     """
     def eval_fn(policy) -> dict:
         ms = [float(roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
-                               ctx=ctx, sample=False, constraints=constraints)[1]["makespan"])
+                               ctx=ctx, sample=False, constraints=constraints,
+                               route_k=route_k)[1]["makespan"])
               for s in range(seeds)]
         return {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                 "rule_makespan": rule}
@@ -138,6 +146,9 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=0, help="每 N 步评估一次；0 = 不评估")
     ap.add_argument("--eval-seeds", type=int, default=5, help="评估的扰动种子数")
     ap.add_argument("--resume", action="store_true", help="从 run_dir/ckpt.pt 续跑")
+    ap.add_argument("--route-k", type=int, default=1,
+                    help="路线头（R）候选条数：1 = 关闭（默认，逐位等于既有读数）；"
+                         "2 = 每次行驶在 2 条候选里选（① 拥堵必须开）")
     args = ap.parse_args()
 
     # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
@@ -160,7 +171,8 @@ def main() -> None:
     #    不随 constraints 走；随 constraints 走的是训练/评估的动力学（ctx + step_kwargs + eval_fn）。
     rule = float(rollout(inst, seed_chain=0, cfg=cfg)["makespan"])   # = M_ref（同一运行）
     print(f"[m13] inst={args.inst} 作业{inst.n_jobs}×机台{inst.n_machines} "
-          f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}")
+          f"车队{cfg.n_agv}｜steps={args.steps} G={args.G} lr={args.lr} seed={args.seed}"
+          f"｜route_k={args.route_k}")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
@@ -169,11 +181,11 @@ def main() -> None:
     run_training(pol, inst, steps=args.steps,
                  step_kwargs=dict(layout=lay, dm=dm, cfg=cfg, ctx=ctx, ref=ref,
                                   constraints=constraints,   # R2：与 ctx 同一份（入口校验同源）
-                                  G=args.G, lr=args.lr),
+                                  G=args.G, lr=args.lr, route_k=args.route_k),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  eval_fn=(_make_eval_fn(inst, lay, dm, cfg, ctx, args.eval_seeds, rule,
-                                        constraints=constraints)
+                                        constraints=constraints, route_k=args.route_k)
                           if args.eval_every > 0 else None),
                  eval_every=(args.eval_every or None))
     print(f"[m13] 完成：{run_dir / 'metrics.ndjson'}（每步一行）｜{run_dir / 'ckpt.pt'}")

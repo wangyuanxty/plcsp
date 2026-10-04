@@ -21,7 +21,7 @@ import numpy as np
 import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
                       machine_energy_kwh, machine_params_for, total_energy_kwh)
-from .corridors import shortest_node_path
+from .corridors import k_shortest_paths, shortest_node_path
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
@@ -479,12 +479,18 @@ class AgvSim:
 
     区段管制（① congestion）**可开关**：开时逐段申请/释放区段（持当前 → 申请下一 → 放上一），
     等待环或超时则回队重试；关时不申请，按距离一次到底。
+
+    **路线决策（R，2026-10-04 恢复）**：① 开且 `route` 回调非空时，每段行驶先问策略在 k 条
+    候选路径里选哪条（`SimWorld._make_route_fn`）；`route=None`（默认）时恒走最短路——
+    **逐位等于"路线头从未存在"**（`route_logits` 当年随 ① 被砍、① 恢复后漏恢复，见
+    `docs/progress-log.md` §27.3/§28）。
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, transport: TransportCaliber, cfg: SimConfig,
                  stats: dict,
                  tasks_in, machines: list, graph, zm, constraints, spec, rng,
-                 track: SimTrack, chargers=(), charger_res=(), bound: bool = False):
+                 track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
+                 route=None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -493,6 +499,10 @@ class AgvSim:
         self.con = constraints              # ① congestion 等物流侧开关从这里读
         self.congestion = constraints.congestion    # ① 关 → 无区段管制
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
+        # 路线决策（R）的入口：`SimWorld` 给的 `(aid, src, dst, leg) -> 节点序列` 回调。
+        # `None` = **不启用**——`_drive` 恒走 `shortest_node_path`，且不多取快照/不多抽随机数
+        # ⟹ 逐位等于"路线头从未存在"的行为（既有全部读数立在这条上）。
+        self.route = route
         self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
         # ⑩ 异构车队：**开关关掉时倍率=1、载量=1**，即与"约束从未存在"逐位相同
         hetero = constraints.heterogeneous_fleet
@@ -618,6 +628,13 @@ class AgvSim:
         返回 `(ok, end_node)`。`ok=False` = 区段争用超时或等待环——此时车停在 `end_node`
         且**已释放**持有的区段；**失败前已走的路程照样计入时长**（否则能耗会被低估）。
         区段管制关闭时按最短路一次到底。
+
+        ⚠️ **路线（R）在此处决断**（2026-10-04 恢复）：`self.route` 非空时路径由策略在 k 条
+        候选里选（`route(aid, src, dst, leg) -> 节点序列`）；为空时走 `shortest_node_path`，
+        **不多取快照、不多抽随机数** ⟹ 关闭档逐位等于今日（硬要求）。
+        ⚠️ 矩阵口径**不需要为绕行改公式**：整段时长 `total`（矩阵查表）按几何占比分摊到各段
+        （`seg = total * seg / leg_geo`），故绕行的总时长自动按"几何长度比"变长，而最短路
+        那条的数值与今日逐位相同。
         """
         if src == dst:
             return True, dst
@@ -630,7 +647,8 @@ class AgvSim:
             self.stats["moves"] += 1
             return True, dst
         # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
-        path = shortest_node_path(self.g, src, dst)
+        path = (shortest_node_path(self.g, src, dst) if self.route is None
+                else self.route(self.aid, src, dst, leg))
         # ⚠️ 矩阵口径下**整段时长先算出来**，逐段只决定**分摊比例**（占比之和恒为 1 ⟹
         # 各段之和 == 矩阵查表值，有测试钉）；矩阵里没有"中间走廊节点"这一说，逐段查表必失败。
         total = self._leg_min(src, dst) if self.transport.mode == MATRIX else None
@@ -766,7 +784,7 @@ class SimWorld:
         return fleet
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
-                        seed_chain: int = 0, charger_res=()) -> tuple[
+                        seed_chain: int = 0, charger_res=(), route=None) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -778,6 +796,9 @@ class SimWorld:
         ⚠️ **`entities` 比 `self.machines` 多一项**：末位是装卸站（端点号 = `inst.n_machines`）。
         任务端点、AGV 的投递目标都走这张表；而 `self.machines` **只含机台**——`snapshot()` 与
         `_energy_report` 的逐机台口径不能被装卸站污染（它不是机台）。
+
+        ⚠️ `route`（R 层）：`None` = 不启用路线决策（`run()` / `_cold_start()` 恒如此）；
+        `run_gated` 传 `_make_route_fn(...)` 的返回值。透传给每台 `AgvSim`，`_drive` 消费。
         """
         fleet = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -797,7 +818,7 @@ class SimWorld:
                        self.g, zm, self.constraints, fleet[a],
                        np.random.default_rng([seed_chain, 1000 + a]),      # ⑨ 每车独立流
                        track, chargers=self.layout.chargers, charger_res=charger_res,
-                       bound=bound)
+                       bound=bound, route=route)
                 for a in range(self.cfg.n_agv)]
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
@@ -948,7 +969,13 @@ class SimWorld:
                   else len(self.tasks_in.items))
         return Snapshot(now=float(self.env.now), machines=tuple(ms), jobs=tuple(js),
                         vehicles=tuple(vs), n_done=len(self.completes),
-                        in_flight=queued + sum(self._agv_load_n))
+                        in_flight=queued + sum(self._agv_load_n),
+                        # ① 拥堵：路线决策（R）按**路径**读的争用原料——逐区段的当前持有者。
+                        # 与 `VehicleState.zone_wait`（逐车"等了多久"）互补：这个量必须按
+                        # 候选路径聚合，逐车读不到（见 `snapshot.Snapshot.zone_holder`）。
+                        zone_holder=tuple(-1 if h is None else int(h)
+                                          for h in (self.zm.holder.get(z)
+                                                    for z in range(self.zm.n))))
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None) -> dict:
@@ -1051,13 +1078,17 @@ class SimWorld:
                 "unmapped_min": float(stats.get("unmapped_min", 0.0))}
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-                  policy_l=None, policy_s=None, online_s: bool = False) -> dict:
-        """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）。
+                  policy_l=None, policy_s=None, online_s: bool = False,
+                  policy_r=None, route_k: int = 2) -> dict:
+        """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
-        活状态快照交给它（无并发 → 无需事件/Gate）。L 与 S 的回调契约对称：
-        `policy_l(snap, job, frm, to, oi+1, cand_v) -> 车号`（候选 = 全车队）；`des.py` 只给原始
-        材料、**不构造任何特征**（层次纪律：`env/` 不得依赖 `nn/`）。
+        活状态快照交给它（无并发 → 无需事件/Gate）。S/L/R 的回调契约对称：
+        `policy_l(snap, job, frm, to, oi+1, cand_v) -> 车号`（候选 = 全车队）；
+        `policy_s(snap, job, oi, cand) -> 机台号`；
+        `policy_r(snap, aid, src, dst, leg, cands) -> 候选序号`（候选 = `route_k` 条最短路，
+        见 `_make_route_fn`；动作是**序号**，路径本身当不了动作号）。
+        `des.py` 只给原始材料、**不构造任何特征**（层次纪律：`env/` 不得依赖 `nn/`）。
 
         `online_s=False`（默认）：S 层读**预计算**的 `plans`（`op_choices` 或贪婪最短）——
         **逐位复现 P2 之前的静态行为**。
@@ -1065,6 +1096,12 @@ class SimWorld:
         `policy_s(snap, job, oi, cand) -> 机台号` 决策（首工序无前驱 ⇒ 在 t=0 投放点决策，
         此刻各队列皆空；同刻投放的作业共享同一初始视界）。`plans` 随之退化为**决策日志**
         （`plans[job][oi]` 在决策后写入），故**决策前不得读它**。
+
+        ⚠️ `policy_r=None`（默认）= **不启用路线决策**：`_drive` 恒走最短路，不多取快照、
+        不多抽随机数 ⟹ 逐位等于今日行为（既有读数靠它）。`route_k` 只在 `policy_r` 非空时
+        有意义（候选条数，本任务的设计值 = 2）。
+        ⚠️ `policy_r` 非空但 ① 拥堵关闭 → **显式报错**：① 关时区段机制不存在、选远路严格
+        更差（spec §5.3 的原始理由），给一个死动作只会污染链 logp。
 
         ⚠️ 两个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
         `algo/` 层做。决策留痕同理：`group_rel.roll_chain` 自记自己的 `Decision` 链
@@ -1077,6 +1114,14 @@ class SimWorld:
         if online_s and op_choices is not None:
             raise ValueError("online_s=True 时计划由 policy_s 在线产生，op_choices 不生效——"
                              "两者同传会静默忽略计划，故直接报错")
+        route_fn = None
+        if policy_r is not None:
+            if not self.constraints.congestion:
+                raise ValueError(
+                    "policy_r 非空但 ① 拥堵关闭：区段机制不存在，选远路**严格更差**"
+                    "（spec §5.3 砍掉路线头的原始理由）——那会是一个死动作。请开 ① 或传 "
+                    "policy_r=None。")
+            route_fn = self._make_route_fn(policy_r, route_k)
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -1111,7 +1156,8 @@ class SimWorld:
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
-                                          seed_chain=seed_chain, charger_res=charger_res)
+                                          seed_chain=seed_chain, charger_res=charger_res,
+                                          route=route_fn)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1179,6 +1225,43 @@ class SimWorld:
             choice = plans[job][oi]
         t = next(t for m, t in alts if m == choice)
         return choice, float(t)
+
+    def _make_route_fn(self, policy_r, route_k: int):
+        """构造**路线决策（R）**的回调 `route(aid, src, dst, leg) -> 节点序列`（一局一个）。
+
+        契约与 S/L 回调对称：`env/` 只给**原始材料**（快照 + 候选节点序列），**不构造特征**
+        （层次纪律：`env/` 不得依赖 `nn/`）——候选路径的"长度比/区段数/争用"由 `algo/` 侧
+        从快照与候选自造（见 `group_rel._route_cand_feat`）。
+
+        三件事在这里一次做掉：
+        1. **候选缓存**：`k_shortest_paths` 是逐次枚举的生成器，而 `_drive` **每条腿**都要问；
+           缓存键 `(src, dst)`（候选只取决于图，一局内图不变）。缓存随本闭包**每局新建**——
+           图对象每局重建，跨局复用会串味。
+        2. **候选 < 2 不记决策**：装卸站那条**桥**边、相邻节点直连只有一条简单路径，
+           "选路"不构成决策——此时直接走它（记假决策只会给链 logp 添恒 0 项）。
+        3. **非候选显式报错**（同 `policy_s` / `policy_l`）：静默回退会掩盖策略/候选集不一致，
+           让整条链的 logp 与动作错位而无人察觉。
+
+        ⚠️ 快照只在**真的要决策**时取（候选 < 2 不取）——`snapshot()` 有成本，且关闭档
+        （`route=None`）连本函数都不会被调用，逐位保持今日行为。
+        """
+        cache: dict[tuple[int, int], tuple[tuple[int, ...], ...]] = {}
+
+        def route(aid: int, src: int, dst: int, leg: str) -> list[int]:
+            cands = cache.get((src, dst))
+            if cands is None:
+                cands = tuple(tuple(p) for p in k_shortest_paths(self.g, src, dst, route_k))
+                cache[(src, dst)] = cands
+            if len(cands) < 2:
+                return list(cands[0])
+            snap = self.snapshot()                  # 只读（见 `snapshot()` 的契约）
+            idx = int(policy_r(snap, aid, src, dst, leg, cands))
+            if not 0 <= idx < len(cands):
+                raise ValueError(f"policy_r 选了不存在的候选 {idx}；候选数={len(cands)}"
+                                 f"（aid={aid}，{src}→{dst}，{leg}）")
+            return list(cands[idx])
+
+        return route
 
     @staticmethod
     def _release(env, store, item):

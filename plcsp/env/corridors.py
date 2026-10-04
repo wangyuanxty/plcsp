@@ -8,6 +8,11 @@
 
 2026-10-02：区段管制**已按参数化粒度恢复**（见 `des.SimConfig.zone_granularity`）——
 `shortest_node_path` 用于取 AGV 实际经过的节点序列。路线决策（选哪条路）仍未恢复。
+
+2026-10-04：**路线决策（R）恢复**（见 `docs/progress-log.md` §27.3/§28）。历史必须记清：
+`route_logits` 当初是**随 ① 拥堵一并取消**的，理由是"无拥堵时选远路严格更差"（spec §5.3）；
+但 ① 后来在 `eb1d1da` 恢复，**路线头没跟着恢复**、落下了——本函数即那次遗漏的补建。
+候选集是 R 头的**动作空间**：`k_shortest_paths` 给 AGV 的 k 条候选，策略按区段争用挑一条。
 """
 from __future__ import annotations
 
@@ -59,3 +64,24 @@ def dock_distance_matrix(g: nx.Graph) -> np.ndarray:
 def shortest_node_path(g: nx.Graph, src: int, dst: int) -> list[int]:
     """两节点间最短路的节点序列（含首尾）——AGV 逐段申请区段的依据。"""
     return list(nx.dijkstra_path(g, src, dst, weight="weight"))
+
+
+def k_shortest_paths(g: nx.Graph, src: int, dst: int, k: int) -> list[list[int]]:
+    """**k 条最短简单路径**（按长度升序，最短在前）——R 头（路线决策）的动作空间。
+
+    恢复的机制（不是新发明）：`route_logits` 随 ① 拥堵被砍、"无拥堵时选远路严格更差"
+    （spec §5.3）；① 后来恢复而路线头漏恢复（`docs/progress-log.md` §27.3、§28）。
+    故这里给的是**候选集**，选哪条由策略按区段争用决定——正是"把被规则拿走的决策权交还策略"。
+
+    ⚠️ **候选数可能 < k**（相邻节点、或装卸站那条**桥**边）：此时返回实际条数，
+    **不补齐、不报错**。调用方按 `len()` 判断——只剩一条时"选路"不构成决策（`_drive` 直接走它）。
+    ⚠️ 代价：`nx.shortest_simple_paths` 是 Yen 式**生成器**（每次调用重新枚举）。
+    本函数**自带零缓存**——缓存由调用方按 (src, dst) 做（见 `des.SimWorld` 的路线缓存）：
+    图对象每次 `roll_chain` 重建，按图对象做模块级缓存会跨世界串味（静默错误）。
+    """
+    out: list[list[int]] = []
+    for p in nx.shortest_simple_paths(g, src, dst, weight="weight"):
+        out.append(list(p))
+        if len(out) >= k:
+            break
+    return out

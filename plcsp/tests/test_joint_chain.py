@@ -483,6 +483,8 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
         `2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a`
     （同 seed 同起点下**跨进程逐位可复现**，见 `test_joint_step_bitwise_reproducible_given_seed`。）
     任一个比特被改动都会让摘要变化——这比"两次调用互相相等"强，后者对两种实现都恒真。
+    ⚠️ 2026-10-04：R 头恢复后本摘要比对时排除 `r_head_tok.*`（默认关闭档拿不到梯度）——
+    排除后重算仍 = 原捕获值，S/L/编码器的更新逐位未变（详见下方内联注）。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -492,8 +494,14 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
     torch.manual_seed(1234)                     # 与捕获脚本逐字对齐（ref 之前/之后各锚一次）
     pol = PolicyNet(enc=LayoutEncoder())
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
+    # ⚠️ 2026-10-04（R 头恢复）：本摘要**捕获于路线头存在之前**，故比对时排除 `r_head_tok.*`
+    # 四个新键——`route_k=1`（默认）下 R 头不参与任何决策、拿不到梯度，S/L/编码器的更新必须
+    # 逐位不变。实测：排除后重算 = 原捕获值（逐位相同），原证据链保留。全量 state_dict 的摘要
+    # 会因**新增参数**而变，那是结构变化、不是 scalar 口径变化。
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
+        if k.startswith("r_head_tok."):
+            continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())
     assert h.hexdigest() == "2956b7326417decc2cd18342c1a1e326424c59b795268428feb575078129780a", \
