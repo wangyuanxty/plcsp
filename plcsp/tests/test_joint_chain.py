@@ -492,6 +492,10 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
        **带缺陷的读数**（L 头看不见任何车辆特征），不得再被当成基准。
     3. **⑫ 维护头（M）新增**（`pm_head_tok.*`）——默认 `pm_head=False` 档它一次都不被调用、
        拿不到梯度，与 R 头同理**排除**；排除后重算 = 上一条的捕获值（本次未变）。
+    4. **⑪ 充电头（C）新增**（`c_head_tok.*`）——默认 `charge_head=False` 档同理不被调用、
+       拿不到梯度，**排除**。排除后重算 = 上一条的捕获值（实测逐位相同：
+       `…9333163a…`）。⚠️ 这条同时证明新头**建在 `pm_head_tok` 之后**——若插在既有头之前，
+       初始化抽签次序会移位，S/L 的参数（**在**摘要里）会变、本判据当场翻红。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -503,11 +507,11 @@ def test_scalar_adv_mode_is_bitwise_unchanged():
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
     # ⚠️ 2026-10-04（L 头下标修复）：摘要值本身已重捕获——旧值钉的是 L 头误索引 M 段的
     # 缺陷读数（车辆特征对 L 全不可见），修复后 S/L/编码器的更新都变，必须换新基准。
-    # 排除 `r_head_tok.*` / `pm_head_tok.*` 的理由不变（两个头恢复/新增时加的：默认关闭档
-    # 它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径不变"的证据链）。
+    # 排除 `r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*` 的理由不变（三个头恢复/新增时
+    # 加的：默认关闭档它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径不变"的证据链）。
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
-        if k.startswith(("r_head_tok.", "pm_head_tok.")):
+        if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.")):
             continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())

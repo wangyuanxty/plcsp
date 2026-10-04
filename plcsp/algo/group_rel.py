@@ -1,9 +1,10 @@
 """联合链 GRPO（spec §5.3.4，P2 Task 7）——一条链 = 一个完整 episode 的**全部**决策。
 
     链 = (机台计划序列 a_S[1..n_ops]) ⊕ (派车序列 a_L[1..n_tasks]) ⊕ (路线序列 a_R[1..n_drives])
-         ⊕ (维护序列 a_M[1..n_pm_decisions])
+         ⊕ (维护序列 a_M[1..n_pm_decisions]) ⊕ (充电序列 a_C[1..n_charge_decisions])
     logp(链) = Σ_t log π_S(a_S[t]) + Σ_t log π_L(a_L[t]) + Σ_t log π_R(a_R[t]) + Σ_t log π_M(a_M[t])
-                                                                          ← 四类都取【求和】
+                                                                          + Σ_t log π_C(a_C[t])
+                                                                          ← 五类都取【求和】
 
 ⚠️ **R（路线）是恢复出来的第三个决策，不是新发明**：`route_logits` 当初随 ① 拥堵一并取消
 （理由"无拥堵时选远路严格更差"，spec §5.3），但 ① 后来在 `eb1d1da` 恢复、**路线头没跟着
@@ -48,7 +49,7 @@ import torch
 from .policy import PolicyNet, v_token_index
 from ..env.constraints import ConstraintConfig
 from ..env.corridors import build_corridor_graph
-from ..env.des import SimConfig, SimWorld, build_zone_map
+from ..env.des import CHARGE_CAND_SKIP, SimConfig, SimWorld, build_zone_map
 from ..env.instances import Instance
 from ..env.layout import Layout
 from ..env.reward import (ReferenceObjectives, objective_vector, reward_weights,
@@ -71,6 +72,11 @@ ROUTE_FEAT_CAND = 3       # `_route_cand_feat`：长度比/区段数占比/被�
 # `test_maintenance_head.test_pm_feature_widths_match_the_head` 按它核对打分头的输入宽度）。
 PM_FEAT_DEC = 3       # `pm_feat`：该机台状态摘要（与候选无关）
 PM_FEAT_CAND = 3      # `_pm_cand_feat`：逐候选（两个**动作**的后果，行序 = `des.PM_CANDS`）
+
+# C（⑪ 充电）头两个特征槽的宽度（**唯一真相**，与 `PolicyNet` 的 `n_feat_charge*` 形参对应——
+# `test_charge_head.test_charge_feature_widths_match_the_head` 按它核对打分头的输入宽度）。
+CHARGE_FEAT_DEC = 3   # `charge_feat`：本车状态摘要（与候选无关）
+CHARGE_FEAT_CAND = 3  # `_charge_cand_feat`：逐候选（到该桩的行驶时长 / 占用排队 / 是不是不去充）
 
 
 def _z(vals: np.ndarray) -> np.ndarray:
@@ -183,15 +189,24 @@ def _agv_cand_feat(snap, layout: Layout, dm: np.ndarray, ctx: NormContext,
     故该维与**动力学一致**（不是只看几何）。格点最短路是曼哈顿式的，比值可略超 1（~1.3）。
     哨兵 `-1.0` = 该车尚未出车（`node == -1`，位置未知）—— 按 0 号节点换算会伪造
     "已在取货点"（同 `state_emb` V 段坐标维的哨兵约定：真值域外、天然可区分）。
+    ⚠️ P4-B Task 2b：`frm` 可以是**装卸站**（端点号 = `n_machines`，不是机台）——作业在站
+    入场，AGV 的取货点就是站自己的节点（`LuPad.node`，格点外；仿真侧读
+    `entities[frm].pad.dock_node`，`LuStation` 的 `_StationPad` 正是用它）。少了这条守卫
+    就是运行期 IndexError（与 `setup_flag` / `task_feat` 已修的同一类）。
+    ⚠️ 触发条件（本仓实测）：**必须**先有 AGV 动过（`node >= 0`），才会走到取距离那一行。
+    默认档所有投放决策都在 t=0、AGV 尚未出车（全体哨兵），故一直没炸；⑪ C 决策档在 t=0 的
+    第一个空闲点就可能开车去充电，投放决策随之后移——**潜在缺陷当场变活**。
     """
     vs = snap.vehicles
+    pick = (layout.machines[frm].dock_node if frm < len(layout.machines)
+            else layout.lu.node)                    # 装卸站端点（P4-B Task 2b）
     out = np.empty((len(cand), 1), dtype=np.float32)
     for i, a in enumerate(cand):
         node = int(vs[a].node)
         if node < 0:
             out[i, 0] = -1.0
             continue
-        dist = float(dm[node, layout.machines[frm].dock_node])
+        dist = float(dm[node, pick])
         sp = max(float(vs[a].speed_factor), 1e-9)
         out[i, 0] = dist / max(ctx.bbox_diag * sp, 1e-9)
     return out
@@ -283,6 +298,65 @@ def _pm_cand_feat(snap, mach: int, ctx: NormContext) -> np.ndarray:
                      [pm_left, backlog, progress]], dtype=np.float32)
 
 
+def charge_feat(snap, aid: int, ctx: NormContext) -> list[float]:
+    """C 头的**决策特征**（`CHARGE_FEAT_DEC` = 3 维）：**本车状态摘要**（与候选无关）。
+
+    `[battery_frac, queued_frac, progress]`——"要不要现在充"的三件事实：
+    - `battery_frac` = 本车电量占比（[0,1]）。耗尽（`battery <= 0`）是**模型修复**下的硬后果：
+      该车不可用直到充到 `battery_high×cap`（`des.AgvSim._depleted`）——故这一维是决策的核心；
+    - `queued_frac` = 本车待办任务数 ÷ `ctx.max_queued`：**剩余工作量的代理**。
+      ⚠️ 如实声明限度：快照里**没有**"剩余任务各自耗多少电"（任务在 FIFO 队列里只有端点，
+      没有里程；每趟耗电还取决于批大小与路径），故用"待办件数"作预期耗电的代理，不是精确值。
+    - `progress` = `now / m_ref`（与 G 段 `time_progress` 同口径与同截断）：episode 还剩多少，
+      决定"晚充"的风险窗口。
+
+    ⚠️ 设计文档把"本车电量 / 剩余任务预期耗电"列在**候选特征**行——那两量**逐候选不变**
+    （是这辆车的处境，不是某根桩的后果），按本仓的槽位约定（`feat_op` / `feat_task` /
+    `feat_mach` 都是"与候选无关的决策特征"）归 `feat_dec`；否则 m 行会重复同一个常量，
+    既无候选区分度，又让"候选特征"槽的语义含糊。
+    """
+    v = snap.vehicles[int(aid)]
+    return [_clamp(v.battery_frac, 0.0, 1.0),
+            _clamp(v.queued / max(ctx.max_queued, 1), 0.0, 1.0),
+            _clamp(snap.now / max(ctx.m_ref, 1e-9), 0.0, 4.0)]
+
+
+def _charge_cand_feat(snap, layout: Layout, dm: np.ndarray, ctx: NormContext,
+                      aid: int, cand: tuple[int, ...]) -> np.ndarray:
+    """C 头的**逐候选**特征 `(m, CHARGE_FEAT_CAND)`：行序 = `des.charge_cands`（0 = 不去充）。
+
+    三个槽（设计 §⑪ 的候选特征表）：
+    - **0 到该桩的行驶时长**（归一化）= 最短路距离 ÷（包围盒对角 × 该车**有效**速度倍率）——
+      与 L 头 `_agv_cand_feat` 同一口径与同一理由（⑩ 关闭时倍率恒 1，与动力学一致；
+      真时长在 `_leg_min`，但那是 `env/` 的口径对象，特征层按几何近似——如实用几何代理）。
+      "不去充"候选取 0.0（它没有桩；由第 2 列区分，不是哨兵）。
+    - **1 该桩的占用/排队** = `(occupied + waiting) / capacity`（`Snapshot.chargers` 的活计数）。
+      没有它，"选哪根桩"就只剩距离一个维度——忙桩要排队，正是"早充 vs 晚充"的一个代价。
+      快照不带桩表（手搓 / `_cold_start`）时恒 0（约定同 `zone_holder` 为空：缺表 = 无信息）。
+    - **2 是不是"不去充"**（0/1）——候选集里唯一的**非桩**动作，必须显式标出，否则它只能靠
+      前两列取 0 来间接表达（"最近的空闲桩"与"不去充"会撞在同一行上）。
+
+    哨兵 `-1.0` = 该车尚未出车（`node == -1`，位置未知），同 `_agv_cand_feat` 的约定。
+    """
+    v = snap.vehicles[int(aid)]
+    node = int(v.node)
+    sp = max(float(v.speed_factor), 1e-9)
+    out = np.zeros((len(cand), CHARGE_FEAT_CAND), dtype=np.float32)
+    for i, code in enumerate(cand):
+        if int(code) == CHARGE_CAND_SKIP:
+            out[i, 2] = 1.0
+            continue
+        ch = layout.chargers[int(code) - 1]
+        if node < 0:
+            out[i, 0] = -1.0
+        else:
+            out[i, 0] = float(dm[node, ch.node]) / max(ctx.bbox_diag * sp, 1e-9)
+        st = snap.chargers[int(code) - 1] if int(code) - 1 < len(snap.chargers) else None
+        if st is not None:
+            out[i, 1] = (st.occupied + st.waiting) / max(st.capacity, 1)
+    return out
+
+
 @dataclass
 class Decision:
     """一个决策点的**全部打分输入**（采样时冻结）——`chain_logp` 据此带梯度重算 logp。
@@ -294,23 +368,28 @@ class Decision:
     **不是同一个**（ratio≠1 的假象）。
     """
     kind: str                        # "S"（选机台）| "L"（派车）| "R"（选路）| "M"（维护时机）
+                                     # | "C"（充电：不去充/去哪个桩）
     tok: np.ndarray                  # 当时的四段 token 特征 (N, F_MAX)
     seg: tuple[int, int, int, int]   # 当时的段长 (n_m, n_jobs, n_agv, 1)
-    feat: np.ndarray                 # 决策特征 (F_dec,)：S=`op_feat` / L=`task_feat` / R=`route_feat` / M=`pm_feat`
+    feat: np.ndarray                 # 决策特征 (F_dec,)：S=`op_feat` / L=`task_feat` / R=`route_feat` / M=`pm_feat` / C=`charge_feat`
     cand_feat: np.ndarray            # 逐候选特征 (n_cand, F_cand)
-    cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号；R: 0..k-1 的候选序号；M: 动作码 PM_CANDS）
+    cand: tuple[int, ...]            # 候选（S: 机台号；L: 车号；R: 0..k-1 的候选序号；M: 动作码 PM_CANDS；
+                                     # C: 动作码 `charge_cands`——0 = 不去充，i≥1 = 第 i−1 号桩）
     action: int                      # 所取的动作（∈ cand）
     # 打分时**取 token 嵌入用的下标**（逐候选）。S = `cand`（机台号即序列位置，M 段在最前）；
     # L = `cand` 里的**车号**经 `v_token_index(seg)` 映射后的 V 段下标；R = 本车 V token 下标
     # 广播 k 份（路线候选是**路径**，序列里没有它们的 token，见 `PolicyNet.route_logits_emb`）；
     # M = **该机台**的 M token 下标，两个动作候选共用（候选是动作码 0/1，不是序列位置——
     # 照 S 写 `tok_idx = cand` 会去读 0/1 号机台的 token，与 L 头缺陷同型）。
+    # C = **本车** V token 下标，m 个候选共用（候选是动作码 + 桩，桩在序列里没有 token，
+    # 同 R；照 S 写 `tok_idx = cand` 会去读 0/1/2 行机台 token——同型缺陷）。
     # ⚠️ **L 曾与 S 共用 `tok_idx = cand`——那是缺陷，不是口径**（2026-10-04 修复）：车号
     # 0..n_agv-1 被当成序列位置，L 头实际索引 M 段机台 token，看不到任何车辆特征
     # （battery / capacity / speed_factor / st_down / zone_wait / 位置）。修前
     # `v_token_index` 只在测试里被调用、生产路径从不使用，故手搓下标的测试查不出来。
-    # 改动本字段前先看 `test_policy_heads.test_l_head_reads_v_tokens_on_the_production_path`
-    # 与 `test_maintenance_head.test_pm_head_reads_the_deciding_machines_token_on_the_production_path`。
+    # 改动本字段前先看 `test_policy_heads.test_l_head_reads_v_tokens_on_the_production_path`、
+    # `test_maintenance_head.test_pm_head_reads_the_deciding_machines_token_on_the_production_path`
+    # 与 `test_charge_head.test_c_head_reads_the_deciding_agvs_token_on_the_production_path`。
     tok_idx: np.ndarray
     # 采样那一刻策略在 `action` 上的 log 概率（无梯度标量）。它是 `decisions_logp` 带梯度
     # 重算值的**同源对照**：裁剪路径的 `old` 直接由它**逐决策**回放（`sampled_decisions_logp`，
@@ -321,6 +400,11 @@ class Decision:
     # （0/1），机台身份在 `cand` 里表达不了。生产路径写入（`_act` 的 `mach_id`），
     # 守卫测试据此只扰动**该机台**的 M 段 token 行（见 test_maintenance_head）。
     mach: int | None = None
+    # R / C 决策是**哪台车**做的（其余头 None）——理由同 `mach`：候选是路径序号 / 动作码 +
+    # 桩号，**车身份在 `cand` 里表达不了**，而守卫必须知道该扰动哪一行 V token。
+    # ⚠️ 不能拿 `tok_idx` 反推车号：那正是守卫要检验的量（用被检验量去选样本 = 循环论证，
+    # §31 缺陷在位时守卫会在"选样本"一步就失败，测不到"扰动决定方 ⟹ logp 必变"这条实质判据）。
+    agv: int | None = None
 
 
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
@@ -328,7 +412,8 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                sample: bool = True,
                generator: torch.Generator | None = None,
                constraints: ConstraintConfig | None = None,
-               route_k: int = 1, pm_head: bool = False) -> tuple[list[Decision], dict]:
+               route_k: int = 1, pm_head: bool = False,
+               charge_head: bool = False) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
     ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
@@ -360,6 +445,14 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         机制验证须传显式短间隔档 `SimConfig(pm_interval=…)`（默认参数**不动**，见 §27.1）。
         ⚠️ `pm_head=True` 要求 ⑫ `maintenance` 开：⑫ 关时决策点不存在，给一个死动作只会
         污染链 logp，故**显式报错**（同 `route_k>1` 要求 ① 拥堵的形态）。
+     ⚠️ **`charge_head`（⑪ 充电头开关）**：`False`（默认）= **关闭**，`AgvSim._maybe_charge`
+        按规则补电、不记 C 决策、不消费采样流 ⟹ **逐位等于今日行为**（黄金摘要钉死）；`True` =
+        AGV 在每个空闲待命点由策略在 `des.charge_cands`（{不去充} ∪ {各桩}）里选。
+        ⚠️ 配套的**模型修复**（`battery <= 0` ⟹ 该车不可用）**不随本开关开关**——它是
+        `AgvSim` 的语义修正，只在 ⑪ 开且电池真的到 0 时生效（默认电池 2–4 kWh 放不空，
+        故默认档逐位不变；⑪ 关时电池恒 = cap，**不可能**触发）。
+        ⚠️ `charge_head=True` 要求 ⑪ `charging` 开：⑪ 关时决策点不存在，给一个死动作只会
+        污染链 logp，故**显式报错**（同上两条的形态）。
      ⚠️ **动作采样流**（评审 I-3）：`generator=None` ⇒ 按 `torch.Generator().manual_seed(seed)`
         现建——同 seed 同调用序列的动作**逐位相同**；显式传入者自备种子（`joint_chain_step`
         自建一条并透传，组内 G 条链顺序共享）。`sample=False`（argmax）不消费该流。
@@ -385,6 +478,11 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         raise ValueError(
             "pm_head=True 需要 ⑫ 维护开启：⑫ 关时 `pm_clock` 根本不累加、保养事件恒 0"
             "（决策点不存在）——给策略一个死动作只会污染链 logp。请开 ⑫ 或传 pm_head=False。")
+    if charge_head and not cons.charging:
+        raise ValueError(
+            "charge_head=True 需要 ⑪ 充电开启：⑪ 关时电池从不增减（恒 = cap）、充电桩机制"
+            "根本不存在（决策点不存在）——给策略一个死动作只会污染链 logp。"
+            "请开 ⑪ 或传 charge_head=False。")
     decisions: list[Decision] = []
     gen = generator if generator is not None else torch.Generator().manual_seed(seed)
     world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout),
@@ -401,7 +499,8 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         with torch.no_grad():
             tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg)
             head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
-                    "R": policy.route_logits_emb, "M": policy.pm_logits_emb}[kind]
+                    "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
+                    "C": policy.charge_logits_emb}[kind]
             if kind == "S":
                 # 机台号 = 序列位置（M 段在最前）——S 的候选本身就是 token 下标。
                 tok_idx = np.asarray(cand, dtype=np.int64)
@@ -419,6 +518,13 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                 # M 段 token。照 S 写 `tok_idx = cand` 会让候选 0/1 去读 0/1 号机台的 token——
                 # 维护头给别的机器打分（与 2026-10-04 修的 L 头缺陷同型，progress-log §31）。
                 tok_idx = np.full(len(cand), int(mach_id), dtype=np.int64)
+            elif kind == "C":
+                # ⚠️ C 的候选是**动作码 + 桩号**（`des.charge_cands`：0 = 不去充，i≥1 = 第
+                # i−1 号桩），**都不是序列位置**：充电桩在序列里没有 token（序列只有 M/B/V/G
+                # 四段），"不去充"更不是实体。故 m 个候选共用**本车**的 V token（`aid`）——
+                # 与 R 头同型（路线候选也没有 token）。照 S 写 `tok_idx = cand` 会让候选
+                # 0/1/2 去读 0/1/2 号**机台**的 token：充电头给机台打分（§31 同型缺陷）。
+                tok_idx = np.full(len(cand), v_token_index(seg)[int(aid)], dtype=np.int64)
             else:                                   # R
                 # 路线候选在序列里没有 token（见 `PolicyNet.route_logits_emb`）：取本车 V token
                 # 的下标、k 个候选共用同一份——打分只差在 `cand_feat`。
@@ -437,7 +543,8 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                                   feat=np.asarray(feat, dtype=np.float32),
                                   cand_feat=np.asarray(cand_feat, dtype=np.float32),
                                   cand=cand, action=int(cand[k]), tok_idx=tok_idx,
-                                  logp=lp_k, mach=mach_id))
+                                  logp=lp_k, mach=mach_id,
+                                  agv=(None if aid is None else int(aid))))
         return int(cand[k])
 
     def policy_s(snap, job, oi, cand):
@@ -463,10 +570,18 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         return _act("M", snap, pm_feat(snap, mach, ctx), _pm_cand_feat(snap, mach, ctx),
                     cand, mach_id=int(mach))
 
+    def policy_c(snap, aid, cand):
+        # 候选 = **动作码**（`des.charge_cands`：0 = 不去充，i≥1 = 第 i−1 号桩）。桩在 token
+        # 序列里没有 token，故 m 个候选共用**本车**的 V token（`aid`）——`_act` 的 C 分支与
+        # `PolicyNet.charge_logits_emb` 都按这条口径。
+        return _act("C", snap, charge_feat(snap, aid, ctx),
+                    _charge_cand_feat(snap, layout, dm, ctx, aid, cand), cand, aid=int(aid))
+
     metrics = world.run_gated(seed_chain=seed, online_s=True,
                               policy_s=policy_s, policy_l=policy_l,
                               policy_r=None if route_k == 1 else policy_r,
-                              policy_m=None if not pm_head else policy_m)
+                              policy_m=None if not pm_head else policy_m,
+                              policy_c=None if not charge_head else policy_c)
     return decisions, metrics
 
 
@@ -475,10 +590,11 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
 
     `chain_logp`（求和）与 `decisions_logp`（向量化裁剪用）都从这里取项，**不可能漂开**。
     每个决策用**当时记录的** token/决策/候选特征重建打分（状态已变，不能用最新快照）。
-    梯度经 `forward_enc` 同时回到**三**个头与编码器——这是"联合链"的实质（约定 1/5）。
-    ⚠️ token 下标用 `d.tok_idx`（四头语义各不同，见 `Decision.tok_idx`）：S = 机台号即序列
+    梯度经 `forward_enc` 同时回到**五**个头与编码器——这是"联合链"的实质（约定 1/5）。
+    ⚠️ token 下标用 `d.tok_idx`（五头语义各不同，见 `Decision.tok_idx`）：S = 机台号即序列
     位置；L = 车号经 `v_token_index` 映射的 V 段下标；R = 本车 V token 广播给 k 条候选；
-    M = 决定保养的那台机台的 M token，广播给 2 个动作候选。
+    M = 决定保养的那台机台的 M token，广播给 2 个动作候选；C = 本车 V token 广播给 m 个
+    候选（不去充 / 各桩）。
     ⚠️ **L 的 `tok_idx` 修复前错记为 `cand`（缺陷，2026-10-04 修）**：那时这条统一路径
     忠实回放的是"索引 M 段"的错误分布——它不改既有两头任何一位的保证只对 S/R 成立。
     修复后重算路径自动跟随采样下标（`_act` 记录什么就重算什么），无需另一套映射。
@@ -488,7 +604,8 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
         tok, _ = policy.forward_enc(
             torch.as_tensor(d.tok, dtype=torch.float32).unsqueeze(0), d.seg)
         head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
-                "R": policy.route_logits_emb, "M": policy.pm_logits_emb}[d.kind]
+                "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
+                "C": policy.charge_logits_emb}[d.kind]
         logits = head(tok,
                       torch.as_tensor(d.feat, dtype=torch.float32).reshape(1, 1, -1),
                       torch.as_tensor(d.cand_feat, dtype=torch.float32),
@@ -567,7 +684,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      epochs: int = 1,
                      constraints: ConstraintConfig | None = None,
                      adv_mode: str = "scalar",
-                     route_k: int = 1, pm_head: bool = False) -> tuple[float, dict]:
+                     route_k: int = 1, pm_head: bool = False,
+                     charge_head: bool = False) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
@@ -616,6 +734,12 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     S/L/R 同进链 logp、同吃采样流、同受逐决策裁剪）。⚠️ 需 ⑫ `maintenance` 开（入口经
     `roll_chain` 显式报错）；默认 MK01 的 `pm_interval=120` 从不逾期 ⟹ 机制验证要传
     `SimConfig(pm_interval=…)` 短间隔档（默认参数不动，见 §27.1）。
+
+    ⚠️ **`charge_head`（⑪ 充电头开关，2026-10-04）**：默认 `False` = 规则补电，链与训练步
+    **逐位等于今日**；`True` 启用——AGV 在每个空闲待命点由策略在 {不去充} ∪ {各桩} 里选
+    （C 决策与其余四头同进链 logp、同吃采样流、同受逐决策裁剪）。⚠️ 需 ⑪ `charging` 开
+    （入口经 `roll_chain` 显式报错）；默认电池 2–4 kWh 在一个 episode 里放不空 ⟹
+    "耗尽有后果"要在**小电池档**验证（`AgvSpec(battery_kwh=…)`，默认参数不动，见 §27.1）。
 
     ⚠️ **信任域按决策施加**（2026-10-04 修复，此前是**链级**裁剪的缺陷）：`logp` 是整条链的
     **求和**（约定 2，链长 100–460），故 `ratio = exp(Δ链logp)` 对单决策的微小漂移极敏感——
@@ -693,7 +817,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     for g in range(G):
         dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
                               sample=True, generator=gen, constraints=cons, route_k=route_k,
-                              pm_head=pm_head)
+                              pm_head=pm_head, charge_head=charge_head)
         chains.append(dec)
         f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
         f_objs.append(f)

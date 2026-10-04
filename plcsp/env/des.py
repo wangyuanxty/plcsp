@@ -25,6 +25,7 @@ from .corridors import k_shortest_paths, shortest_node_path
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
+from .snapshot import ChargerState    # ⑪ C 头：`snapshot()` 逐桩报占用（顶部导入，不每帧重导）
 from .transport import MATRIX, UNMAPPED_RAISE, TransportCaliber
 
 if TYPE_CHECKING:                       # 仅为标注；运行期在 `snapshot()` 里就地导入
@@ -246,6 +247,21 @@ def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
 PM_CAND_NOW = 0
 PM_CAND_DEFER = 1
 PM_CANDS: tuple[int, int] = (PM_CAND_NOW, PM_CAND_DEFER)
+
+# ⑪ 充电头（C）的候选（动作码）：0 = 不去充，码 i≥1 = 第 (i−1) 号充电桩。
+# **动作语义的唯一真相在此**——`AgvSim._maybe_charge` 与 `algo/group_rel._charge_cand_feat`
+# 按同一约定解读（候选 0 不去充、候选 i≥1 对应 `layout.chargers[i−1]`）。
+# 与 `PM_CANDS` 同构：候选**是动作**（去/不去、去哪根桩），充电桩在 token 序列里没有 token。
+CHARGE_CAND_SKIP = 0
+
+
+def charge_cands(n_chargers: int) -> tuple[int, ...]:
+    """⑪ 充电头的候选动作码 `(0, 1, …, n_chargers)`（0 = 不去充；i≥1 = 第 i−1 号桩）。
+
+    ⚠️ 候选集**随车队/布局变长**（变长候选集正是候选打分头的用途）——故由桩数现算，
+    不写死常量；`env/` 与 `algo/` 两侧都调本函数，候选集不可能漂开。
+    """
+    return tuple(range(int(n_chargers) + 1))
 
 
 class MachineSim:
@@ -521,13 +537,19 @@ class AgvSim:
     候选路径里选哪条（`SimWorld._make_route_fn`）；`route=None`（默认）时恒走最短路——
     **逐位等于"路线头从未存在"**（`route_logits` 当年随 ① 被砍、① 恢复后漏恢复，见
     `docs/progress-log.md` §27.3/§28）。
+
+    **充电决策（C，2026-10-04）**：`charge=None`（默认）= 规则档（低电 → 最近空闲桩），
+    逐位等于今日；非 None = 策略档，`_maybe_charge` 在每个空闲点问 {不去充} ∪ {各桩}
+    （回调契约 `charge(aid, cands) -> 动作码`，见 `SimWorld._make_charge_fn`）。
+    ⚠️ 与之配套的是**模型修复**：`battery <= 0` ⟹ 该车不可用（不接新任务），充到
+    `battery_high × cap` 才恢复——没有它，"充电"是纯成本零收益，C 决策退化（见 `_depleted`）。
     """
 
     def __init__(self, env, aid, m_dm: np.ndarray, transport: TransportCaliber, cfg: SimConfig,
                  stats: dict,
                  tasks_in, machines: list, graph, zm, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 route=None):
+                 route=None, charge=None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -540,6 +562,10 @@ class AgvSim:
         # `None` = **不启用**——`_drive` 恒走 `shortest_node_path`，且不多取快照/不多抽随机数
         # ⟹ 逐位等于"路线头从未存在"的行为（既有全部读数立在这条上）。
         self.route = route
+        # 充电决策（C）的入口：`SimWorld` 给的 `(aid, cands) -> 动作码` 回调。
+        # `None` = **规则档**（低电 → 最近空闲桩，今日行为逐位不变）；
+        # 非 None = 策略档，`_maybe_charge` 在**每个空闲点**问它 {不去充} ∪ {各桩}。
+        self.charge_policy = charge
         self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
         # ⑩ 异构车队：**开关关掉时倍率=1、载量=1**，即与"约束从未存在"逐位相同
         hetero = constraints.heterogeneous_fleet
@@ -618,30 +644,94 @@ class AgvSim:
         while self.down:
             yield self.up
 
-    def _maybe_charge(self):
-        """⑪ 低电 → 就近找**空闲**充电桩充到 `battery_high`。
+    def _depleted(self) -> bool:
+        """⑪ **电量耗尽**（模型修复的判据）：`battery <= 0` ⟹ 该车**不可用**，不接新任务。
 
+        恢复条件 = 充到 `battery_high × battery_cap`：充电动作（规则或策略）恒把电量**置为**
+        该值，而该值 > 0（`battery_high` 默认 0.8），故"充到目标"与"谓词转假"是同一件事——
+        不存在"充了一点就又能接活"的中间态。
+        ⚠️ **⑪ 关闭时本谓词恒 False**：电池只在 ⑪ 开时增减（`_drain` / `_drain_idle` /
+        `_maybe_charge` 三处都先查 `self.con.charging`），关闭档电池恒 = `battery_cap > 0`。
+        这是"⑪ 关档读数不受本修复影响"的**结构性理由**（由改造前捕获的摘要钉死）。
+        ⚠️ 判定只在**任务边界**调用（见 `run` 与 `_recover_from_depletion`）：`_drive` 持区段锁
+        行驶，车若死在持锁状态会把走廊堵死（死锁）——车必须能跑完**已开始**的行程。
+        """
+        return self.battery <= 0.0
+
+    def _recover_from_depletion(self):
+        """⑪ 耗尽后**不可用**：反复补电，直到电量回到 `battery_high × battery_cap` 才放行。
+
+        ⚠️ 规则档一次就能充上：`battery <= 0` 必满足 `battery <= battery_low × cap`
+        （`battery_low >= 0`），故 `_maybe_charge` 必定动手。C 决策档可能选"不去充"
+        （那是它的权利，代价是这台车继续不可用）——此时退避 `zone_hold` 再问，不空转。
+        若充电始终无法完成（桩全被占 / 策略一直不充），时间照常推进，episode 由 horizon
+        如实截断（`horizon_hit`）——不静默放行，也不死循环。
+        """
+        while self._depleted():
+            yield from self._maybe_charge()
+            if self._depleted():
+                yield self.env.timeout(self.cfg.zone_hold)
+
+    def _charge_at(self, src: int, ch):
+        """把车从 `src` 开进 `ch` 桩、排队、充到 `battery_high × battery_cap`。
+
+        规则档与 C 决策档**共用这一处**（两份拷贝必然漂）。⚠️ 排队语义按档不同：规则档进来前
+        已判过"桩空闲"（`res.count < capacity`），故 `yield req` 立即通过；C 决策档由策略选桩，
+        桩忙时**排队等待**（候选特征带了占用/排队，策略有条件避开忙桩）。
+        ⚠️ `need <= 0`（电量已不低于目标）⟹ 不充、不计 `charge_events`：SimPy 的 `timeout`
+        拒收负数，且"充到 0.8×cap"不该把更高的电量**拉低**。规则档的 `need` 恒 > 0
+        （`battery_low < battery_high` 时），故该分支只对 C 决策档有影响。
+        """
+        res = self.charger_res[ch.id]
+        with res.request() as req:
+            yield req
+            ok, self.pos_node = yield from self._drive(src, ch.node, "empty")
+            if not ok:
+                return
+            need = self.cfg.battery_high * self.battery_cap - self.battery
+            if need <= 0.0:
+                return
+            yield self.env.timeout(need / self.cfg.charge_kw * 60.0)   # kWh ÷ kW → h → min
+            self.battery = self.cfg.battery_high * self.battery_cap
+            self.stats["charge_events"] += 1
+
+    def _maybe_charge(self):
+        """⑪ 待命补电——**规则档**（`charge_policy is None`）或 **C 决策档**。
+
+        - **规则档**（默认，逐位等于今日）：低电（`battery <= battery_low × cap`）→ 按**最近**
+          选一个**空闲**桩，充到 `battery_high × cap`。桩被占则试下一个（不排队干等）。
+        - **C 决策档**：规则换成策略决策——候选 = {不去充} ∪ {各充电桩}（动作码见
+          `charge_cands`），在**每个空闲点**都问（"早充 vs 晚充"的权衡要求电池还够时也能充，
+          否则规则被写死回来，决策退化）。策略选的桩若忙则排队等待。
         只在**待命时**充电，不在取货/送货途中中断——中断会把在途工件撂在半路。
-        桩被占则试下一个（本车不排队干等，回队后下一轮再试）。
         """
         if not self.con.charging or not self.chargers:
             return
+        # ⚠️ `pos_node is None`（尚未出车）时以 **0 号桩的节点**为参照起点——规则档的既有简化
+        # （AGV 的初始停位不在仿真状态里，`layout` 也不给）。规则档只在低电时动手，默认电池
+        # 永远到不了那一档，故这条一直不可见；C 决策档**在 t=0 的第一个空闲点就可能撞上**
+        # （快照里该车 `node = -1`，候选特征的行驶时长取哨兵 −1.0）。本次**不改**这个口径
+        # （改了会动既有动力学），只如实标注。
+        src = self.pos_node if self.pos_node is not None else self.chargers[0].node
+        if self.charge_policy is not None:
+            cands = charge_cands(len(self.chargers))
+            choice = int(self.charge_policy(self.aid, cands))
+            if choice not in cands:
+                raise ValueError(
+                    f"policy_c 选了非候选动作 {choice}；候选={cands}（本车 {self.aid}）——"
+                    "静默回退会掩盖策略/候选集不一致，让整条链的 logp 与动作错位。")
+            if choice == CHARGE_CAND_SKIP:
+                return
+            yield from self._charge_at(src, self.chargers[choice - 1])
+            return
+        # ── 规则档（今日行为，逐位不变）──
         if self.battery > self.cfg.battery_low * self.battery_cap:
             return
-        src = self.pos_node if self.pos_node is not None else self.chargers[0].node
         for ch in sorted(self.chargers, key=lambda c: self._leg_min(src, c.node, count_unmapped=False)):
             res = self.charger_res[ch.id]
             if res.count >= res.capacity:       # 桩被占（SimPy 单线程，检查与申请之间无 yield）
                 continue
-            with res.request() as req:
-                yield req
-                ok, self.pos_node = yield from self._drive(src, ch.node, "empty")
-                if not ok:
-                    return
-                need = self.cfg.battery_high * self.battery_cap - self.battery
-                yield self.env.timeout(need / self.cfg.charge_kw * 60.0)   # kWh ÷ kW → h → min
-                self.battery = self.cfg.battery_high * self.battery_cap
-                self.stats["charge_events"] += 1
+            yield from self._charge_at(src, ch)
             return
 
     def _collect(self, q, frm: int, to: int, first: tuple) -> list:
@@ -726,7 +816,15 @@ class AgvSim:
             self.env.process(self._failures())       # ⑨ 关掉时不启进程 → 不抽随机数
         while True:
             yield from self._wait_up()               # ⑨ 停机中不接活
-            yield from self._maybe_charge()          # ⑪ 待命时补电
+            # ⚠️ ⑪ **耗尽门（模型修复）**：`battery <= 0` ⟹ 该车不可用，**不接新任务**，
+            # 直到充到 `battery_high × cap` 才恢复（`_recover_from_depletion`）。
+            # 判定在**任务边界**：此刻车空闲待命、不在行驶中、**不持任何区段锁**（`_drive`
+            # 才持锁）。刻意不放腿中/持锁时：死在持锁状态会让同区段的所有车永久等待（死锁）
+            # ——车必须能跑完已开始的行程。⑪ 关时 `_depleted()` 恒 False，本门不生效。
+            if self._depleted():
+                self.stats["agv_dry_events"] = self.stats.get("agv_dry_events", 0) + 1
+                yield from self._recover_from_depletion()
+            yield from self._maybe_charge()          # ⑪ 待命补电（规则 / C 决策）
             yield from self._wait_up()
             t0 = self.env.now
             frm, to, item, path = yield q.get()
@@ -821,7 +919,8 @@ class SimWorld:
         return fleet
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
-                        seed_chain: int = 0, charger_res=(), route=None, pm=None) -> tuple[
+                        seed_chain: int = 0, charger_res=(), route=None, pm=None,
+                        charge=None) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -838,6 +937,10 @@ class SimWorld:
         `run_gated` 传 `_make_route_fn(...)` 的返回值。透传给每台 `AgvSim`，`_drive` 消费。
         ⚠️ `pm`（⑫ 维护头）：同上，`None` = 规则驱动；`run_gated` 传 `_make_pm_fn(...)` 的
         返回值。透传给每台 `MachineSim`，`_pm_after_op` 消费。
+        ⚠️ `charge`（⑪ 充电头）：同上，`None` = 规则驱动（低电 → 最近空闲桩）；`run_gated`
+        传 `_make_charge_fn(...)` 的返回值。透传给每台 `AgvSim`，`_maybe_charge` 消费。
+        ⚠️ `charger_res` 存成活引用（`self.charger_res`）：`snapshot()` 要按它报**当时**的桩占用
+        （C 头的候选特征原料）——不存的话快照只能看到空表，占用维恒 0（静默死维）。
         """
         fleet = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -857,11 +960,12 @@ class SimWorld:
                        self.g, zm, self.constraints, fleet[a],
                        np.random.default_rng([seed_chain, 1000 + a]),      # ⑨ 每车独立流
                        track, chargers=self.layout.chargers, charger_res=charger_res,
-                       bound=bound, route=route)
+                       bound=bound, route=route, charge=charge)
                 for a in range(self.cfg.n_agv)]
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
+        self.charger_res = list(charger_res)   # ⑪ C 头候选特征：桩占用的活引用（见 docstring）
         self.machines = machines            # ⚠️ 只含机台（装卸站在 `self.lu`，不进快照的机台段）
         self.lu = lu
         self.tasks_in = tasks_in
@@ -1014,7 +1118,13 @@ class SimWorld:
                         # 候选路径聚合，逐车读不到（见 `snapshot.Snapshot.zone_holder`）。
                         zone_holder=tuple(-1 if h is None else int(h)
                                           for h in (self.zm.holder.get(z)
-                                                    for z in range(self.zm.n))))
+                                                    for z in range(self.zm.n))),
+                        # ⑪ C 头：逐桩**当时**的占用/排队。下标 = `layout.chargers` 顺序
+                        # （`charger_res` 与它同序建出）。`_cold_start` 无桩表 ⟹ 空元组。
+                        chargers=tuple(ChargerState(occupied=int(res.count),
+                                                    waiting=len(res.queue),
+                                                    capacity=int(res.capacity))
+                                       for res in self.charger_res))
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None) -> dict:
@@ -1038,6 +1148,8 @@ class SimWorld:
                  "rework_events": 0, "pm_events": 0,
                  # 物流侧约束的事件计数（⑨⑩⑪）
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
+                 # ⑪ 模型修复的读数：任务边界上发现本车耗尽的次数（"不可用"事件的计数）
+                 "agv_dry_events": 0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
@@ -1094,6 +1206,7 @@ class SimWorld:
                 "pm_events": stats["pm_events"],
                 "trips": stats["trips"], "charge_events": stats["charge_events"],
                 "agv_fail_events": stats["agv_fail_events"],
+                "agv_dry_events": stats["agv_dry_events"],
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
@@ -1118,7 +1231,7 @@ class SimWorld:
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
-                  policy_r=None, route_k: int = 2, policy_m=None) -> dict:
+                  policy_r=None, route_k: int = 2, policy_m=None, policy_c=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1151,11 +1264,19 @@ class SimWorld:
         ⚠️ `policy_m` 非空但 ⑫ `maintenance` 关闭 → **显式报错**：⑫ 关时 `pm_clock` 根本
         不累加（决策点不存在），给策略一个死动作只会污染链 logp。同 `policy_r` 的形态。
 
-        ⚠️ 两个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
+        ⚠️ **`policy_c`（⑪ 充电头，C）**：`None`（默认）= 规则驱动（低电 → 最近空闲桩）
+        ⟹ 逐位等于今日行为；非空 = **策略驱动**：AGV 在每个**空闲待命点**
+        （`AgvSim._maybe_charge`，与规则同一处）在 {不去充} ∪ {各充电桩} 里选。
+        契约与 S/L/R/M 对称：`policy_c(snap, aid, cands) -> 动作码`（候选动作码见
+        `charge_cands`：0 = 不去充、码 i≥1 = 第 i−1 号桩）。
+        ⚠️ `policy_c` 非空但 ⑪ `charging` 关闭 → **显式报错**：⑪ 关时电池从不增减、
+        充电桩机制根本不存在（决策点不存在），给策略一个死动作只会污染链 logp。
+
+        ⚠️ 三个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
         `algo/` 层做。决策留痕同理：`group_rel.roll_chain` 自记自己的 `Decision` 链
         （旧的 `dict["decision_log"]` 回传因零消费者已删，评审 M-2）。
         """
-        if policy_l is None and not online_s and policy_m is None:
+        if policy_l is None and not online_s and policy_m is None and policy_c is None:
             return self.run(seed_chain=seed_chain, op_choices=op_choices)
         if online_s and policy_s is None:
             raise ValueError("online_s=True 需要 policy_s 回调（S 层决策入口）")
@@ -1178,6 +1299,14 @@ class SimWorld:
                     "（决策点不存在），给策略一个死动作只会污染链 logp。"
                     "请开 ⑫ 或传 policy_m=None。")
             pm_fn = self._make_pm_fn(policy_m)
+        charge_fn = None
+        if policy_c is not None:
+            if not self.constraints.charging:
+                raise ValueError(
+                    "policy_c 非空但 ⑪ 充电关闭：⑪ 关时电池从不增减（恒 = cap）、充电桩机制"
+                    "根本不存在（决策点不存在），给策略一个死动作只会污染链 logp。"
+                    "请开 ⑪ 或传 policy_c=None。")
+            charge_fn = self._make_charge_fn(policy_c)
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -1190,6 +1319,8 @@ class SimWorld:
                  "rework_events": 0, "pm_events": 0,
                  # 物流侧约束的事件计数（⑨⑩⑪）
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
+                 # ⑪ 模型修复的读数：任务边界上发现本车耗尽的次数（"不可用"事件的计数）
+                 "agv_dry_events": 0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
@@ -1213,7 +1344,7 @@ class SimWorld:
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
-                                          route=route_fn, pm=pm_fn)
+                                          route=route_fn, pm=pm_fn, charge=charge_fn)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1241,6 +1372,13 @@ class SimWorld:
                 "setup_minutes_total": float(sum(stats["setup_min"])),
                 "rework_events": stats["rework_events"],
                 "pm_events": stats["pm_events"],
+                # 物流侧约束的事件计数（⑨⑩⑪）——run_gated 此前不带，⑪ C 头的效果读数要用
+                # （`charge_events`）/ 模型修复的读数要用（`agv_dry_events`），故补齐。
+                "trips": stats["trips"], "charge_events": stats["charge_events"],
+                "agv_fail_events": stats["agv_fail_events"],
+                "agv_dry_events": stats["agv_dry_events"],
+                "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
+                                    else stats["battery_min_kwh"]),
                 "fail_events": stats["fail_events"],
                 "tardy": self._tardy(plans, completes, due)[0],
                 "tardy_twt": self._tardy(plans, completes, due)[1],
@@ -1340,6 +1478,28 @@ class SimWorld:
             return choice
 
         return pm
+
+    def _make_charge_fn(self, policy_c):
+        """构造 **⑪ 充电决策（C）** 的回调 `charge(aid, cands) -> 动作码`（一局一个）。
+
+        契约与 S/L/R/M 对称：`env/` 只给**原始快照**（此刻的活状态）、本车号与候选动作码，
+        **不构造特征**（层次纪律：`env/` 不得依赖 `nn/`）——C 头的决策特征与逐候选特征由
+        `algo/` 侧从快照自造（见 `group_rel.charge_feat` / `_charge_cand_feat`）。
+        候选集由本函数按布局现算（`charge_cands(len(layout.chargers))`），与 `algo/` 侧同一
+        函数、同一顺序——两处不可能漂。
+        ⚠️ 非候选动作**显式报错**（同 `policy_s` / `policy_l` / `policy_r` / `policy_m`）：
+        静默回退会掩盖策略/候选集不一致，让整条链的 logp 与动作错位而无人察觉。
+        """
+
+        def charge(aid: int, cands: tuple[int, ...]) -> int:
+            snap = self.snapshot()                  # 只读（见 `snapshot()` 的契约）
+            choice = int(policy_c(snap, int(aid), cands))
+            if choice not in cands:
+                raise ValueError(f"policy_c 选了非候选动作 {choice}；候选={cands}"
+                                 f"（本车 {aid}）")
+            return choice
+
+        return charge
 
     @staticmethod
     def _release(env, store, item):

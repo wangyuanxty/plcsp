@@ -74,6 +74,21 @@ class VehicleState:
 
 
 @dataclass(frozen=True)
+class ChargerState:
+    """充电桩的**当时**占用（⑪ C 头的候选特征原料）。
+
+    ⚠️ 与 `MachineState` 的缓冲不同，这里是 SimPy `Resource` 的**活计数**（不是队列长度）：
+    `occupied` = 正在充电的车数（`Resource.count`），`waiting` = 已在排队等桩的车数
+    （`len(Resource.queue)`），`capacity` = 车位容量（当前恒 1：一桩同时只服务一车）。
+    C 头据此避开忙桩——候选特征没有它，"选哪根桩"就只剩距离一个维度。
+    """
+
+    occupied: int           # 正在使用该桩的车数
+    waiting: int            # 排队等待该桩的车数
+    capacity: int           # 车位容量
+
+
+@dataclass(frozen=True)
 class Snapshot:
     now: float
     machines: tuple[MachineState, ...]
@@ -89,3 +104,7 @@ class Snapshot:
     # `group_rel._route_cand_feat`）。⚠️ 与 `VehicleState.zone_wait`（"本车等了多久"）
     # 不同：这是"这条路上有几处正被占"，是**按路径**读的量，逐车读不到。
     zone_holder: tuple[int, ...]
+    # ⑪ C 头的候选特征原料：逐个充电桩的占用/排队，下标 = `layout.chargers` 的顺序。
+    # 默认空元组 = 该快照不带桩表（`_cold_start` 或测试手搓）⟹ 占用维恒 0，
+    # **不是哨兵**（与 `zone_holder` 为空的约定一致：缺表 = 该维无信息）。
+    chargers: tuple[ChargerState, ...] = ()
