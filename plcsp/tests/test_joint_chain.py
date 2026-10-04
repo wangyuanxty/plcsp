@@ -409,3 +409,39 @@ def test_joint_step_bitwise_reproducible_given_seed():
         f"同 seed 同起点的两步训练读数不同：r={ra} vs {rb}"
         f"（r_std {da['r_std']} vs {db['r_std']}，grad_norm {da['grad_norm']} vs {db['grad_norm']}）"
         "——动作采样没有逐位复现")
+
+@pytest.mark.unit
+def test_clipped_loss_weights_chains_equally_not_by_length():
+    """⚠️ 两条损失路径必须对**链**等权——裁剪路径曾按**决策**平均，导致长链权重更大。
+
+    背景：无裁剪路径 `obj` 是 `(G,)` 的链 logp，`obj.mean()` 按 **G 条链**平均（每条 `A_g/G`）。
+    逐决策裁剪改造后，裁剪路径把 G 条链展平成 N=Σn_g 个决策再 `.mean()`，于是每条链的权重
+    变成 `n_g/N`——**正比于链长**。链长与 episode 长短相关 ⟹ 系统性地给长（差）的调度
+    更大的梯度权重，且两条路径口径不一致。
+
+    修法：`_chain_mean` —— 每条链先对自己的决策取平均，再对 G 条链取平均。
+    """
+    from plcsp.algo.group_rel import _chain_mean
+
+    # 链等长时，两种算法**完全一致**（这保证修复不改变既有等长情形的行为）
+    flat_eq = torch.tensor([1.0, 3.0, 2.0, 4.0])
+    assert torch.allclose(_chain_mean(flat_eq, [2, 2]), flat_eq.mean())
+
+    # 链不等长时，按链平均 ≠ 按决策平均
+    flat = torch.tensor([10.0, 0.0, 0.0, 0.0, 0.0])       # 链0 两个决策、链1 三个决策
+    by_chain = _chain_mean(flat, [2, 3])
+    assert not torch.allclose(by_chain, flat.mean()), "仍按决策平均——长链被加权了"
+    assert torch.allclose(by_chain, torch.tensor((5.0 + 0.0) / 2.0))
+
+
+@pytest.mark.unit
+def test_two_loss_paths_agree_when_chains_are_equal_length():
+    """⚠️ 链等长时，裁剪与不裁剪两条路径对链的加权必须相同（口径一致性）。
+
+    这是上一条的端到端对照：构造等长链时两者的**链权重**应一致；
+    不等长时才允许不同（因为按链平均本来就与按决策平均不同）。
+    """
+    from plcsp.algo.group_rel import _chain_mean
+
+    flat = torch.arange(6, dtype=torch.float32)          # 三条等长链
+    assert torch.allclose(_chain_mean(flat, [2, 2, 2]), flat.mean())

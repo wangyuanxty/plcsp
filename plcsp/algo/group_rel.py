@@ -302,6 +302,21 @@ def sampled_logp(decisions: list[Decision]) -> torch.Tensor:
     return total
 
 
+def _chain_mean(obj_flat: torch.Tensor, lengths) -> torch.Tensor:
+    """把**展平的逐决策**目标按**链**平均：每条链先对自己的决策取平均，再对链取平均。
+
+    ⚠️ 存在的理由（2026-10-04 修）：逐决策裁剪改造后，裁剪路径把 G 条链展平成 N=Σn_g 个决策
+    再 `.mean()`，于是每条链的权重是 `n_g/N`——**正比于链长**；而无裁剪路径的 `obj` 是 `(G,)`
+    的链 logp，`.mean()` 给每条链 `1/G`。**两条路径口径不一致**，且链长与 episode 长短相关
+    ⟹ 系统性地给长（差）的调度更大的梯度权重。
+
+    链等长时本函数与直接 `.mean()` **逐位相同**（`n_g ≡ n` ⇒ `1/G == n/N`），故不改变
+    既有等长情形的行为。
+    """
+    parts = obj_flat.split([int(n) for n in lengths])
+    return sum(p.mean() for p in parts) / len(parts)
+
+
 def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.ndarray,
                      cfg: SimConfig, ctx: NormContext, ref: ReferenceObjectives,
                      seed: int, G: int = 8, lr: float = 1e-3,
@@ -342,8 +357,13 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     只烧链前向 + 反向。修复 = 把组**展平**：G 条链的全部决策拼成一个长向量（链长不等，
     `A.repeat_interleave(lengths)` 给每个决策它那条链的优势），每个决策各自一个 ratio、各自
     裁剪。`clip_eps` 于是恢复教科书含义（**每个决策**的动作概率比夹在 1±ε），与链长无关。
-    展平后 `loss = -mean(obj)` 是**按决策**平均（不再是按链平均）——链间决策数不等时，即使
-    首轮 `ratio ≡ 1`（`obj = A_flat`），`loss` 也**不再结构性为 0**（长度加权均值）。
+
+    ⚠️ **但展平会改变"按什么平均"**（2026-10-04 同日二修）：展平后若直接 `.mean()`，平均的
+    对象是 **N=Σn_g 个决策**，每条链权重 `n_g/N`——**正比于链长**；而无裁剪路径的 `obj` 是
+    `(G,)`，`.mean()` 给每条链 `1/G`。链长与 episode 长短相关 ⟹ 系统性地给长（差）的调度
+    更大的梯度权重，**且两条路径口径不一致**。故裁剪路径改用 `_chain_mean`：每条链内先对
+    自己的决策取平均，再对 G 条链取平均。链等长时与直接 `.mean()` 逐位相同。
+    ⟹ **两条路径一律按链平均**，`loss` 首轮也重新结构性为 `-mean(A)`（与链长分布无关）。
 
     ⚠️ **诊断口径随修复改变**：`ratio` = **全部决策**的 ratio 均值；`clipped_frac` = 出界的
     **决策**占比（旧口径是"出界的**链**占比"，1.0 = 全裁 ⇒ 该轮无梯度信号）。
@@ -434,7 +454,10 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             # 出界比例 = 该轮 surrogate **失去梯度**的**决策**占比（1.0 = 全裁 ⇒ 这一轮纯浪费）
             clipped_frac = float(((ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps))
                                  .float().mean().item())
-        loss = -obj.mean()
+        # ⚠️ 两条路径**都按链平均**：无裁剪的 `obj` 是 (G,) 直接 mean；
+        #    裁剪的 `obj` 是展平的逐决策量，必须经 `_chain_mean` 折回按链——否则长链权重更大，
+        #    且与无裁剪路径口径不一致（见 `_chain_mean` docstring）。
+        loss = -(obj.mean() if clip_eps is None else _chain_mean(obj, lengths))
         policy.optim.zero_grad()
         loss.backward()
         # 范数裁剪（不是逐元素）；返回值 = 裁剪前的梯度范数，作为**非零**学习信号入诊断
