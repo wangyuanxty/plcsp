@@ -907,6 +907,11 @@ class SimWorld:
         # 认一次，整条运行链（含快照/训练栈建的世界）拿到的是同一个口径对象。
         self.transport = TransportCaliber.for_instance(inst, layout,
                                                        unmapped=self.cfg.transport_unmapped)
+        # ⑧ 交期表**本世界内**缓存（见 `_due_map`）：交期外生，而 `snapshot()` 每个决策点都读它。
+        self._due_key: tuple | None = None
+        self._due_val: dict[int, float] = {}
+        # 逐作业**标称剩余工时**的查表（见 `_remaining_min`）：纯实例数据，与仿真状态无关。
+        self._rem_tbl: list[list[float]] | None = None
         self._cold_start()                  # t=0 快照骨架（P2 Task 1，run() 会整套换掉）
 
     def _fleet(self) -> list:
@@ -1012,7 +1017,32 @@ class SimWorld:
         """
         if not self.constraints.due_dates or _MREF_BUSY:
             return {}                    # 参考调度自身运行时不递归求交期
-        return compute_due_dates(self.inst, self.cfg.tau, self.cfg.due_range)
+        # ⚠️ **本世界内缓存**（2026-10-04 性能批次）：本函数上半段自己写着交期"**外生**"——
+        # 只取决于 (实例, τ, R)，与仿真状态无关。而 `snapshot()` **每个决策点**都要读它：
+        # 实测 `due_dates_for` 75.9 µs/次 × 960 次/步 = 73 ms（整步的 3.8%），全在重算同一张表。
+        # 缓存后每回合只算一次（8 条链 8 次，不是 960 次）。
+        # ⚠️ 键**必须带 (τ, R)**：`SimConfig` 不是 frozen，τ 扫描实验会中途改它。
+        # ⚠️ 返回的是**同一个 dict**——调用方只读、不得改（既有调用方 `snapshot()` / `_tardy` /
+        #    `weighted_tardiness` 都只读，有测试钉口径）。
+        key = (self.cfg.tau, self.cfg.due_range)
+        if key != self._due_key:
+            self._due_val = compute_due_dates(self.inst, self.cfg.tau, self.cfg.due_range)
+            self._due_key = key
+        return self._due_val
+
+    def _remaining_min(self) -> list[list[float]]:
+        """`[job][done]` = 该作业从第 `done` 道工序起的**标称**剩余工时之和——供 `snapshot()` 查表。
+
+        ⚠️ **纯实例数据，与仿真状态无关**，故每世界算一次即可。否则 `snapshot()` 每个决策点
+        现算一次：实测 32.1 µs/次 × 960 次/步 = 31 ms（整步的 1.5%）；预计算成表后 1.3 µs/次。
+        口径与 `due_dates.total_work_content` 同族（`min(t for _m, t in op)`），
+        与原式 `sum(min(...) for op in job_ops[done:])` **逐位相同**（同一批浮点、同一累加序）。
+        """
+        if self._rem_tbl is None:
+            self._rem_tbl = [
+                [sum(min(t for _m, t in op) for op in job[d:]) for d in range(len(job) + 1)]
+                for job in self.inst.jobs]
+        return self._rem_tbl
 
     def _tardy(self, plans, completes, due) -> tuple[int, float]:
         """(误期作业数, 加权总拖期 TWT)。无交期时两者恒为 0。"""
@@ -1086,11 +1116,12 @@ class SimWorld:
         # ⑧ 交期与 run() **同口径**（`_due_map`）：未 run 的 t=0 快照也取（交期是纯实例数据的
         # 查询，无墙钟开销）；参考运行自身运行时返回 {}（0.0 哨兵）。
         due = self._due_map()
+        rem = self._remaining_min()          # 预计算表（见 `_remaining_min`）：每快照省 32 µs
         for j, job_ops in enumerate(self.inst.jobs):
             done = self._job_progress[j]
             js.append(JobState(
                 done_ops=done, total_ops=len(job_ops),
-                remaining_min=float(sum(min(t for _m, t in op) for op in job_ops[done:])),
+                remaining_min=float(rem[j][done]),
                 finished=done >= len(job_ops), due=float(due.get(j, 0.0)),
                 at_machine=int(self._job_loc[j]),
                 in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j]),
