@@ -239,9 +239,10 @@ def test_clipped_path_ratio_uses_sampling_time_logp():
 
     ⚠️ **旧命题 → 新命题（2026-10-04，批量重算批次）**：
     - 旧：`ratio` 是**精确** 1.0（断言写 `== 1.0`）；理由 = `new` 与 `old` 逐位相同。
-    - 新：`ratio` 在 **1e-5 内**等于 1；理由 = `new` 改由 `(B,N,F)` 一次批前向算出，
-      而 `old` 是采样时逐决策单条前向的值——批矩阵乘的分块不同 ⟹ 末位漂移约 2e-7
-      （实测 ratio ∈ [0.99999976, 1.00000024]）。容差取 1e-5 与硬要求 1 一致。
+    - 新：`ratio` 在 **1e-5 内**等于 1；理由 = `new` 改由一次编码器批前向 + 打分头分组批
+      算出，而 `old` 是采样时逐决策单条前向的值——批矩阵乘的分块不同 ⟹ 末位漂移约 3.6e-7
+      （单链 route_k=2 实测 `max|Δlogp| = 3.58e-07`；`ratio` 与 1 的偏差 < 4e-7）。
+      容差取 1e-5 与硬要求 1 一致。
     - `clipped_frac` / `grad_norm` 的判据不受影响（带是 [0.8, 1.2]，漂移差几个数量级）。
 
     ⚠️ 原 `test_ratio_is_one_for_unchanged_policy`（同策略两遍 `chain_logp` 比大小）已删：
@@ -280,13 +281,13 @@ def test_multi_epoch_clip_trust_region_is_live():
     assert diag["grad_norm"] > 0.0, "末轮梯度范数为 0——第 2 个 epoch 没有梯度信号"
 
 
-# ================= 批量重算（编码器一次前向覆盖 G 条链的全部决策） =================
-# 背景（本批的动机，docs/progress-log.md §34）：`roll_chain` 的在线前向是**逐决策**的
+# ================= 批量重算（编码器 + 打分头各自一次批量） =================
+# 背景（本批的动机，docs/progress-log.md §34/§36/§37）：`roll_chain` 的在线前向是**逐决策**的
 # （每个决策依赖上一刻的仿真状态），不能批；但 `chain_logp` / `decisions_logp` 的重算是
 # **事后**的——全部决策的 token 形状相同（实例级常量），可堆成 (B,N,F) 一次前向。
-# 编码器是耗时主项（本机实测单条 ≈6.0 ms、231 条批成一次 ≈402 ms，吞吐 ~3.4×），
-# 故它是唯一值得批的环节；
-# 打分头候选数逐决策不同（机台/车/路径/动作码），保持逐决策（见 `_decision_logp_terms`）。
+# 编码器是 CPU 档耗时主项（本机实测单条 ≈6.0 ms、231 条批成一次 ≈402 ms，吞吐 ~3.4×）；
+# CUDA 档上打分头 + 它引出的逐决策反向小图占整步 ~54%（§36.8），故头也按 `(kind, n_cand)`
+# 分组批量（**不 padding**：padding 会改 `log_softmax` 的归约长度），见 `_decision_logp_terms`。
 
 
 def _reference_terms(decisions, policy):
@@ -373,6 +374,76 @@ def test_batched_recompute_matches_the_per_decision_reference_gradients():
 
 
 @pytest.mark.unit
+def test_head_scores_are_grouped_batched_by_kind_and_candidate_count(monkeypatch):
+    """⚠️ 打分头批量化（2026-10-04 打分头批次）：重算路径按 `(kind, n_cand)` 分组批量打分。
+
+    判据四条：
+    1. 重算路径**零**次逐决策头调用（`*_logits_emb`）——头真批了，不是接了个没用的 API；
+    2. 批量调用次数 = 不同 `(kind, n_cand)` 组数，且各组的决策数与决策表一致（多一组 =
+       分组键写错；少一组 = 漏决策）；
+    3. 组序 = `sorted`（**确定**：同 seed 同结果，不依赖 dict 迭代序）；
+    4. 五头全覆盖（route_k=2 + pm/charge）——头名映射写错（如 C 头指到 S 头）会被逐 kind
+       的组数与候选数当场抓住。
+
+    ⚠️ **不 padding**是本仓的选择（padding 会改 `log_softmax` 的归约长度、撑破 1e-5 容差）：
+    组数必须远小于决策数（MK01/全头档实测 7 组 vs 3400+ 决策）。组数若退化成逐决策，
+    本判据当场红——那说明该改分组键，不是该放宽判据。
+    """
+    from plcsp.algo.group_rel import _decision_logp_terms
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    dec, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2,
+                        pm_head=True, charge_head=True)
+    expected: dict[tuple[str, int], int] = {}
+    for d in dec:
+        expected[(d.kind, len(d.cand))] = expected.get((d.kind, len(d.cand)), 0) + 1
+    assert {k for k, _ in expected} == {"S", "L", "R", "M", "C"}, \
+        f"这条链没覆盖五个头：{sorted({d.kind for d in dec})}——判据失去意义"
+
+    calls: list[tuple[str, int, int]] = []
+    per_decision = {"n": 0}
+    orig_batch = pol.logits_emb_batch
+
+    def _counting_batch(kind, emb, tok_idx, feat_dec, feat_cand):
+        calls.append((kind, int(emb.shape[0]), int(feat_cand.shape[1])))
+        return orig_batch(kind, emb, tok_idx, feat_dec, feat_cand)
+
+    def _counting_head(*_a, **_k):
+        per_decision["n"] += 1
+        raise AssertionError("重算路径仍在逐决策调打分头——批量没接上")
+
+    monkeypatch.setattr(pol, "logits_emb_batch", _counting_batch)
+    for name in ("mach_logits_emb", "agv_logits_emb", "route_logits_emb",
+                 "pm_logits_emb", "charge_logits_emb"):
+        monkeypatch.setattr(pol, name, _counting_head)
+    terms = _decision_logp_terms(dec, pol)
+    assert len(terms) == len(dec), f"项数 {len(terms)} != 决策数 {len(dec)}"
+    assert per_decision["n"] == 0, "重算路径逐决策调了打分头"
+    got: dict[tuple[str, int], int] = {}
+    for kind, batch, n_cand in calls:
+        got[(kind, n_cand)] = got.get((kind, n_cand), 0) + batch
+    assert got == expected, f"分组批量与决策的分组不符：批量 {got} vs 期望 {expected}"
+    assert len(calls) == len(expected), f"批量调用 {len(calls)} 次 != 组数 {len(expected)}"
+    assert [k for k, _, _ in calls] == [k for k, _ in sorted(expected)], \
+        f"组序不是 sorted（确定性判据）：{[k for k, _, _ in calls]}"
+
+
+@pytest.mark.unit
+def test_grouped_head_batching_is_deterministic_across_calls():
+    """⚠️ 分组顺序**确定**（同 seed 同结果）：同一批决策两次重算必须**逐位相同**。
+
+    组序用 `sorted`、组内用原决策序 ⟹ 每次的批组成与行序完全一致；CPU 上同一串 kernel
+    是确定性的，故判据取 `torch.equal`（不是 allclose）。若日后有人把组序改成依赖 dict
+    迭代序或集合序，这条会红。
+    """
+    from plcsp.algo.group_rel import _decision_logp_terms
+    inst, lay, dm, cfg, ctx, pol = _setup()
+    dec, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
+    a = torch.stack(_decision_logp_terms(dec, pol)).detach()
+    b = torch.stack(_decision_logp_terms(dec, pol)).detach()
+    assert torch.equal(a, b), "同一批决策两次重算不逐位相同——分组顺序不确定"
+
+
+@pytest.mark.unit
 def test_recompute_batches_all_chains_into_one_encoder_forward(monkeypatch):
     """⚠️ 硬要求：批量必须跨 **G 条链的全部决策**一次前向，不是一条链一次。
 
@@ -432,8 +503,9 @@ def test_per_decision_logp_vector_is_same_source_within_tolerance():
       同一串浮点运算、同一个归约次序。
     - 新：重算与采样回放**在 1e-5 内相同**。理由 = 重算改成 `(B,N,F)` **一次批前向**
       （编码器前向是耗时主项：实测 231 个决策的重算从 9.31 ms/决策降到 2.31 ms/决策，
-      整步 ~2×）。批矩阵乘的分块与单条不同 ⟹ 每项有约 2e-7 的末位漂移（本仓实测
-      `max|Δlogp| = 2.38e-7`）——这是**刻意接受**的代价，不是缺陷。裁剪首轮 `ratio ≡ 1`
+      整步 ~2×），打分头再按 `(kind, n_cand)` 分组批（§37）。批矩阵乘的分块与单条不同 ⟹
+      每项有约 **4e-7 以内**的末位漂移（本仓实测 `max|Δlogp| = 3.58e-07`，编码器批 +
+      打分头批两笔合计）——这是**刻意接受**的代价，不是缺陷。裁剪首轮 `ratio ≡ 1`
       随之从**严格等式**降为"≈1 在 1e-5 内"。
     ⚠️ 累加**次序**没变（第 2 条仍逐位钉死）——变的只是每一项的末位。
     """
@@ -704,10 +776,17 @@ def test_scalar_adv_mode_regression_pin():
       但**同 seed 的奖励序列不受影响**——动作采样路径（`roll_chain` 的在线前向）一行未动，
       `r` 逐位相同。短程对照与"同 seed 可复现"仍成立，长程数字须重跑才能引用。
 
+    ⚠️ **再捕获（2026-10-04，打分头批量批次）**：摘要改为
+    `003583718aa166e56b995d16f679d91c4dad76933861fb398d66e03226d387fa`。理由与上一批同型：
+    重算路径的**打分头**从"逐决策单条"改成按 `(kind, n_cand)` 分组的**批量打分** ⟹ 每项
+    logp 有 ~3.6e-7 的末位漂移（实测 `max|Δlogp| = 3.58e-07`；`test_batched_recompute_matches_the_per_decision_reference_logp`
+    实测）⟹ Adam 更新后的参数末位不同 ⟹ 摘要必然改变。**优势公式仍未动**；动作采样路径
+    一行未动 ⟹ 同 seed 的奖励序列仍逐位不变。
+
     ⚠️ 2026-10-04 早先的三次重捕获（R 头恢复排除 / L 头 token 下标修复 / ⑫⑪ 新头排除）见
-    `docs/progress-log.md`；本条只记**本批**（批量重算）引起的变化。三个新头
-    （`r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*`）的排除理由不变：默认关闭档它们
-    拿不到梯度，其参数是新增结构、不进本条"scalar 口径"的证据链。
+    `docs/progress-log.md`；本条记**两次**由数值批次引起的重捕获（批量重算、打分头批量）。
+    三个新头（`r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*`）的排除理由不变：默认关闭档
+    它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径"的证据链。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -723,7 +802,7 @@ def test_scalar_adv_mode_regression_pin():
             continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())
-    assert h.hexdigest() == "6a50aafcd51e4d7c7e0679557869a729ab46766d72759d913ccac2cfaa8ade4a", \
+    assert h.hexdigest() == "003583718aa166e56b995d16f679d91c4dad76933861fb398d66e03226d387fa", \
         "scalar 路径的输出与捕获参照不再逐位相同——训练轨迹的回归基准变了"
 
 

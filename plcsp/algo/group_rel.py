@@ -25,7 +25,11 @@ R 决策，链 logp 照常求和。⚠️ **默认 `route_k=1`（关闭）**—�
 决策依赖上一刻的仿真状态；重算是事后的，可以批）。编码器是耗时主项，实测（MK01、本机、
 `torch.set_num_threads(1)`）：单条前向 ≈ 6.0 ms、231 条批成一次 ≈ 402 ms（**~3.4×**），
 重算从 9.31 ms/决策降到 2.31 ms/决策，`joint_chain_step` 整步 **≈2×**。
-**代价**：批矩阵乘的分块与单条不同 ⟹ 重算的每一项有 ~2e-7 的末位漂移，`ratio ≡ 1` 因此从
+**打分头同批也批量**（2026-10-04 打分头批次）：按 `(kind, n_cand)` 分组（MK01/默认档 4 组、
+全头档 7 组），不做 padding，归约长度不变——CUDA 上头与它引出的反向小图曾是整步的 ~54%
+（见 `_decision_logp_terms` 与 `joint_chain_step` 的批量说明）。
+**代价**：批矩阵乘的分块与单条不同 ⟹ 重算的每一项与逐决策有 ~4e-7 以内的末位漂移
+（编码器批 + 打分头批两笔合计；实测 max|Δlogp| = 3.58e-07），`ratio ≡ 1` 因此从
 **严格等式**降为"≈1 在 1e-5 内"（逐位钉死的地方已逐个改写，见各函数 docstring 与测试）。
 ⚠️ **累加次序没有变**：链级 logp 仍是逐决策 float32 顺序累加（`_sequential_float32_sum`）。
 
@@ -407,7 +411,7 @@ class Decision:
     # 省掉一整遍"重算 old"的链前向），一致性由测试钉死。既然取自采样那一刻，它天然不受
     # "采样之后再算 old"这类重排的影响。
     # ⚠️ 2026-10-04（批量重算批次）：重算改成 (B,N,F) 一次批前向，故它与重算值只在 **1e-5 内**
-    # 一致、不再逐位相同（旧命题是逐位）。实测 max|Δ| ≈ 2.4e-7；详见 `decisions_logp`。
+    # 一致、不再逐位相同（旧命题是逐位）。实测 max|Δ| ≈ 3.6e-7；详见 `decisions_logp`。
     logp: float
     # M 决策决定的是**哪台机台**（其余头 None）——决策点逐机台触发，而候选是**动作码**
     # （0/1），机台身份在 `cand` 里表达不了。生产路径写入（`_act` 的 `mach_id`），
@@ -630,12 +634,16 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
       （`n_m + n_jobs + n_agv + 1`，四段长度取自 `NormContext`），故在本项目的调用面上恒成立
       （`test_all_decisions_in_a_step_share_one_token_shape` 钉住）。不同则**显式报错**——
       不静默退回逐条，那会让"批没接上"变成看不见的性能回归，且掩盖上游契约变化。
-    - **打分头仍逐决策**：候选数逐决策不同（机台 / 车 / k 条路径 / 2 个动作码 / 桩数+1），
-      批它们要 padding+masking；而头只是 `d_model+F → 64 → 1` 的两层 MLP，编码器才是主项
-      （见 `joint_chain_step` 的批量说明）。故头保持逐决策，语义不变。
-    - **末位漂移**：批前向与单条前向的矩阵乘分块不同 ⟹ 结果在 1e-5 内一致、不是逐位相同。
-      故 `Decision.logp`（采样时逐条算出）与这里的重算不再逐位同源，裁剪的 `ratio ≡ 1`
-      随之从**严格等式**降为"≈1 在 1e-5 内"（见 `decisions_logp` 的说明）。
+    - **打分头按 `(kind, n_cand)` 分组批量**（2026-10-04 打分头批次，上一批留的口子）：
+      同组一次 `PolicyNet.logits_emb_batch`，**不做 padding**——padding 会改变 `log_softmax`
+      的归约长度、把 1e-5 容差撑破；同 `n_cand` 成组则归约长度不变（`log_softmax` 仍只在
+      `n_cand` 上做），漂移与编码器批量化同量级。候选数逐决策不同（机台 / 车 / k 条路径 /
+      2 个动作码 / 桩数+1），但**组数很少**：MK01/默认档实测 4 组（S 的 1/2/3 与 L 的 3），
+      全头开启档 7 组（见 `progress-log.md` §37）。组序 `sorted`（**确定**：同 seed 同结果，
+      不依赖 dict 迭代序），组内按原决策序。批的是**打分**这一步；链级 logp 的累加次序不变。
+    - **末位漂移**：批前向（含批打分头）与单条前向的矩阵乘分块不同 ⟹ 结果在 1e-5 内一致、
+      不是逐位相同。故 `Decision.logp`（采样时逐条算出）与这里的重算不再逐位同源，裁剪的
+      `ratio ≡ 1` 随之从**严格等式**降为"≈1 在 1e-5 内"（见 `decisions_logp` 的说明）。
     """
     if not decisions:
         return []
@@ -651,18 +659,33 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     tok_all = torch.stack([torch.as_tensor(d.tok, dtype=torch.float32)
                            for d in decisions]).to(policy.device)
     emb, _ = policy.forward_enc(tok_all, decisions[0].seg)        # (B, N, d)：一次前向
-    out: list[torch.Tensor] = []
+    # ⚠️ **打分头也批量**（2026-10-04 打分头批次）：按 `(kind, n_cand)` 分组，同组一次算完。
+    #    分组而**不做 padding**：padding 会改变 `log_softmax` 的归约长度，把 1e-5 容差撑破；
+    #    同 `n_cand` 的决策批在一起则归约长度不变，漂移与编码器批量化同量级（见函数 docstring）。
+    #    组序 = `sorted(groups)`（**确定**：同 seed 同结果，不依赖 dict 迭代序）；组内 = 原决策序。
+    groups: dict[tuple[str, int], list[int]] = {}
     for i, d in enumerate(decisions):
-        head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
-                "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
-                "C": policy.charge_logits_emb}[d.kind]
-        logits = head(emb[i:i + 1],
-                      torch.as_tensor(d.feat, dtype=torch.float32).reshape(1, 1, -1),
-                      torch.as_tensor(d.cand_feat, dtype=torch.float32),
-                      torch.as_tensor(d.tok_idx, dtype=torch.long))
-        lp = torch.log_softmax(logits.flatten(), -1)
-        out.append(lp[d.cand.index(d.action)])
-    return out
+        groups.setdefault((d.kind, len(d.cand)), []).append(i)
+    out: list[torch.Tensor | None] = [None] * len(decisions)
+    for kind, n_cand in sorted(groups):
+        idx = groups[(kind, n_cand)]
+        # 组键含 n_cand ⟹ 同组的 token 下标/特征/候选特征形状一致；不齐时
+        # `logits_emb_batch` 的 `emb[rows, tok_idx]` 当场报错，不静默。
+        tok_idx = torch.as_tensor(np.stack([decisions[i].tok_idx for i in idx]),
+                                  dtype=torch.long, device=policy.device)
+        feat = torch.as_tensor(np.stack([decisions[i].feat for i in idx]),
+                               dtype=torch.float32, device=policy.device)
+        cand = torch.as_tensor(np.stack([decisions[i].cand_feat for i in idx]),
+                               dtype=torch.float32, device=policy.device)
+        rows = torch.as_tensor(idx, dtype=torch.long, device=policy.device)
+        logits = policy.logits_emb_batch(
+            kind, emb.index_select(0, rows), tok_idx, feat, cand)   # (B', n_cand)
+        lp = torch.log_softmax(logits, dim=-1)
+        for b, i in enumerate(idx):
+            out[i] = lp[b, decisions[i].cand.index(decisions[i].action)]
+    if any(t is None for t in out):     # 分组是 decisions 下标的一个划分，漏项即实现错误
+        raise AssertionError("分组批量打分漏了决策——分组与下标不再是一一划分")
+    return [t for t in out if t is not None]
 
 
 def _sequential_float32_sum(terms) -> torch.Tensor:
@@ -689,8 +712,8 @@ def decisions_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor
     ⚠️ **2026-10-04 批量重算后，本函数与 `sampled_decisions_logp` 只在 1e-5 内一致、不再
     逐位相同**（旧断言是 `torch.equal`）：
     - 旧命题：重算与采样回放**逐位**相同（两者都是逐决策单条前向，同一串浮点运算）；
-    - 新命题：**≤1e-5 内相同**（重算改成一次 `(B,N,F)` 批前向，矩阵乘分块与单条不同，
-      本机实测 `max|Δlogp| = 2.4e-7`）；
+    - 新命题：**≤1e-5 内相同**（重算改成一次 `(B,N,F)` 批前向 + 打分头分组批，
+      矩阵乘分块与单条不同，本机实测 `max|Δlogp| = 3.58e-07`）；
     - 理由：编码器前向是耗时主项（本机实测单条 ≈6.0 ms；231 条批前向 ≈402 ms，吞吐 ~3.4×，
       重算整段从 9.31 ms/决策降到 2.31 ms/决策）。裁剪的 `ratio ≡ 1` 随之从严格等式降为
       "≈1 在 1e-5 内"，由 `test_per_decision_logp_vector_is_same_source_within_tolerance` 钉住。
@@ -739,8 +762,9 @@ def sampled_decisions_logp(decisions: list[Decision]) -> torch.Tensor:
     """**逐决策**回放采样那一刻的 logp：向量 `(n_decisions,)`，无梯度——裁剪路径的 `old`。
 
     ⚠️ 与 `decisions_logp` **同序、同 dtype**（float32），故"参数未变"时两者在 **1e-5 内**
-    相同——`ratio ≈ 1` 是**近似**成立（不再是严格等式：重算已改成 `(B,N,F)` 一次批前向，
-    每项有 ~2e-7 的末位漂移，见 `_decision_logp_terms` / `decisions_logp`）。别图省事改用
+    相同——`ratio ≈ 1` 是**近似**成立（不再是严格等式：重算已改成一次编码器批前向 +
+    打分头分组批，每项有 ~4e-7 以内的末位漂移，实测 `max|Δlogp| = 3.58e-07`，
+    见 `_decision_logp_terms` / `decisions_logp`）。别图省事改用
     float64：那会引入 ~1e-5 的假 delta（实测 1.0000114），在裁剪边界上给出无意义的翻转。
     ⚠️ 值在 `roll_chain` 采样时就已算好（`Decision.logp`），本函数没有可省的前向。
     """
@@ -821,17 +845,20 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     ratio_uses_sampling_time_logp` 的 `lr=0` 判据测的就是这个恒等性）。故此处显式**拒收**
     "epochs=1 + clip_eps"这个组合，
     ⚠️ `ratio` 不再是**精确** 1，因为 `old` 是采样时逐决策算的、`new` 是事后 `(B,N,F)` 一次批
-    前向算的——末位漂移约 2e-7（2026-10-04 批量重算批次，见 `_decision_logp_terms`）；
+    前向算的——末位漂移约 3.6e-07（2026-10-04 两批：编码器批 + 打分头批，
+    见 `_decision_logp_terms`）；
     判据容差 1e-5。
     并在 `epochs=1` 时**连 `old` 都不算**——省掉一整遍链前向；`epochs>1` 时 `old` 直接取
     `Decision.logp`（采样那一刻已存，`sampled_decisions_logp` **逐决策**回放），**不额外重算**。
 
     ⚠️ **重算的批量口径**（2026-10-04）：两条路径都**一次**编码器前向覆盖 **G 条链的全部
     决策**——无裁剪路径用 `chains_logp`（返回 `(G,)`，链内仍逐步 float32 顺序累加），
-    裁剪路径用 `all_decisions_logp`（返回展平的 `(Σn_g,)`）。**打分头不批**：候选数逐决策
-    不同（机台 / 车 / k 条路径 / 2 个动作码 / 桩数+1），批它们要 padding+masking，而头只是
-    两层 MLP——实测（MK01、231 个决策）编码器批前向 402 ms、全部 231 次头调用合计 45 ms
-    （≈11%），且批头会改变 `log_softmax` 的归约长度、把 1e-5 的漂移带撑大。故头保持逐决策。
+    裁剪路径用 `all_decisions_logp`（返回展平的 `(Σn_g,)`）。**打分头也按 `(kind, n_cand)`
+    分组批量**（追加批次，见 `_decision_logp_terms`）：上一批曾以"头只是两层 MLP、批头要
+    padding 且会撑大漂移"为由保持逐决策；CUDA 实测推翻了这条——1920 次头调用（960 在线 +
+    960 重算）占整步 35%，且反向要穿 960 张各自独立的头小图（反向 0.568 s ÷ 重算前向
+    0.024 s = 24 倍，正常应 ~2 倍）。**不做 padding**：同 `(kind, n_cand)` 成组，`log_softmax`
+    的归约长度不变，漂移仍在 1e-5 内（实测见 `docs/progress-log.md` §37）。
 
     ⚠️ **`route_k`（R 层开关，2026-10-04 恢复路线头）**：默认 `1` = 关闭，链与训练步
     **逐位等于今日**（既有读数全靠它）；传 `2` 启用——每次行驶在 2 条候选路径里由策略选，

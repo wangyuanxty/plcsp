@@ -238,8 +238,9 @@ def test_route_decisions_join_the_chain_and_its_logp():
     vec = decisions_logp(dec, pol).detach()
     assert vec.shape == (len(dec),), f"逐决策 logp 未覆盖 R：{tuple(vec.shape)}"
     old = sampled_decisions_logp(dec)
-    # ⚠️ 同源口径（2026-10-04 批量重算批次）：重算改成 (B,N,F) 一次批前向 ⟹ 与采样回放
-    # 只在末位漂移内一致（实测 R 链 max|Δ| ≈ 2.4e-7），不再逐位相同。见 test_joint_chain 的
+    # ⚠️ 同源口径（2026-10-04 批量重算 + 打分头批量两批）：重算改成一次编码器批前向 +
+    # 打分头分组批 ⟹ 与采样回放只在末位漂移内一致（实测 R 链 max|Δ| = 3.58e-07），
+    # 不再逐位相同。见 test_joint_chain 的
     # `test_per_decision_logp_vector_is_same_source_within_tolerance`（旧断言是逐位相等）。
     assert torch.allclose(vec, old, atol=1e-5), \
         "含 R 后逐决策 logp 的采样回放与重算漂开超过 1e-5（批路径算错了？）"

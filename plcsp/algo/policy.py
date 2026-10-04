@@ -34,6 +34,12 @@ def v_token_index(seg: tuple[int, int, int, int]) -> list[int]:
     return list(range(n_m + n_b, n_m + n_b + n_v))
 
 
+# kind → 打分头**模块**属性名——批量打分入口 `logits_emb_batch` 用（逐决策入口经
+# `*_logits_emb` 方法，两处指向同一批参数）。新增头时两处都改，不得只改一处。
+HEAD_ATTRS = {"S": "s_head_tok", "L": "l_head_tok", "R": "r_head_tok",
+              "M": "pm_head_tok", "C": "c_head_tok"}
+
+
 def _to_dev(t: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
     """把打分输入搬到 `like`（token 嵌入）所在设备——五个头共用的**唯一搬运点**。
 
@@ -242,3 +248,25 @@ class PolicyNet(nn.Module):
         fa = _to_dev(feat_agv.expand(1, tok_c.shape[0], -1)[0], tok)   # (m, F_dec)
         cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (m, F_cand)
         return self.c_head_tok(torch.cat([tok_c, fa, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
+
+    def logits_emb_batch(self, kind: str, emb: torch.Tensor, tok_idx: torch.Tensor,
+                         feat_dec: torch.Tensor, feat_cand: torch.Tensor) -> torch.Tensor:
+        """(B,N,d) × (B,n_cand) × (B,F_dec) × (B,n_cand,F_cand) → (B,n_cand) 批量候选分数。
+
+        **重算路径的批量打分入口**（2026-10-04 打分头批次，`group_rel._decision_logp_terms`）：
+        把**同一个头**上候选数相同的一组决策一次算完。第 b 行的算式与逐决策的 `*_logits_emb`
+        **逐位同构**——`cat([emb[b, tok_idx[b]], feat_dec[b] 广播, feat_cand[b]], -1)` → 同一串
+        MLP 权重；`tok_idx` 的语义（S = 机台号即序列位置；L = 车号经 `v_token_index` 映射的 V
+        段下标并广播给候选；R = 本车 V token 广播 k 份；M = 该机台 M token 广播 2 份；
+        C = 本车 V token 广播 m 份）**一位不改**，逐决策记录什么就按什么批量回放。
+        ⚠️ 批维**不改归约长度**：同组 `n_cand` 相同，`log_softmax` 仍只在 `n_cand` 上做，故与
+        逐决策路径的差只在矩阵乘分块的末位（1e-5 容差口径，同编码器批量化）。
+        ⚠️ 调用方负责**分组**（组键 = `(kind, n_cand)`）：n_cand 不齐时 `emb[rows, tok_idx]`
+        当场报错，不静默。
+        """
+        head = getattr(self, HEAD_ATTRS[kind])
+        rows = torch.arange(emb.shape[0], device=emb.device)
+        tok_c = emb[rows[:, None], _to_dev(tok_idx, emb).long()]        # (B, n_cand, d)
+        fd = _to_dev(feat_dec, emb).unsqueeze(1).expand(-1, tok_c.shape[1], -1)
+        cand = _to_dev(feat_cand, emb)
+        return head(torch.cat([tok_c, fd, cand], dim=-1)).squeeze(-1)   # (B, n_cand)
