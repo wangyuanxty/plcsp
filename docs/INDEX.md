@@ -24,6 +24,7 @@
 | `literature-landscape-2026.md` | **2026 风向标**（六条热点 / 必读论文 / 我方位置对照） | 选题定位 |
 | `literature-plcsp-drl.md` | **PLCSP+DRL 全量清单**（核心 40 + 弱相关 24 + 缺口 19 篇 P0–P3 分级） | 找对位/找缺口 |
 | `citation-cards.md` | **精读事实卡**（含公式、数字、自认局限、与我方逐点对比） | 写 related work / 找 gap |
+| **`method-transfer-candidates.md`** | **可迁移的方法**：按我方**缺口**排的"缺口 → 顶会方法族 → 域内已有几篇 → 我方接口"表；**引证全部标待核** | 选题 / 方法选型 |
 | `progress-log.md` | 实验数字、bug 清单、负例、**开放线索 A–K**、术语纪律 | 断点续接 |
 | `references/` | 103 篇 PDF | 精读 |
 
@@ -50,8 +51,11 @@
 ## 5. 待办与阻塞
 
 > ⭐ **续接点（compact 后从这读）：`progress-log.md` §35**（§35.5 的"下一步"已被 §36 取代）
-> ⭐ **训练时间：三段成本实测 + CUDA 图 + 打分头批量 + 仿真侧微优化（最新）：`progress-log.md` §38**
+> ⭐ **训练时间：三段成本实测 + CUDA 图 + 打分头批量 + 仿真侧微优化：`progress-log.md` §38**
 > （前置依次是 §36 → §37）
+> ⭐ **链级并行（§39）+ worker 设备档（最新）：`progress-log.md` §40**
+> —— worker 也能跑 CUDA（`worker_device="cuda"`，默认 cpu）。**实测：w=1/2 快、w=8 反而更慢
+> （单卡被 8 个 worker 抢）；整步 0.877 → 0.65 s 的目标未达成**，默认档逐位不变。
 
 
 > ✅ **2026-10-04：Plan A 恢复推进**（本仓即 Plan A）。
