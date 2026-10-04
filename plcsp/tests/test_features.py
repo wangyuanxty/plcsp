@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import plcsp.env.des as des_mod
 from plcsp.algo.group_rel import setup_flag
 from plcsp.algo.setup import build_ctx_for_unit_test, build_layout_and_dm
 from plcsp.env.constraints import ConstraintConfig
@@ -43,11 +44,16 @@ def _backlog_snap(inst, backlog_min):
 
 @pytest.mark.unit
 def test_field_counts_match_declared_widths():
-    """⚠️ Review Focus #2：字段名清单与声明宽度必须逐段相等——防静默错位。"""
+    """⚠️ Review Focus #2：字段名清单与声明宽度必须逐段相等——防静默错位。
+
+    ⚠️ 2026-10-04：① 拥堵 +1（V 段 `zone_wait`）、④ 返工 +1（B 段 `rework_cnt`）
+    ⟹ F_B 8→9、F_V 10→11、F_MAX 10→11。末位追加，既有列序不动。
+    """
     assert len(FEATURE_NAMES["M"]) == F_M == 7
-    assert len(FEATURE_NAMES["B"]) == F_B == 8
-    assert len(FEATURE_NAMES["V"]) == F_V == 10
+    assert len(FEATURE_NAMES["B"]) == F_B == 9
+    assert len(FEATURE_NAMES["V"]) == F_V == 11
     assert len(FEATURE_NAMES["G"]) == F_G == 3
+    assert F_MAX == 11, "F_MAX 应由四段最大值推出——加维后忘了跟？"
 
 
 @pytest.mark.unit
@@ -148,10 +154,11 @@ def test_feature_order_matches_feature_names():
                   ) * ctx.n_m,
         jobs=(JobState(done_ops=1, total_ops=4, remaining_min=0.35 * ctx.total_work_min,
                        finished=False, due=2.0 * ctx.m_ref,
-                       at_machine=1, in_transit=True, on_agv=2),
+                       at_machine=1, in_transit=True, on_agv=2, rework_cnt=2),
               ) * ctx.n_jobs,
         vehicles=(VehicleState(status=2, node=node, queued=1, battery_frac=0.7,
-                               capacity=min(2, ctx.max_capacity), speed_factor=1.1),
+                               capacity=min(2, ctx.max_capacity), speed_factor=1.1,
+                               zone_wait=3.0),
                   ) * ctx.n_agv,
         n_done=3, in_flight=2)
 
@@ -163,13 +170,15 @@ def test_feature_order_matches_feature_names():
         ("B", job_features(snap, ctx)[0], {
             "progress": 1 / 4, "remaining_work": 0.35, "due_margin": 0.5, "finished": 0.0,
             "at_machine": 1 / max(ctx.n_m, 1), "in_transit": 1.0,
-            "on_agv": 2 / max(ctx.n_agv, 1), "weight": 1.0}),
+            "on_agv": 2 / max(ctx.n_agv, 1), "weight": 1.0,
+            "rework_cnt": 2 / 4.0}),
         ("V", vehicle_features(snap, ctx)[0], {
             "st_idle": 0.0, "st_empty": 0.0, "st_loaded": 1.0, "st_down": 0.0,
             "node_x": nx / ctx.bbox_diag, "node_y": ny / ctx.bbox_diag,
             "queued": 1 / max(ctx.max_queued, 1), "battery": 0.7,
             "capacity": min(2, ctx.max_capacity) / max(ctx.max_capacity, 1),
-            "speed_factor": 1.1}),
+            "speed_factor": 1.1,
+            "zone_wait": 3.0 / max(ctx.zone_wait_limit, 1e-9)}),
         ("G", global_features(snap, ctx)[0], {
             "time_progress": 1.5, "done_frac": 3 / max(ctx.n_jobs, 1),
             "in_flight": 2 / max(ctx.max_queued, 1)}),
@@ -268,7 +277,7 @@ def test_due_margin_distinguishes_jobs():
     due = tf_rdd_due_dates(inst, tau=2.5, due_range=0.8)
     assert len(set(round(v, 6) for v in due.values())) > 1, "前提不成立：交期还是共同交期"
     jobs = [JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
-                     due=due[j], at_machine=-1, in_transit=True, on_agv=0)
+                     due=due[j], at_machine=-1, in_transit=True, on_agv=0, rework_cnt=0)
             for j in range(inst.n_jobs)]
     snap = _snap(now=1.0 * m_ref, jobs=jobs)
     col = job_features(snap, ctx)[:, 2]
@@ -318,7 +327,7 @@ def test_due_margin_feature_is_silent_when_due_dates_off():
     # ⚠️ ⑧ 重设计后 `SimConfig().tau` 是 None（覆盖开关）——此处要的是"一个非零交期"，直接用
     # 标定值量级的具体数（本测试随后显式关掉 ⑧，交期数值本身不参与断言）。
     job = JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
-                   due=2.5 * m_ref, at_machine=-1, in_transit=True, on_agv=0)
+                   due=2.5 * m_ref, at_machine=-1, in_transit=True, on_agv=0, rework_cnt=0)
     snap = _snap(now=0.5 * m_ref, jobs=(job,) * inst.n_jobs)
     full = ConstraintConfig()
     off = full.with_off("due_dates")
@@ -327,3 +336,148 @@ def test_due_margin_feature_is_silent_when_due_dates_off():
     assert col(full).max() > 0.0, "全开档 due_margin 维恒 0——判据失去意义"
     assert np.all(col(off) == 0.0), (
         f"⑧ 关时 due_margin 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
+
+
+# ══ ① 拥堵（zone_wait）与 ④ 返工（rework_cnt）：静默 + 活性 ══════════════════
+# 两类判据成对：**关掉恒 0**（R1c/R1d，不得留假信号）且**开着真动**（不得是死维）。
+# 前者防"约束关掉的假信号"，后者防"维恒零的假特征"——本仓把两者都当缺陷。
+
+
+@pytest.mark.unit
+def test_zone_wait_feature_is_silent_when_congestion_off():
+    """⚠️ R1c（R1a/R1b 同型残留）：① 关闭时 `zone_wait` 维必须恒 0——不得留"在等区段"的假信号。
+
+    仿真侧：① 关时 `_drive` 根本不申请区段（直行分支），等待状态永不存在；特征侧仍须读
+    `ctx.constraints.congestion` 静默——快照里带着值也**不得**外泄给策略。
+    判据双向：全开档必须非零（否则"关时恒 0"恒真、抓不住任何东西），关掉档必须全 0。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, _dm = build_layout_and_dm(inst, cfg)
+    v = VehicleState(status=1, node=0, queued=0, battery_frac=0.5, capacity=1,
+                     speed_factor=1.0, zone_wait=4.0)
+    snap = _snap(vehicles=(v,) * SimConfig().n_agv)
+    full = ConstraintConfig()
+    off = full.with_off("congestion")
+    col = lambda cons: vehicle_features(                                    # noqa: E731
+        snap, build_ctx_for_unit_test(inst, lay, constraints=cons))[:, 10]
+    assert col(full).max() > 0.0, "全开档 zone_wait 维恒 0——判据失去意义"
+    assert np.all(col(off) == 0.0), (
+        f"① 关时 zone_wait 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
+
+
+@pytest.mark.unit
+def test_rework_cnt_feature_is_silent_when_rework_off():
+    """⚠️ R1d（R1a/R1b 同型残留）：④ 关闭时 `rework_cnt` 维必须恒 0——不得留"返过工"的假信号。
+
+    仿真侧：④ 关时 `MachineSim.run` 的重做环一次不进（`rework_events` 恒 0）、逐作业计数恒 0；
+    特征侧仍须读 `ctx.constraints.rework` 静默——快照里带着值也不得外泄。
+    判据双向：全开档必须非零，关掉档必须全 0。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay, _dm = build_layout_and_dm(inst, cfg)
+    m_ref = 100.0
+    job = JobState(done_ops=0, total_ops=4, remaining_min=0.4 * m_ref, finished=False,
+                   due=0.0, at_machine=-1, in_transit=False, on_agv=-1, rework_cnt=2)
+    snap = _snap(jobs=(job,) * inst.n_jobs)
+    full = ConstraintConfig()
+    off = full.with_off("rework")
+    col = lambda cons: job_features(                                        # noqa: E731
+        snap, build_ctx_for_unit_test(inst, lay, m_ref, constraints=cons))[:, 8]
+    assert col(full).max() > 0.0, "全开档 rework_cnt 维恒 0——判据失去意义"
+    assert np.all(col(off) == 0.0), (
+        f"④ 关时 rework_cnt 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
+
+
+def _spy_zone_waits(monkeypatch, rec: list, w, ctx) -> None:
+    """观察每一次区段等待的**解除瞬间**（测试专用，不新增仿真事件、不扰动轨迹）。
+
+    ⚠️ 采样点有两个：① 内层生成器刚让出（等待刚登记，值应为 0）；② `yield` 恢复的**那一瞬**
+    ——此刻 `pending` 尚未清、`env.now` 已是获准/超时时刻，故快照里的 `zone_wait` 正是这次
+    等待的时长。等 `wait_zone` 返回后再取就恒为 0（车已不在等待）。
+    ⚠️ 恢复瞬间的采样必须放在**再次 `gen.send` 之前**：`send` 会把内层生成器一路跑完并清状态，
+    放在它后面就再也取不到非零值（探针会静默退化成"只采到 0"，本测试第一版就踩了这个坑）。
+    ⚠️ 与 `test_snapshot._spy_agv` 同法：必须**透明转发 send 值**，不得把事件值吞成 None。
+    `w.zm is self` 滤掉嵌套 episode——交期要跑参考调度，那是另一个 world。
+    """
+    orig = des_mod.ZoneManager.wait_zone
+
+    def spy(self, agv, z, limit=None):
+        gen, sent, yielded = orig(self, agv, z, limit), None, False
+
+        def sample() -> None:
+            if w.zm is self:
+                snap = w.snapshot()
+                rec.append((float(self.env.now), int(agv),
+                            float(snap.vehicles[agv].zone_wait),
+                            float(vehicle_features(snap, ctx)[agv, 10])))
+
+        while True:
+            if yielded:                        # 恢复瞬间：等待已结束、状态尚未清
+                sample()
+            try:
+                ev = gen.send(sent)
+            except StopIteration as stop:
+                return stop.value
+            yielded = True
+            sample()                           # 刚让出：等待刚登记（值 = 0）
+            sent = yield ev
+
+    monkeypatch.setattr(des_mod.ZoneManager, "wait_zone", spy)
+
+
+@pytest.mark.unit
+def test_zone_wait_feature_is_live_in_contended_run(monkeypatch):
+    """① 开 + 强争用：`zone_wait` 维必须真的出现非零、且随等待时长变化（**不得是死维**）。
+
+    场景：`zone_granularity="row"`（整行一个区段，争用强）+ 2 min 等待上限。探针在每次等待
+    解除的瞬间取快照与特征列（见 `_spy_zone_waits`），逐样本核对归一化口径。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig(zone_granularity="row", zone_wait_limit=2.0)
+    lay, dm = build_layout_and_dm(inst, cfg)
+    w = SimWorld(inst, lay, dm, cfg)
+    ctx = build_ctx_for_unit_test(inst, lay, cfg=cfg)
+    rec: list = []
+    _spy_zone_waits(monkeypatch, rec, w, ctx)
+    r = w.run(seed_chain=0)
+    assert not r["horizon_hit"], "掐表了——本判据的前提（跑完）不成立"
+    assert r["zone_wait"]["n"] > 0, "该配置没逼出区段等待——判据失去意义"
+    assert rec, "探针没夹到等待样本（观察失效）"
+    waits = [x[2] for x in rec]
+    cols = [x[3] for x in rec]
+    assert max(waits) > 0.0, "快照的 zone_wait 恒 0——没接上 ZoneManager 的等待状态"
+    assert max(cols) > 0.0, "① 开且确有等待时 zone_wait 维恒 0——死维"
+    assert len({round(c, 6) for c in cols}) > 1, "zone_wait 维不随等待时长变化——无区分度"
+    for (ts, _agv, waited, col) in rec:
+        assert col == pytest.approx(min(waited / cfg.zone_wait_limit, 1.0), abs=1e-6), (
+            f"t={ts}: 快照 zone_wait={waited} → 特征 {col} 与 "
+            f"zone_wait_limit={cfg.zone_wait_limit} 口径不符")
+
+
+@pytest.mark.unit
+def test_rework_cnt_tracks_simulation_rework_events():
+    """④ 开 + 高返工率：`JobState.rework_cnt` 必须真的计数（**不得是死维**）。
+
+    ⚠️ `p_rework=0.6` 而非 1.0——返工是 `while rng.random() < p` 的重做环，p=1 会**死循环**。
+    判据：① 逐作业计数之和 == 仿真 `rework_events`（同一分支里一起 ++，口径最硬）；
+    ② 特征第 8 维非零且逐作业不同（归一化后仍有区分度）。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig(p_rework=0.6)
+    lay, dm = build_layout_and_dm(inst, cfg)
+    w = SimWorld(inst, lay, dm, cfg)
+    r = w.run(seed_chain=1)
+    assert r["rework_events"] > 0, "该配置没逼出返工——判据失去意义"
+    snap = w.snapshot()
+    cnt = [js.rework_cnt for js in snap.jobs]
+    assert sum(cnt) == r["rework_events"], (
+        f"逐作业返工计数之和 {sum(cnt)} ≠ 仿真事件数 {r['rework_events']}——"
+        "快照没接上 ④ 的计数")
+    assert max(cnt) > 0, "④ 开且确有返工事件，但快照的 rework_cnt 全 0"
+    ctx = build_ctx_for_unit_test(inst, lay, cfg=cfg)
+    col = job_features(snap, ctx)[:, 8]
+    assert col.max() > 0.0, "④ 开且确有返工时 rework_cnt 维恒 0——死维"
+    assert len({round(v, 6) for v in col.tolist()}) > 1, \
+        "rework_cnt 对所有作业同值——无区分度（退化成常数维）"

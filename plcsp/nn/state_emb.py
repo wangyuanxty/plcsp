@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """快照 + 实例 + 布局 → 编码器输入（spec §5.3.1）。
 
-四段宽度不同（F_M=7 / F_B=8 / F_V=10 / F_G=3），故各自算完后**补齐到 `F_MAX` 后按序列
+四段宽度不同（F_M=7 / F_B=9 / F_V=11 / F_G=3），故各自算完后**补齐到 `F_MAX` 后按序列
 拼成单张 `(N, F_MAX)`**（spec §5.3.1），并给出 `seg` 标出各段行数。
 """
 from __future__ import annotations
@@ -45,12 +45,16 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_jobs, 8)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。
+    """(n_jobs, 9)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。
 
     ⚠️ **第 2 维（due_margin）在 ⑧ `due_dates` 关闭时恒 0**（R1b，F2 同型残留）：⑧ 关意味着
     该实例**无交期**（`_due_map` 返回 `{}`，快照 `due` 落 0.0 哨兵）；照读哨兵会得到
     `(0 − now)/M_ref`（不是 0，长 episode 饱和到 −2），等于报出一个不存在的交期紧迫度。
     恒 0 = "无交期信息"；维宽/列序不随配置变。
+
+    ⚠️ **第 8 维（rework_cnt）在 ④ `rework` 关闭时恒 0**（R1d，同型）：④ 关时仿真一次重做环
+    都不进（逐作业计数恒 0），但特征仍**显式读开关**静默——快照里带值也不得外泄。归一化除以
+    本作业工序数（`total_ops`）：返工是"同一道工序重做"，以工序数为分母即"平均每道工序返工几次"。
     """
     out = np.zeros((ctx.n_jobs, F_B), dtype=np.float32)
     for j, js in enumerate(snap.jobs):
@@ -69,12 +73,19 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             1.0 if js.in_transit else 0.0,                          # 5 in_transit
             _safe(js.on_agv / max(ctx.n_agv, 1), -1.0, 1.0),        # 6 on_agv
             1.0,                                                    # 7 weight（等权，见 §5.3.1）
+            (_safe(js.rework_cnt / max(js.total_ops, 1), 0.0, 1.0)
+             if ctx.constraints.rework else 0.0),                   # 8 rework_cnt（④ 关恒 0）
         )
     return out
 
 
 def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_agv, 10)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。"""
+    """(n_agv, 11)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。
+
+    ⚠️ **第 10 维（zone_wait）在 ① `congestion` 关闭时恒 0**（R1c，同型）：① 关时 `_drive`
+    根本不申请区段（等待状态永不存在），但特征仍**显式读开关**静默——快照里带值也不得外泄。
+    归一化除以 `ctx.zone_wait_limit`（= 跑仿真那份 `SimConfig` 的等待上限，同 F3 的同源要求）。
+    """
     out = np.zeros((ctx.n_agv, F_V), dtype=np.float32)
     for a, v in enumerate(snap.vehicles):
         st = [0.0] * 4
@@ -95,7 +106,9 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
                   _safe(v.queued / max(ctx.max_queued, 1), 0.0, 1.0),   # 6 queued
                   _safe(v.battery_frac, 0.0, 1.0),                   # 7 battery
                   v.capacity / max(ctx.max_capacity, 1),             # 8 capacity
-                  _safe(v.speed_factor, 0.0, 2.0))                   # 9 speed_factor
+                  _safe(v.speed_factor, 0.0, 2.0),                   # 9 speed_factor
+                  (_safe(v.zone_wait / max(ctx.zone_wait_limit, 1e-9), 0.0, 1.0)
+                   if ctx.constraints.congestion else 0.0))          # 10 zone_wait（① 关恒 0）
     return out
 
 
@@ -113,7 +126,7 @@ def build_tok(snap: Snapshot, inst: Instance, layout: Layout,
     """快照 → **单张** `(N, F_MAX)` 特征张量 + `seg`（spec §5.3.1）。
 
     四段各自算完后按 `SEG_SLICE` 填进对应行，**列不足处保持 0**（补零）。
-    故 `tok[:n_m, 7:]`、`tok[n_m:n_m+n_jobs, 8:]`、`tok[-1, 3:]` 恒为 0。
+    故 `tok[:n_m, F_M:]`、`tok[n_m:n_m+n_jobs, F_B:]`、`tok[-1, F_G:]` 恒为 0。
 
     ⚠️ `seg` 由**各段实际行数**推出，**不硬编码实例规模**（Review Focus #2）。
     """

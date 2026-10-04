@@ -117,9 +117,10 @@ class SimTrack:
 
     机台/车辆的"作业进行到哪一步"只有运行流自己知道（SimPy 对象里查不出来），故单列一袋。
     `MachineSim` / `AgvSim` 只拿这个袋子（不持 `SimWorld` 引用，避免环）；
-    `SimWorld` 把五个列表同时挂成 `_job_progress` 等属性，快照代码直接读属性。
+    `SimWorld` 把各跟踪列表同时挂成 `_job_progress` 等属性，快照代码直接读属性。
     """
-    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded", "agv_load_n")
+    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded", "agv_load_n",
+                 "job_rework")
 
     def __init__(self, n_jobs: int, n_machines: int, n_agv: int) -> None:
         self.job_progress = [0] * n_jobs                      # 已完成工序数
@@ -129,6 +130,9 @@ class SimTrack:
         self.cur_op: list[tuple[int, float, float] | None] = [None] * n_machines
         self.agv_loaded = [False] * n_agv                     # 车上是否载货（状态 2 的判据）
         self.agv_load_n = [0] * n_agv                         # 车上**在运件数**（in_flight 的"车上"部分）
+        # ④ 返工：逐作业的**累计**重做次数（`MachineSim.run` 的重做环里 ++，与
+        # `stats["rework_events"]` 同一分支）。⚠️ 只增不减——快照要的是"至今返了几次"。
+        self.job_rework = [0] * n_jobs
 
     def set_load(self, aid: int, n: int) -> None:
         """一趟批次的**装上**（`n = len(batch)`）或**卸下**（`n = 0`）。
@@ -307,6 +311,9 @@ class MachineSim:
                 yield from self._process(job, op)
                 if self.con.rework and self.rng.random() < self.cfg.p_rework:
                     self.stats["rework_events"] += 1
+                    # 快照跟踪（①/④ 特征）：逐作业计数与全局事件数**同分支 ++**，
+                    # 故 `Σ job_rework == stats["rework_events"]` 恒成立（有测试钉）。
+                    self.track.job_rework[job] += 1
                     continue
                 break
             # 快照跟踪（P2 Task 1）：工序加工完毕（返工不算进度）→ 清在制、推进度
@@ -394,6 +401,9 @@ class ZoneManager:
         self.env, self.wait_limit, self.zone_of, self.n = env, wait_limit, zone_of, n_zones
         self.holder: dict[int, int | None] = dict.fromkeys(range(n_zones))
         self.pending: dict[int, int] = {}
+        # AGV → **本次**等待的申请时刻 [min]。与 `pending` **同处增删**：只描述"此刻还在等"，
+        # 一放行/超时就清（`current_wait` 的口径；累计史在 `waits`，两者不可混用）。
+        self.pending_since: dict[int, float] = {}
         self._ev: dict[int, simpy.Event] = {}
         self.waits: list[float] = []      # 区段等待时长 [min]——拥堵的唯一度量
 
@@ -422,6 +432,15 @@ class ZoneManager:
         self.holder[z] = agv
         return True
 
+    def current_wait(self, agv: int) -> float:
+        """本车**此刻**等待区段的时长 [min]；不在等待 = 0.0（特征层 `zone_wait` 维的唯一原料）。
+
+        ⚠️ 与 `waits`（**完成后**追加的累计史）不同：这是"当前还在等多久"，放行/超时即清零
+        （`pending_since` 与 `pending` 同处增删）。读累计史会把"等过"报成"还在等"（假信号）。
+        """
+        t0 = self.pending_since.get(agv)
+        return 0.0 if t0 is None else max(0.0, float(self.env.now) - t0)
+
     def wait_zone(self, agv: int, z: int, limit: float | None = None):
         if self.try_grant(agv, z):
             return True, False
@@ -429,10 +448,12 @@ class ZoneManager:
             return False, True
         self.pending[agv] = z
         t0 = self.env.now
+        self.pending_since[agv] = t0
         ev = self._ev.setdefault(z, simpy.Event(self.env))
         yield ev | self.env.timeout(limit or self.wait_limit)
         self.waits.append(self.env.now - t0)
         self.pending.pop(agv, None)
+        self.pending_since.pop(agv, None)
         if self.try_grant(agv, z):
             return True, False
         return False, False
@@ -445,6 +466,7 @@ class ZoneManager:
                 ev.succeed()
             self._ev[z] = simpy.Event(self.env)
         self.pending.pop(agv, None)
+        self.pending_since.pop(agv, None)
 
 
 class AgvSim:
@@ -784,9 +806,11 @@ class SimWorld:
         self.lu = lu
         self.tasks_in = tasks_in
         self.track = track
+        self.zm = zm                        # ① 拥堵：`snapshot()` 取**每车当前**区段等待时长
         self._job_progress = track.job_progress
         self._job_loc = track.job_loc
         self._job_agv = track.job_agv
+        self._job_rework = track.job_rework  # ④ 返工：逐作业累计（`snapshot()` 只读）
         self._cur_op = track.cur_op
         self._agv_loaded = track.agv_loaded
         self._agv_load_n = track.agv_load_n
@@ -877,7 +901,9 @@ class SimWorld:
         让它触底为 0，而工件实际还在机台上）。`JobState.remaining_min` 同理，是剩余各工序的
         **标称**最短候选工时之和。`JobState.due` = ⑧ 的交期（与 `run()` 同口径的 `_due_map`；
         约束关闭或参考运行内为 0.0）。`in_flight` = **队列里待取** + **车上在运**（两种队列形状
-        都算，见下）。
+        都算，见下）。另外两个约束量：`JobState.rework_cnt` = 该作业**累计**返工次数（与
+        `stats["rework_events"]` 同分支 ++）；`VehicleState.zone_wait` = 该车**当前**区段等待
+        时长（`ZoneManager.current_wait`，不在等待 = 0.0，放行即清零）。
         """
         from .snapshot import JobState, MachineState, Snapshot, VehicleState
         ms = []
@@ -903,7 +929,8 @@ class SimWorld:
                 remaining_min=float(sum(min(t for _m, t in op) for op in job_ops[done:])),
                 finished=done >= len(job_ops), due=float(due.get(j, 0.0)),
                 at_machine=int(self._job_loc[j]),
-                in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j])))
+                in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j]),
+                rework_cnt=int(self._job_rework[j])))
         vs = []
         for a, agv in enumerate(self.agvs):
             vs.append(VehicleState(
@@ -912,7 +939,8 @@ class SimWorld:
                 node=int(agv.pos_node if agv.pos_node is not None else -1),
                 queued=len(self.tasks_in[a].items) if agv.bound else 0,
                 battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9)),
-                capacity=int(agv.capacity), speed_factor=float(agv.speed / self.cfg.agv_speed_mps)))
+                capacity=int(agv.capacity), speed_factor=float(agv.speed / self.cfg.agv_speed_mps),
+                zone_wait=float(self.zm.current_wait(a))))
         # 在途 = **队列里待取** + **车上在运**。队列有两种形状（绑定=每车一 Store，
         # FIFO=单个共享 Store）——只看 `agv.bound` 那种形状会让 FIFO 路径恒为 0（F5）；
         # 车上那部分必须单独数，因为已装车的批次**已经离开队列**。

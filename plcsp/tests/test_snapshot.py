@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import pytest
+import simpy
 
 import plcsp.env.des as des_mod
-from plcsp.env.des import SimWorld, SimConfig
+from plcsp.env.des import SimWorld, SimConfig, ZoneManager
 from plcsp.env.instances import load_mk
 from plcsp.env.layout import sample_layout
 from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
@@ -254,3 +255,37 @@ def test_in_flight_counts_onboard_batch_in_bound_path(monkeypatch):
     assert any(n > 0 for (_t, _f, n) in rows), "车上从没装过货，断言没被真正验证"
     bad = [(t, f, n) for (t, f, n) in rows if f < n]
     assert not bad, f"in_flight 漏计车上批次（in_flight < 在运件数）：{bad[:3]}"
+
+
+@pytest.mark.unit
+def test_zone_manager_current_wait_is_per_vehicle():
+    """① 拥堵：`ZoneManager.current_wait` 必须给**每台车**的当前等待时长——新特征维的唯一原料。
+
+    形态（车 0 持区段直行、车 1 排队等同一区段）：
+    - 未申请的车恒 0；持区段行驶的车**不在等待**，也恒 0（不得把"在车里"当成"在等"）；
+    - 等待中恰为 `now − 申请时刻`（t=5 → 5.0）；
+    - 放行后**清零**（t=10 放行，t=11 采样 = 0）——残留值会把"等过"误报成"还在等"。
+    """
+    env = simpy.Environment()
+    zm = ZoneManager(env, {0: 0}, 1, wait_limit=100.0)
+    assert zm.try_grant(0, 0), "前提：车 0 应先拿到唯一的区段"
+    assert zm.current_wait(0) == 0.0 and zm.current_wait(1) == 0.0, "未申请前应恒 0"
+
+    def waiter():
+        yield from zm.wait_zone(1, 0)
+
+    def releaser():
+        yield env.timeout(10.0)
+        zm.release(0, 0)                       # 放行 → 等待进程在同刻稍后恢复
+
+    def sampler():
+        yield env.timeout(5.0)
+        assert zm.current_wait(1) == pytest.approx(5.0), "等待中的车没记到当前等待时长"
+        assert zm.current_wait(0) == 0.0, "持区段行驶的车被误记为在等待"
+        yield env.timeout(6.0)                 # t=11：放行（t=10）且等待进程已恢复
+        assert zm.current_wait(1) == 0.0, "放行后等待时长没清零——会给特征留残余假信号"
+
+    env.process(waiter())
+    env.process(releaser())
+    env.process(sampler())
+    env.run()

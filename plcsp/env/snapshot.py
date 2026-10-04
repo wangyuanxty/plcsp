@@ -53,6 +53,10 @@ class JobState:
     # 退回队列即清零，故**与重试史相关**——同为"在车里排队"的物理状态，经历过退回的
     # 取 `in_transit=False`，未经历过的（transporter 已派车、还没发车的）取 `True`。
     on_agv: int
+    # ④ 返工：本作业**至今**被原地重做的次数（`des.py` 的重做环逐次 ++；返工不算进度）。
+    # ④ 关闭时恒 0。归一化在特征层（除以本作业工序数，见 `nn/state_emb.job_features`）——
+    # 仿真只计数，标度归特征层。
+    rework_cnt: int
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,10 @@ class VehicleState:
     battery_frac: float     # [0,1]
     capacity: int
     speed_factor: float
+    # ① 拥堵：本车**此刻**等待区段的时长 [min]（不在等待 = 0.0）。① 关闭时恒 0。
+    # ⚠️ 是"当前等了多久"，**不是**"累计等过多久"——放行即清零（`ZoneManager.current_wait`
+    # 的口径）；残留值会把"等过"误报成"还在等"。归一化除以 `SimConfig.zone_wait_limit`。
+    zone_wait: float
 
 
 @dataclass(frozen=True)

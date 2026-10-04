@@ -10,7 +10,7 @@ import torch as _torch
 
 # ⚠️ **torch 线程数钉成 1**——放在包入口，任何 `import plcsp` 都生效。
 #
-# 为什么：本项目的张量极小（MK01 只有 20 个 token × F_MAX=10），每次前向摊到约 35 个
+# 为什么：本项目的张量极小（MK01 只有 20 个 token × F_MAX=11），每次前向摊到约 35 个
 # `nn.Linear`。torch 默认按核数开线程（本机 32 核 → 24 线程），**线程同步开销压过计算本身**。
 # 实测（MK01、`joint_chain_step`、预热后取中位）：
 #
