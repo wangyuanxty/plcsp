@@ -87,6 +87,17 @@ class SimConfig:
     # ⚠️ 时点不变：故障仍只在**腿间**（不持任何区段锁）生效——持锁停机 = 死锁，绝不做。
     # 默认 False ⟹ 与今日逐位相同（既有读数靠它）。
     agv_failover: bool = False
+    # ③ **役龄故障率开关**（2026-10-05）：`True` 时 `fail_rate` 从常数变成**役龄的函数**
+    # （Weibull 风险函数的递增段，自变量 = `pm_clock`——**当前状态里已有的量**，不引历史）。
+    # 曲线的定义与理由见 `machine_fail_rate` 的 docstring 与 `mechanism-designs.md`。
+    # ⚠️ **改动力学**：故障的"何时"变了（保养后一段时间更不易坏、役龄越大越易坏）。
+    # ⚠️ 打开要求 ③ `machine_failure` 与 ⑫ `maintenance` 都开（否则曲线没有故障可作用 /
+    #    没有役龄量）——`SimWorld.__init__` 显式报错，不静默。
+    # 默认 False ⟹ 与今日逐位相同（既有读数靠它）。
+    machine_age_failure: bool = False
+    # Weibull 形状参数 β（**assumed**，无核实出处；敏感性扫 1.5/2.0/3.0）。
+    # β = 1 退化回常数率（与关档同式）；β < 1（递减风险）不在讨论范围，显式报错。
+    machine_age_beta: float = 2.0
     battery_low: float = 0.20     # ⑪ 低电阈值（占容量比）
     battery_high: float = 0.80    # ⑪ 充电目标（占容量比）
     charge_kw: float = 3.0        # ⑪ 充电功率 [kW]
@@ -255,6 +266,36 @@ PM_CAND_NOW = 0
 PM_CAND_DEFER = 1
 PM_CANDS: tuple[int, int] = (PM_CAND_NOW, PM_CAND_DEFER)
 
+
+def machine_fail_rate(base_rate: float, age: float, beta: float, eta: float) -> float:
+    """③ 役龄故障率 [1/min]——**Weibull 风险函数的递增段**，按保养周期**均值匹配**。
+
+        λ(a) = base · β · (a / η)^(β−1)         （a ≥ 0，η > 0，β ≥ 1）
+
+    性质（有测试逐条钉）：
+    - **β = 1 ⟹ λ ≡ base**（与今天的常数模型同式，内置退化自检点）；
+    - **β > 1 ⟹ λ 严格递增**（役龄越大越易故障）= 可靠性工程里的"耗损期"形态；
+    - **[0, η] 上的均值 = base**：机台按 η 周期保养时，开关开/关的**平均**故障频次一致，
+      差别只在"何时"（不让"频次变了"混进"分布变了"）；
+    - λ(0) = 0（β > 1 的 Weibull 性质）——**纯耗损模型**，不含早期/随机失效（如实声明）。
+
+    ⚠️ 自变量 `age` **只能是 `pm_clock`**（主轴工时累计、保养归零——当前状态里已有的量）。
+    **不许**引入"距上次故障多久""上次保养距今"这类需要记历史的量：那会把 MDP 变成有记忆
+    过程（用户裁定，见 `mechanism-designs.md`）。
+
+    ⚠️ **引文待核**：Weibull, W. *A statistical distribution function of wide applicability*,
+    Journal of Applied Mechanics 18(3):293–297, 1951（**卷期页待核**）。形状参数 β 一律
+    **assumed**（敏感性扫 1.5/2.0/3.0）。
+    """
+    if beta < 1.0:
+        raise ValueError(
+            f"machine_age_beta={beta} < 1：本项只用 Weibull 风险函数的**递增段**（β ≥ 1）——"
+            "递减风险（早期失效）不在讨论范围，也不该拿它当'退化曲线'。")
+    if eta <= 0.0:
+        raise ValueError(f"役龄尺度 eta={eta} 必须 > 0（本仓取 SimConfig.pm_interval）。")
+    a = max(float(age), 0.0)
+    return float(base_rate) * beta * (a / float(eta)) ** (beta - 1.0)
+
 # ⑪ 充电头（C）的候选（动作码）：0 = 不去充，码 i≥1 = 第 (i−1) 号充电桩。
 # **动作语义的唯一真相在此**——`AgvSim._maybe_charge` 与 `algo/group_rel._charge_cand_feat`
 # 按同一约定解读（候选 0 不去充、候选 i≥1 对应 `layout.chargers[i−1]`）。
@@ -299,6 +340,8 @@ class MachineSim:
         self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障/保养期间占用）
         self.prev_job: int | None = None     # ⑤ 换型：本机上一件加工的作业
         self.pm_clock = 0.0                  # ⑫ 距上次保养累计的主轴工时 [min]
+        # ③ 役龄故障率（默认关）：开时 `fail_rate` 按 `pm_clock` 放大（见 `machine_fail_rate`）。
+        self.aging = bool(cfg.machine_age_failure)
 
     def _process(self, job: int, op):
         """⑤ 换型 → 加工（含故障中断-恢复）→ ⑫ 保养。**不含返工判定**（见 `run`）。"""
@@ -314,8 +357,15 @@ class MachineSim:
             if not self.con.machine_failure:
                 yield self.env.timeout(op.time)            # ③ 关：无故障，一次跑完
             else:
+                # ③ 役龄故障率（开关开；前置已由 SimWorld 校验）：**一次工序内 τ 不变**——
+                # `pm_clock` 只在工序完成后累加（见下），故在循环外算一次即可。
+                # 关档 `rate` 就是 `pad.fail_rate`（同一数值）⟹ 抽签序列逐位不变。
+                rate = float(self.pad.fail_rate)
+                if self.aging:
+                    rate = machine_fail_rate(rate, self.pm_clock, self.cfg.machine_age_beta,
+                                             self.cfg.pm_interval)
                 while t < finish:
-                    nxt_fail = t + self.rng.exponential(1.0 / max(self.pad.fail_rate, 1e-9))
+                    nxt_fail = t + self.rng.exponential(1.0 / max(rate, 1e-9))
                     seg = min(nxt_fail, finish) - t
                     yield self.env.timeout(seg)
                     if nxt_fail < finish:
@@ -1008,6 +1058,18 @@ class SimWorld:
             from .constraints import ConstraintConfig
             constraints = ConstraintConfig()
         self.constraints = constraints      # 十约束开关（spec §3.3）
+        # ③ 役龄故障率的**前置**（显式报错，不静默降级）：
+        # - ③ 关 ⟹ 根本没有故障，"率随龄上升"是死开关；
+        # - ⑫ 关 ⟹ `pm_clock` 不累加（设计如此）⟹ **役龄量不存在**，曲线没有自变量。
+        if self.cfg.machine_age_failure:
+            if not self.constraints.machine_failure:
+                raise ValueError(
+                    "SimConfig.machine_age_failure=True 但 ③ machine_failure 关：没有故障可"
+                    "'随龄上升'——请开 ③ 或关本开关。")
+            if not self.constraints.maintenance:
+                raise ValueError(
+                    "SimConfig.machine_age_failure=True 但 ⑫ maintenance 关：`pm_clock` 在 ⑫ 关时"
+                    "根本不累加（设计如此）⟹ 役龄量不存在，曲线没有自变量。请开 ⑫ 或关本开关。")
         # 行程时间口径（P4-B）：**跟随实例**（MKT 实例走矩阵、原始 MK 走几何）。只在这里
         # 认一次，整条运行链（含快照/训练栈建的世界）拿到的是同一个口径对象。
         self.transport = TransportCaliber.for_instance(inst, layout,
