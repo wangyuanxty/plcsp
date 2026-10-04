@@ -28,9 +28,13 @@ import torch.nn as nn
 from ..nn.encoder import LayoutEncoder
 
 
-def v_token_index(seg: tuple[int, int, int, int]) -> list[int]:
-    """V 段 token 在序列中的位置（= M 段 + B 段之后）。有序，第 i 个 = 第 i 台车。"""
-    n_m, n_b, n_v, _ = seg
+def v_token_index(seg: tuple[int, ...]) -> list[int]:
+    """V 段 token 在序列中的位置（= M 段 + B 段之后）。有序，第 i 个 = 第 i 台车。
+
+    ⚠️ `seg` 允许四元或五元（R2 的 Z 段追加在**末位**，故 V 段行号不受影响）——只读前
+    三项，多出来的段一律不看。
+    """
+    n_m, n_b, n_v = int(seg[0]), int(seg[1]), int(seg[2])
     return list(range(n_m + n_b, n_m + n_b + n_v))
 
 
@@ -70,7 +74,8 @@ class PolicyNet(nn.Module):
       后果（现在保养 vs 不保养的停机余量/代价/进度）、C 头放"到该桩的行驶时长 / 该桩占用排队 /
       是不是不去充"。spec §5.3.1②：换型是 `(机台, 作业)` 的**交互量**，塞不进 M 段 token，
       只能走这个槽（旧 MLP 路径本有 `feat_cand`，重写时不可丢）；R 头同理，候选是路径，
-      在序列里没有 token（见 `route_logits_emb`）；M 头候选是**动作码**，两次候选同属一台机台
+      在序列里没有 token（R2 打开时区段有 Z 段 token，逐候选按路径**池化读取**，见
+      `route_logits_emb`）；M 头候选是**动作码**，两次候选同属一台机台
       （见 `pm_logits_emb`）；C 头候选是**动作码 + 桩**，桩同样没有 token（见
       `charge_logits_emb`）。
 
@@ -118,7 +123,7 @@ class PolicyNet(nn.Module):
                 nn.Linear(hidden, 1))
 
     def forward_enc(self, tok_feat: torch.Tensor | np.ndarray,
-                    seg: tuple[int, int, int, int]
+                    seg: tuple[int, ...]
                     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """编码器前向（**五个**头共用）——**唯一的 numpy→torch 转换点**；无编码器返回 (None, None)。
 
@@ -181,24 +186,40 @@ class PolicyNet(nn.Module):
         return self.l_head_tok(torch.cat([tok_c, ft, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def route_logits_emb(self, tok: torch.Tensor, feat_drive: torch.Tensor,
-                         feat_cand: torch.Tensor, cand_idx: torch.Tensor) -> torch.Tensor:
+                         feat_cand: torch.Tensor, cand_idx: torch.Tensor,
+                         zone_idx: torch.Tensor | None = None,
+                         zone_mask: torch.Tensor | None = None) -> torch.Tensor:
         """(1,N,d) × (1,1,F_route) × (1,k,F_cand) × (k,) → (1,1,k) 候选**路径**分数（R 头）。
 
         ⚠️ **与 S/L 两头的关键差别——路线候选在 token 序列里没有自己的 token**：
-        序列只有 M（机台）/B（作业）/V（车辆）/G（全局）四段，候选是**路径/区段实体**，
-        不是这三种实体中的任何一种（给区段加 token 是另一条机制 R2，不在本次恢复范围）。
-        故本头的 `cand_idx` 不逐候选区分，它取**本车自己的 V token 下标**（k 个候选传同一个值）：
+        序列只有 M（机台）/B（作业）/V（车辆）/G（全局）四段（R2 打开时另有 Z 段），候选是
+        **路径**实体。故本头的 `cand_idx` 不逐候选区分，它取**本车自己的 V token 下标**
+        （k 个候选传同一个值）：
         - 语义 = "这辆车在做什么决定"，与 L 头（车辆实体）同源；
-        - 作用 = 上下文 + 到编码器的梯度通路（R 头不是脱离编码器的第二条打分通路）；
-        - **候选之间的分数差只能来自 `feat_cand`**（逐候选的长度比/区段数/当前争用）——
-          `tok` 与 `feat_drive` 对 k 个候选是同一份输入，不携带候选间差异。
-        ⚠️ **已知限度**（如实记下，不许含糊）：本头的"偏好哪条路"因此基本由逐候选特征决定，
-        上下文只经 GELU 的非线性调节对各维的敏感度；要表达"同一辆车在不同状态下偏好不同路"，
-        须等 R2 给区段/路径加 token（`progress-log.md` §27.2 的配对项）。
+        - 作用 = 上下文 + 到编码器的梯度通路（R 头不是脱离编码器的第二条打分通路）。
+
+        ⚠️ **R2（2026-10-05，`route_zones=True`）——逐候选读该路径的区段 token**：
+        `zone_idx (k, m)` / `zone_mask (k, m)` 给出**候选 i 途经区段的 token 下标**（去重保序，
+        右侧用 0 补齐、`zone_mask` 标出有效位）。逐候选的 token 嵌入 =
+        `tok[本车 V token] + mean(该候选的区段 token)`：
+        - 候选之间的分差自此**不再只来自 `feat_cand`**（每条路径读到的区段嵌入不同）；
+        - 均值池化对路径内区段**置换不变**、路径长度可变仍成立，且**不新增参数、不改本头
+          输入宽度**（`emb + 均值` 仍是 d 维）；
+        - 某候选没有区段（退化）⟹ 池化项为 0，退回与今日同式。
+        `zone_idx=None`（默认）= **与 R2 之前逐位相同**的打分式。
+
+        `feat_cand` 仍逐候选携带"长度比 / 区段数 / 当前争用"（`group_rel._route_cand_feat`）
+        ——R2 是**加一路输入**，不是替换原特征。
         """
+        k = feat_cand.shape[0] if feat_cand.dim() == 2 else feat_cand.shape[1]
+        idx = _to_dev(cand_idx, tok).long()
+        tok_c = tok[0, idx]                                            # (k, d) 本车 V token
+        if zone_idx is not None:
+            zt = tok[0, _to_dev(zone_idx, tok).long()]                 # (k, m, d)
+            m = _to_dev(zone_mask, tok).unsqueeze(-1)                  # (k, m, 1)
+            tok_c = tok_c + (zt * m).sum(dim=1) / m.sum(dim=1).clamp(min=1.0)
         cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (k,F_cand)
-        tok_c = tok[0, _to_dev(cand_idx, tok).long()]                  # (k, d)
-        fd = _to_dev(feat_drive.expand(1, tok_c.shape[0], -1)[0], tok)  # (k, F_route)
+        fd = _to_dev(feat_drive.expand(1, k, -1)[0], tok)              # (k, F_route)
         return self.r_head_tok(torch.cat([tok_c, fd, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def pm_logits_emb(self, tok: torch.Tensor, feat_mach: torch.Tensor,
@@ -250,7 +271,9 @@ class PolicyNet(nn.Module):
         return self.c_head_tok(torch.cat([tok_c, fa, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
     def logits_emb_batch(self, kind: str, emb: torch.Tensor, tok_idx: torch.Tensor,
-                         feat_dec: torch.Tensor, feat_cand: torch.Tensor) -> torch.Tensor:
+                         feat_dec: torch.Tensor, feat_cand: torch.Tensor,
+                         zone_idx: torch.Tensor | None = None,
+                         zone_mask: torch.Tensor | None = None) -> torch.Tensor:
         """(B,N,d) × (B,n_cand) × (B,F_dec) × (B,n_cand,F_cand) → (B,n_cand) 批量候选分数。
 
         **重算路径的批量打分入口**（2026-10-04 打分头批次，`group_rel._decision_logp_terms`）：
@@ -263,10 +286,19 @@ class PolicyNet(nn.Module):
         逐决策路径的差只在矩阵乘分块的末位（1e-5 容差口径，同编码器批量化）。
         ⚠️ 调用方负责**分组**（组键 = `(kind, n_cand)`）：n_cand 不齐时 `emb[rows, tok_idx]`
         当场报错，不静默。
+
+        ⚠️ **R2**（`zone_idx` / `zone_mask` 非空，只有 `kind == "R"` 会用）：与逐决策的
+        `route_logits_emb` **同一算式**——逐候选 `emb[b, 本车 V token] + mean(该候选的区段
+        token)`，`(B, n_cand, m)` 的下标/掩码右补 0（掩码处不参与均值）。缺省 None ⟹ 与
+        R2 之前逐位相同。
         """
         head = getattr(self, HEAD_ATTRS[kind])
         rows = torch.arange(emb.shape[0], device=emb.device)
         tok_c = emb[rows[:, None], _to_dev(tok_idx, emb).long()]        # (B, n_cand, d)
+        if zone_idx is not None:
+            zt = emb[rows[:, None, None], _to_dev(zone_idx, emb).long()]   # (B, n_cand, m, d)
+            m = _to_dev(zone_mask, emb).unsqueeze(-1)                      # (B, n_cand, m, 1)
+            tok_c = tok_c + (zt * m).sum(dim=2) / m.sum(dim=2).clamp(min=1.0)
         fd = _to_dev(feat_dec, emb).unsqueeze(1).expand(-1, tok_c.shape[1], -1)
         cand = _to_dev(feat_cand, emb)
         return head(torch.cat([tok_c, fd, cand], dim=-1)).squeeze(-1)   # (B, n_cand)

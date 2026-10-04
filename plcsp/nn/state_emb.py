@@ -13,7 +13,7 @@ from ..env.layout import Layout
 from ..env.snapshot import Snapshot
 # `norm_context` 用冗余别名转出（explicit re-export）——`NormContext` 的构造入口在
 # `features.py`（与字段定义同处一地），此处只为保持 `state_emb.norm_context` 这个既有入口可用。
-from .features import (F_B, F_M, F_MAX, F_V, SEG_SLICE, NormContext,
+from .features import (F_B, F_M, F_MAX, F_V, F_Z, SEG_SLICE, NormContext,
                        norm_context as norm_context)
 
 
@@ -121,18 +121,66 @@ def global_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
     ]], dtype=np.float32)
 
 
+def zone_features(snap: Snapshot, ctx: NormContext, zof: dict[int, int],
+                  n_zones: int) -> np.ndarray:
+    """R2 区段 token 的特征 `(n_zones, F_Z)`——**只在 `route_zones=True` 时构造**。
+
+    列序 = `FEATURE_NAMES["Z"]`：`[busy, wait_frac, zone_x, zone_y]`。
+
+    - `busy` = `Snapshot.zone_holder[z] != -1`（有车持着该区段）；
+    - `wait_frac` = `Snapshot.zone_wait[z] / ctx.zone_wait_limit`——该区段的**当前**等待
+      压力（逐区段取"正在等它"的车里最大的等待时长）。与 V 段 `zone_wait` 同一原料、
+      同一标度；放行/超时即清零，不会把"等过"报成"还在等"。
+    - `zone_x` / `zone_y` = 该区段**成员节点**坐标的均值 ÷ `bbox_diag`——区段的身份维。
+      `node` 粒度下成员就是该节点自身；`row`/`col`/`all` 粒度下一个区段含多个节点，
+      取均值（成员集合只由 `zof` 决定 ⟹ 确定性）。装卸站节点（格点外）也在 `ctx.node_xy` 里。
+
+    ⚠️ **缺表**（`zone_holder` / `zone_wait` 为空 = 手搓快照或 `_cold_start`）⟹ `busy` /
+    `wait_frac` 恒 0——**不是哨兵**（同 R 候选特征的约定：缺表 = 该维无信息）。
+    ⚠️ `zof` / `n_zones` 必须与仿真侧**同一份** `build_zone_map(layout, cfg.zone_granularity)`
+    （`roll_chain` 与 `SimWorld` 各自现算，同一函数同一入参 ⟹ 不可能漂）。
+    """
+    nz = int(n_zones)
+    out = np.zeros((nz, F_Z), dtype=np.float32)
+    holder = snap.zone_holder
+    waits = snap.zone_wait
+    members: list[list[int]] = [[] for _ in range(nz)]
+    for node, z in zof.items():
+        if 0 <= int(z) < nz:
+            members[int(z)].append(int(node))
+    for z in range(nz):
+        if z < len(holder):
+            out[z, 0] = 0.0 if int(holder[z]) < 0 else 1.0
+        if z < len(waits):
+            out[z, 1] = _safe(float(waits[z]) / max(ctx.zone_wait_limit, 1e-9), 0.0, 1.0)
+        if members[z]:                                   # 区段身份：成员节点坐标均值
+            xs = [ctx.node_xy[n][0] for n in members[z]]
+            ys = [ctx.node_xy[n][1] for n in members[z]]
+            out[z, 2] = (sum(xs) / len(xs)) / ctx.bbox_diag
+            out[z, 3] = (sum(ys) / len(ys)) / ctx.bbox_diag
+    return out
+
+
 def build_tok(snap: Snapshot, inst: Instance, layout: Layout,
-              ctx: NormContext) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+              ctx: NormContext, zof: dict[int, int] | None = None,
+              n_zones: int = 0) -> tuple[np.ndarray, tuple[int, ...]]:
     """快照 → **单张** `(N, F_MAX)` 特征张量 + `seg`（spec §5.3.1）。
 
     四段各自算完后按 `SEG_SLICE` 填进对应行，**列不足处保持 0**（补零）。
     故 `tok[:n_m, F_M:]`、`tok[n_m:n_m+n_jobs, F_B:]`、`tok[-1, F_G:]` 恒为 0。
 
     ⚠️ `seg` 由**各段实际行数**推出，**不硬编码实例规模**（Review Focus #2）。
+
+    ⚠️ **R2 区段 token（2026-10-05）**：`zof` 非空（= `route_zones=True`）时**末位追加**
+    第五段 "Z"，`seg` 变成五元组、序列多出 `n_zones` 行；`zof=None`（默认）时**逐位等于
+    今日**（四段、四元组、行数不变）。区段行只填 `SEG_SLICE["Z"]`（4 列），其余列保持 0
+    ——编码器的补零守卫照旧（`_pad_positions` 按 seg 现算）。
     """
-    parts = (("M", machine_features(snap, ctx)), ("B", job_features(snap, ctx)),
-             ("V", vehicle_features(snap, ctx)), ("G", global_features(snap, ctx)))
-    seg = tuple(p.shape[0] for _k, p in parts)                    # (n_m, n_jobs, n_agv, 1)
+    parts = [("M", machine_features(snap, ctx)), ("B", job_features(snap, ctx)),
+             ("V", vehicle_features(snap, ctx)), ("G", global_features(snap, ctx))]
+    if zof is not None:
+        parts.append(("Z", zone_features(snap, ctx, zof, n_zones)))
+    seg = tuple(p.shape[0] for _k, p in parts)                    # 默认 (n_m, n_jobs, n_agv, 1)
     tok = np.zeros((sum(seg), F_MAX), dtype=np.float32)
     r = 0
     for key, p in parts:

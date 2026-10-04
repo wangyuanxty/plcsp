@@ -1150,12 +1150,33 @@ class SimWorld:
                         zone_holder=tuple(-1 if h is None else int(h)
                                           for h in (self.zm.holder.get(z)
                                                     for z in range(self.zm.n))),
+                        # ① 拥堵（R2 区段 token）：**同一份**逐车等待时长按区段的聚合——每个
+                        # 区段取"正在申请它的车"里最大的那个（`pending` 与 `pending_since`
+                        # 同处增删，放行/超时即清）。无人等 = 0.0。不新造状态量。
+                        zone_wait=self._zone_wait_max(),
                         # ⑪ C 头：逐桩**当时**的占用/排队。下标 = `layout.chargers` 顺序
                         # （`charger_res` 与它同序建出）。`_cold_start` 无桩表 ⟹ 空元组。
                         chargers=tuple(ChargerState(occupied=int(res.count),
                                                     waiting=len(res.queue),
                                                     capacity=int(res.capacity))
                                        for res in self.charger_res))
+
+    def _zone_wait_max(self) -> tuple[float, ...]:
+        """逐区段的**当前**等待压力 `(n_zones,)`——每个区段取"正在等它"的车里最大的等待时长。
+
+        R2 区段 token 的 `wait_frac` 维即此量 ÷ `zone_wait_limit`（与 V 段 `zone_wait` 同一
+        标度、同一原料：`ZoneManager.pending` / `pending_since`）。**不是新状态**：`pending`
+        只描述"此刻还在等"（放行/超时即清），故这里读的是"现在"，不是"等过"。
+        逐区段扫描一次 `pending`（车数 ≤ 3–5，区段数 ≤ 30）：一次 O(n_agv) 的遍历，
+        不改变任何仿真状态（`snapshot()` 的只读契约）。
+        """
+        out = [0.0] * self.zm.n
+        for aid, z in self.zm.pending.items():
+            if 0 <= int(z) < self.zm.n:
+                w = self.zm.current_wait(int(aid))
+                if w > out[int(z)]:
+                    out[int(z)] = w
+        return tuple(out)
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None) -> dict:

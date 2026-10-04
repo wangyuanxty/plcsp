@@ -62,11 +62,13 @@ def test_decision_pickle_roundtrip_keeps_all_fields():
     d = Decision(kind="L", tok=np.arange(20 * 11, dtype=np.float32).reshape(20, 11),
                  seg=(2, 3, 1, 1), feat=np.ones(4, dtype=np.float32),
                  cand_feat=np.full((3, 1), 0.5, dtype=np.float32), cand=(0, 1, 2),
-                 action=2, tok_idx=np.asarray([5, 6, 7]), logp=-1.25, mach=None, agv=1)
+                 action=2, tok_idx=np.asarray([5, 6, 7]), logp=-1.25, mach=None, agv=1,
+                 zone_idx=np.asarray([[9, 10], [11, 0]]),      # R2 字段也要能往返
+                 zone_mask=np.asarray([[1.0, 1.0], [1.0, 0.0]], dtype=np.float32))
     e = pickle.loads(pickle.dumps(d))
     assert (e.kind, e.seg, e.cand, e.action, e.logp, e.mach, e.agv) == \
            (d.kind, d.seg, d.cand, d.action, d.logp, d.mach, d.agv)
-    for field in ("tok", "feat", "cand_feat", "tok_idx"):
+    for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask"):
         assert np.array_equal(getattr(e, field), getattr(d, field)), field
 
 
@@ -135,9 +137,12 @@ def _assert_chains_equal(refs, got):
         for a, b in zip(dec_r, dec_p):
             assert (a.kind, a.cand, a.action, a.logp, a.seg, a.mach, a.agv) == \
                    (b.kind, b.cand, b.action, b.logp, b.seg, b.mach, b.agv)
-            for field in ("tok", "feat", "cand_feat", "tok_idx"):
-                assert np.array_equal(getattr(a, field), getattr(b, field)), \
-                    f"链 {g} 的 {field} 不同"
+            for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask"):
+                va, vb = getattr(a, field), getattr(b, field)
+                if va is None or vb is None:            # R2 关档：两处都应为 None
+                    assert va is None and vb is None, f"链 {g} 的 {field} 一处有、一处无"
+                    continue
+                assert np.array_equal(va, vb), f"链 {g} 的 {field} 不同"
 
 
 @pytest.mark.integration

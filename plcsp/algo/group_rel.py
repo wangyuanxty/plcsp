@@ -426,6 +426,12 @@ class Decision:
     # ⚠️ 不能拿 `tok_idx` 反推车号：那正是守卫要检验的量（用被检验量去选样本 = 循环论证，
     # §31 缺陷在位时守卫会在"选样本"一步就失败，测不到"扰动决定方 ⟹ logp 必变"这条实质判据）。
     agv: int | None = None
+    # R2（`route_zones=True`）时 R 决策的**逐候选区段 token 下标与掩码**：
+    # `zone_idx (k, m)` = 第 i 条候选路径途经区段（去重保序）在序列里的 token 下标；
+    # `zone_mask (k, m)` = 1.0 标出有效位（右侧补 0）。其余头 / R2 关时 None。
+    # 与 `tok_idx` 同源纪律：**采样时冻结**，重算路径照它回放（`_decision_logp_terms`）。
+    zone_idx: np.ndarray | None = None
+    zone_mask: np.ndarray | None = None
 
 
 def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
@@ -433,7 +439,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                sample: bool = True,
                generator: torch.Generator | None = None,
                constraints: ConstraintConfig | None = None,
-               route_k: int = 1, pm_head: bool = False,
+               route_k: int = 1, route_zones: bool = False, pm_head: bool = False,
                charge_head: bool = False) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
@@ -462,6 +468,14 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
        简单路径，"选路"不构成决策——记一条单候选的假决策只会给链 logp 添一个恒为 0 的项。
        ⚠️ `route_k > 1` 要求 ① 拥堵开：① 关时区段机制根本不存在，选远路**严格更差**，
        那正是当年砍掉路线头的理由；给一个"可选的死动作"会污染链 logp，故**显式报错**。
+     ⚠️ **`route_zones`（R2 区段 token 开关，2026-10-05）**：默认 `False` = **关**——token
+        序列与今日**逐位相同**（`seg` 仍是四元组、行数不变、R 头走原打分式），既有 `route_k=2`
+        读数不受影响；`True` = 在序列**末位追加 Z 段**（每区段一个 token，`seg` 变五元组），
+        且 R 头**逐候选**读该路径途经区段的 token（均值池化）。区段状态取自快照的
+        `zone_holder` / `zone_wait`（后者是 `VehicleState.zone_wait` 的逐区段聚合）。
+        ⚠️ `route_zones=True` 要求 `route_k > 1`：没有 R 决策时区段 token 无人消费，
+        是**死输入**，故**显式报错**（同 `route_k>1` 要求 ① 拥堵的形态）。
+        ⚠️ 打开后链长 / makespan 会变——R 决策的**输入**变了，不是动力学变了。
      ⚠️ **`pm_head`（⑫ 维护头开关）**：`False`（默认）= **关闭**，`MachineSim` 按规则自动保养
         （`pm_clock >= pm_interval`）、不记 M 决策、不消费采样流 ⟹ **逐位等于今日行为**
         （黄金摘要钉死，既有读数全靠它）；`True` = 一道工序加工完毕、下一件尚未上机时由策略在
@@ -495,6 +509,11 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
     if route_k < 1:
         raise ValueError(f"route_k={route_k} 非法：1 = 关闭路线头（恒走最短路，逐位等于今日），"
                          "≥2 = 候选路径条数（本任务的设计值 = 2）。")
+    if route_zones and route_k < 2:
+        raise ValueError(
+            f"route_zones=True 需要 route_k > 1（实得 route_k={route_k}）：没有 R 决策时"
+            "区段 token 无人消费，是**死输入**（还会加长序列、拖慢每一步）。"
+            "请传 route_k≥2 或 route_zones=False。")
     cons = constraints or ConstraintConfig()
     if route_k > 1 and not cons.congestion:
         raise ValueError(
@@ -517,15 +536,31 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
            else torch.Generator(device=policy.device.type).manual_seed(seed))
     world = SimWorld(inst, layout, dm, cfg, graph=build_corridor_graph(layout),
                      constraints=constraints)
-    # 区段映射（R 头争用特征的原料）：与 `SimWorld` 内部 `build_zone_map(layout, cfg.zone_granularity)`
-    # 同一函数、同一入参——两处不可能漂（漂了候选特征会按另一套区段数错标度）。
+    # 区段映射（R 头争用特征 / R2 区段 token 的原料）：与 `SimWorld` 内部
+    # `build_zone_map(layout, cfg.zone_granularity)` 同一函数、同一入参——两处不可能漂
+    # （漂了候选特征会按另一套区段数错标度）。
     zof, n_zones = build_zone_map(layout, cfg.zone_granularity) if route_k > 1 else ({}, 0)
+    # R2：区段 token 只在开关打开时进序列（`build_tok` 的 `zof=None` = 四段、逐位等于今日）。
+    zof_tok = zof if route_zones else None
 
     def _act(kind: str, snap, feat: list[float], cand_feat: np.ndarray,
              cand: tuple[int, ...], aid: int | None = None,
-             mach_id: int | None = None) -> int:
-        tok_feat, seg = build_tok(snap, inst, layout, ctx)
+             mach_id: int | None = None,
+             cand_zones: list[list[int]] | None = None) -> int:
+        tok_feat, seg = build_tok(snap, inst, layout, ctx,
+                                  zof=zof_tok, n_zones=n_zones)
         tok_feat = np.asarray(tok_feat, dtype=np.float32)
+        # R2：逐候选的区段 token 下标/掩码（候选路径的区段 → 序列下标）。Z 段在**末位**，
+        # 故区段 z 的 token 下标 = 前四段行数之和 + z（`sum(seg[:4])`，与 build_tok 同源）。
+        zone_idx = zone_mask = None
+        if kind == "R" and cand_zones is not None:
+            n_base = int(sum(seg[:4]))
+            m_max = max(len(zs) for zs in cand_zones)
+            zone_idx = np.zeros((len(cand_zones), m_max), dtype=np.int64)
+            zone_mask = np.zeros((len(cand_zones), m_max), dtype=np.float32)
+            for i, zs in enumerate(cand_zones):
+                zone_idx[i, :len(zs)] = [n_base + int(z) for z in zs]
+                zone_mask[i, :len(zs)] = 1.0
         with torch.no_grad():
             tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg)
             head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
@@ -550,19 +585,24 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                 tok_idx = np.full(len(cand), int(mach_id), dtype=np.int64)
             elif kind == "C":
                 # ⚠️ C 的候选是**动作码 + 桩号**（`des.charge_cands`：0 = 不去充，i≥1 = 第
-                # i−1 号桩），**都不是序列位置**：充电桩在序列里没有 token（序列只有 M/B/V/G
-                # 四段），"不去充"更不是实体。故 m 个候选共用**本车**的 V token（`aid`）——
+                # i−1 号桩），**都不是序列位置**：充电桩在序列里没有 token（序列只有 M/B/V/G/Z
+                # 段），"不去充"更不是实体。故 m 个候选共用**本车**的 V token（`aid`）——
                 # 与 R 头同型（路线候选也没有 token）。照 S 写 `tok_idx = cand` 会让候选
                 # 0/1/2 去读 0/1/2 号**机台**的 token：充电头给机台打分（§31 同型缺陷）。
                 tok_idx = np.full(len(cand), v_token_index(seg)[int(aid)], dtype=np.int64)
             else:                                   # R
                 # 路线候选在序列里没有 token（见 `PolicyNet.route_logits_emb`）：取本车 V token
-                # 的下标、k 个候选共用同一份——打分只差在 `cand_feat`。
+                # 的下标、k 个候选共用同一份。R2 打开时另给逐候选的区段 token 下标/掩码
+                # （`zone_idx` / `zone_mask`）——候选之间的分差自此不再只来自 `cand_feat`。
                 tok_idx = np.full(len(cand), v_token_index(seg)[int(aid)], dtype=np.int64)
+            extra = ({} if zone_idx is None else
+                     {"zone_idx": torch.as_tensor(zone_idx, dtype=torch.long),
+                      "zone_mask": torch.as_tensor(zone_mask, dtype=torch.float32)})
             logits = head(tok,
                           torch.as_tensor(feat, dtype=torch.float32).reshape(1, 1, -1),
                           torch.as_tensor(cand_feat, dtype=torch.float32),
-                          torch.as_tensor(tok_idx, dtype=torch.long))
+                          torch.as_tensor(tok_idx, dtype=torch.long),
+                          **extra)
             # 用 log_softmax（而非 softmax）取样：同一遍里就拿到所取动作的 log 概率
             # （`Decision.logp`）——裁剪路径据此省掉一整遍"重算 old"的链前向。
             lp_all = torch.log_softmax(logits.flatten(), -1)
@@ -574,7 +614,8 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                                   cand_feat=np.asarray(cand_feat, dtype=np.float32),
                                   cand=cand, action=int(cand[k]), tok_idx=tok_idx,
                                   logp=lp_k, mach=mach_id,
-                                  agv=(None if aid is None else int(aid))))
+                                  agv=(None if aid is None else int(aid)),
+                                  zone_idx=zone_idx, zone_mask=zone_mask))
         return int(cand[k])
 
     def policy_s(snap, job, oi, cand):
@@ -589,9 +630,13 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
 
     def policy_r(snap, aid, src, dst, leg, cands):
         # 候选 = 路径（节点序列），动作 = 候选**序号**（0 = 最短路）——路径本身没法当动作号。
+        # R2：逐候选给出**途经区段**（去重保序，与 `_route_cand_feat` 同一口径）——`_act`
+        # 把它们映射成区段 token 下标，R 头据此读每条路径自己的区段。
+        cand_zones = (None if zof_tok is None else
+                      [list(dict.fromkeys(zof[n] for n in p)) for p in cands])
         return _act("R", snap, route_feat(layout, aid, src, dst, leg),
                     _route_cand_feat(snap, zof, n_zones, cands, dm, aid),
-                    tuple(range(len(cands))), aid=int(aid))
+                    tuple(range(len(cands))), aid=int(aid), cand_zones=cand_zones)
 
     def policy_m(snap, mach, cand):
         # 候选 = **动作码**（`des.PM_CANDS`：0 现在保养 / 1 不保养），两个候选同属该机台。
@@ -682,8 +727,30 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
         cand = torch.as_tensor(np.stack([decisions[i].cand_feat for i in idx]),
                                dtype=torch.float32, device=policy.device)
         rows = torch.as_tensor(idx, dtype=torch.long, device=policy.device)
+        # ⚠️ R2：同组的 R 决策都带（或不带）区段下标——**混组显式报错**（半带 = 上游接线错，
+        #    静默按 None 算会让一部分决策的 logp 与采样分布不同源）。组内每条路径的区段数
+        #    可以不同：右补 0 到组内最大 m，`zone_mask` 标出有效位（补位不参与均值）。
+        has_zones = [decisions[i].zone_idx is not None for i in idx]
+        if any(has_zones) and not all(has_zones):
+            raise AssertionError(
+                f"同一 ({kind}, n_cand) 组里 R 决策的区段下标有的有、有的没有——"
+                "R2 的接线不一致（混组会让部分决策按错误的分布重算）。")
+        zone_kwargs: dict[str, torch.Tensor] = {}
+        if all(has_zones):
+            m_max = max(int(decisions[i].zone_idx.shape[1]) for i in idx)
+            zi = np.zeros((len(idx), n_cand, m_max), dtype=np.int64)
+            zm = np.zeros((len(idx), n_cand, m_max), dtype=np.float32)
+            for b, i in enumerate(idx):
+                d = decisions[i]
+                assert d.zone_mask is not None
+                m = int(d.zone_idx.shape[1])
+                zi[b, :, :m] = d.zone_idx
+                zm[b, :, :m] = d.zone_mask
+            zone_kwargs = {"zone_idx": torch.as_tensor(zi, dtype=torch.long, device=policy.device),
+                           "zone_mask": torch.as_tensor(zm, dtype=torch.float32,
+                                                        device=policy.device)}
         logits = policy.logits_emb_batch(
-            kind, emb.index_select(0, rows), tok_idx, feat, cand)   # (B', n_cand)
+            kind, emb.index_select(0, rows), tok_idx, feat, cand, **zone_kwargs)  # (B', n_cand)
         lp = torch.log_softmax(logits, dim=-1)
         for b, i in enumerate(idx):
             out[i] = lp[b, decisions[i].cand.index(decisions[i].action)]
@@ -811,7 +878,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      epochs: int = 1,
                      constraints: ConstraintConfig | None = None,
                      adv_mode: str = "scalar",
-                     route_k: int = 1, pm_head: bool = False,
+                     route_k: int = 1, route_zones: bool = False, pm_head: bool = False,
                      charge_head: bool = False,
                      parallel: bool = False,
                      pool: "ChainWorkerPool | None" = None) -> tuple[float, dict]:
@@ -870,6 +937,11 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     **逐位等于今日**（既有读数全靠它）；传 `2` 启用——每次行驶在 2 条候选路径里由策略选，
     链长与墙钟随之上升（MK01 实测见 `docs/progress-log.md`）。R 决策与 S/L 同进链 logp、
     同吃一条采样流、同受逐决策裁剪——**四头是一条联合链**，不是四套并行策略。
+
+    ⚠️ **`route_zones`（R2 区段 token 开关，2026-10-05）**：默认 `False` = 关闭，链与训练步
+    **逐位等于今日**（含 `route_k=2` 的既有读数）；`True`（要求 `route_k>1`）时序列末位追加
+    Z 段，R 头逐候选读该路径途经区段的 token。打开后链变长、决策输入变——makespan 变化是
+    **预期**的（不是动力学变了）。见 `roll_chain` 的说明。
 
     ⚠️ **`pm_head`（⑫ 维护头开关，2026-10-04）**：默认 `False` = 规则自动保养，链与训练步
     **逐位等于今日**；`True` 启用——机台在两件之间由策略选 {现在保养, 不保养}（M 决策与
@@ -983,8 +1055,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         assert pool is not None     # 入口已显式校验：parallel=True, pool=None 直接报错
         pool.sync_policy(policy)
         results = pool.run_chains(seed, G, inst=inst, layout=layout, dm=dm, cfg=cfg, ctx=ctx,
-                                  constraints=cons, route_k=route_k, pm_head=pm_head,
-                                  charge_head=charge_head)
+                                  constraints=cons, route_k=route_k, route_zones=route_zones,
+                                  pm_head=pm_head, charge_head=charge_head)
         for dec, met in results:
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
@@ -998,7 +1070,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         for g in range(G):
             dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
                                   sample=True, generator=gen, constraints=cons, route_k=route_k,
-                                  pm_head=pm_head, charge_head=charge_head)
+                                  route_zones=route_zones, pm_head=pm_head,
+                                  charge_head=charge_head)
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)

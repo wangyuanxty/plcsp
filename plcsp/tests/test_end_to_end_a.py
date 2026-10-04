@@ -145,8 +145,8 @@ def test_zeroed_features_would_be_caught(monkeypatch):
     inst, lay, dm, cfg, ctx, pol = _setup()
     real = gr.build_tok
 
-    def _zeroed(snap, inst_, layout_, ctx_):          # P0 缺陷复现：整张特征恒零
-        tok, seg = real(snap, inst_, layout_, ctx_)
+    def _zeroed(snap, inst_, layout_, ctx_, **kw):    # P0 缺陷复现：整张特征恒零
+        tok, seg = real(snap, inst_, layout_, ctx_, **kw)   # 透传 R2 的 zof/n_zones（默认 None/0）
         return np.zeros_like(tok), seg
 
     monkeypatch.setattr(gr, "build_tok", _zeroed)

@@ -6,6 +6,8 @@
 四段**补齐到同一宽度** `F_MAX=11` 后按序列拼接成单张张量，由 `encoder.py` 的**分段 Linear** 升维。
 ⚠️ 2026-10-04：① 拥堵 +1（V 段 `zone_wait`）、④ 返工 +1（B 段 `rework_cnt`）——
 两个此前只被仿真执行、对网络不可见的约束。**末位追加**，既有列序不变。
+⚠️ 2026-10-05（R2）：新增**第五段 "Z"（区段 token）**——只在 `route_zones=True`（且
+`route_k>1`）时出现；默认档仍是四段、四元组 `seg`、序列一位不变。Z 段同样补齐到 `F_MAX`。
 
 **归一化一律用实例静态量**（总工时 / `M_ref` / 机器数 / 包围盒对角线）——
 仿真前即知，训练与推理一致。**不用 per-episode 归一化**：在线决策下不可得。
@@ -22,11 +24,15 @@ from ..env.instances import Instance
 from ..env.layout import Layout
 
 F_M, F_B, F_V, F_G = 7, 9, 11, 3
-F_MAX = max(F_M, F_B, F_V, F_G)          # 11 —— 补齐后的统一宽度
+# ⚠️ 2026-10-05（R2 区段 token）：新增第五段 "Z"（区段）——**只在 `route_zones=True` 时出现**
+# （默认档的 seg 仍是四元组、序列一位不变）。F_Z=4 ≤ F_MAX ⟹ token 宽度与补齐规则不变。
+F_Z = 4
+F_MAX = max(F_M, F_B, F_V, F_G, F_Z)     # 11 —— 补齐后的统一宽度
 
 # 各段在补齐张量 (N, F_MAX) 里占的列；超出部分恒为 0
 SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
-                               "V": slice(0, F_V), "G": slice(0, F_G)}
+                               "V": slice(0, F_V), "G": slice(0, F_G),
+                               "Z": slice(0, F_Z)}
 
 # ⚠️ 字段名清单与宽度**必须逐段相等**——有测试守着（test_field_counts_match_declared_widths）。
 # 它同时是论文附录的特征表与排错时的对照表。
@@ -40,6 +46,8 @@ FEATURE_NAMES: dict[str, tuple[str, ...]] = {
     "V": ("st_idle", "st_empty", "st_loaded", "st_down", "node_x", "node_y",
           "queued", "battery", "capacity", "speed_factor", "zone_wait"),
     "G": ("time_progress", "done_frac", "in_flight"),
+    # R2 区段 token（`route_zones=True` 时才有这一段）：占用 / 等待压力 / 身份坐标
+    "Z": ("busy", "wait_frac", "zone_x", "zone_y"),
 }
 
 

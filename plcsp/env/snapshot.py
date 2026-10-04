@@ -104,6 +104,12 @@ class Snapshot:
     # `group_rel._route_cand_feat`）。⚠️ 与 `VehicleState.zone_wait`（"本车等了多久"）
     # 不同：这是"这条路上有几处正被占"，是**按路径**读的量，逐车读不到。
     zone_holder: tuple[int, ...]
+    # ① 拥堵（R2 区段 token）：`VehicleState.zone_wait` 的**逐区段聚合**——第 z 个 = 正在
+    # 申请区段 z 的车中**最大**的当前等待时长 [min]；无人等 = 0.0。下标 = 区段号
+    # （与 `zone_holder` 同口径）。它**不是新量**：原料就是 `ZoneManager.pending` /
+    # `pending_since`（放行/超时即清），只是把逐车口径折到逐区段。
+    # 缺表（手搓快照 / `_cold_start`）= 空元组 ⟹ 特征层按"无等待"读，**不是哨兵**。
+    zone_wait: tuple[float, ...] = ()
     # ⑪ C 头的候选特征原料：逐个充电桩的占用/排队，下标 = `layout.chargers` 的顺序。
     # 默认空元组 = 该快照不带桩表（`_cold_start` 或测试手搓）⟹ 占用维恒 0，
     # **不是哨兵**（与 `zone_holder` 为空的约定一致：缺表 = 该维无信息）。

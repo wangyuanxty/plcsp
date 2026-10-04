@@ -1,6 +1,8 @@
 """四段 token 编码器（《方法设计文档》§2.3：128/4/8）——**统一宽度 + 类型嵌入**。
 
 序列 = [M...M (机台) | B...B (作业) | V...V (车辆) | G (全局)]，四段行数 (n_m, n_jobs, n_agv, 1)。
+⚠️ 2026-10-05（R2）：**可选第五段 Z（区段 token）**——只在 `route_zones=True` 时由
+`build_tok` 追加在末位，`seg` 随之变五元；默认档四段、四元组、**序列一位不变**。
 输入是 **(B, N, F_MAX)** 张量（`B ≥ 1`；列定义见 `features.py`：各段补零到 `F_MAX=11`）：
 
 - **每段一个自己的 `Linear`**（`proj`，2026-10-04 改）：M/B/V/G 各自投到 `d_model`，
@@ -29,10 +31,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .cuda_graph import CudaGraphForward
-from .features import F_B, F_G, F_M, F_MAX, F_V, SEG_SLICE
+from .features import F_B, F_G, F_M, F_MAX, F_V, F_Z, SEG_SLICE
 
-_SEG_KEYS = ("M", "B", "V", "G")          # 与 seg 元组的段序一一对应（不可改动）
-_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 各段实际列数（= `SEG_SLICE` 的宽度）
+_SEG_KEYS = ("M", "B", "V", "G", "Z")     # 与 seg 元组的段序一一对应（不可改动）
+_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 四段实际列数（= `SEG_SLICE` 的宽度）；
+                                          # 第五段 Z（R2，可选）的投影是独立的 `proj_z`
 
 
 class AttnLayer(nn.Module):
@@ -93,14 +96,25 @@ class LayoutEncoder(nn.Module):
         self.type_emb = nn.Parameter(torch.randn(self.N_SEG_TYPES, d_model) * 0.02)
         self.layers = nn.ModuleList([AttnLayer(d_model, n_heads) for _ in range(n_layers)])
         self.ln = nn.LayerNorm(d_model)
+        # ⚠️ **R2 区段 token（2026-10-05）——新增参数一律建在既有参数之后，且不消耗全局
+        # 抽签流**：`torch.random.fork_rng()` 把 `nn.Linear` 的构造抽签隔离掉。否则这些
+        # 多出来的随机数会把**后续**（PolicyNet 的头）的初始化整体移位，默认关档的黄金摘要
+        # （含随机初值）全部作废。`proj` 仍是 4 个 Linear、`type_emb` 仍是 4 行——既有
+        # 参数的形状与取值一位不变；Z 段只在 `seg` 有五元时使用。
+        with torch.random.fork_rng():
+            self.proj_z = nn.Linear(F_Z, d_model)            # Z 段自己的投影（分段投影纪律）
+            self.zone_type_emb = nn.Parameter(torch.randn(d_model) * 0.02)
 
-    def forward(self, tok_feat: torch.Tensor, seg: tuple[int, int, int, int]
+    def forward(self, tok_feat: torch.Tensor, seg: tuple[int, ...]
                 ) -> tuple[torch.Tensor, torch.Tensor]:
-        """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_g=1)。
+        """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_g=1[, n_zones])。
 
         返回 (token 嵌入 (B, N, d), 全局上下文 (B, d)=按 token 均值池化)。
         `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
         核对补零列为 0，并核对总长。
+        ⚠️ **`seg` 允许四元或五元**（2026-10-05，R2）：四元 = 默认档（M/B/V/G，逐位等于今日）；
+        五元 = `route_zones=True` 时多出的 Z 段（区段 token，类型 id 4，走独立的 `proj_z`
+        与 `zone_type_emb`）。两种长度都由调用方（`build_tok`）决定。
 
         ⚠️ **两维（N,F）的旧形式已不接受**：批维是重算路径的性能来源（一条链 100–460 个
         决策一次前向；本机实测 231 条批前向 ≈402 ms vs 逐条 ≈1.38 s，**吞吐 ~3.4×**），
@@ -109,8 +123,7 @@ class LayoutEncoder(nn.Module):
         ⚠️ 批内**每行各自独立**：没有任何跨 batch 的注意力/归一化，故逐行结果与单条前向
         数值一致（仅 BLAS 分块带来的末位漂移，≤1e-5）。
         """
-        n_m, n_b, n_v, n_g = seg
-        N = n_m + n_b + n_v + n_g
+        N = int(sum(seg))
         assert tok_feat.dim() == 3, \
             f"tok_feat 必须是 (B,N,F) 三维张量，收到 shape={tuple(tok_feat.shape)}"
         assert tok_feat.shape[1] == N, f"tok_feat 行数 {tok_feat.shape[1]} != sum(seg)={N}"
@@ -133,7 +146,7 @@ class LayoutEncoder(nn.Module):
                 and not torch.is_grad_enabled())
 
     def _replay(self, tok_feat: torch.Tensor,
-                seg: tuple[int, int, int, int]) -> tuple[torch.Tensor, torch.Tensor]:
+                seg: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
         """图重放（首次调用时建图）。
 
         ⚠️ 返回的是**图自己的缓冲**——下一次重放会**原地覆盖**它。调用方必须当场用完。
@@ -147,25 +160,36 @@ class LayoutEncoder(nn.Module):
         return g.replay(tok_feat)
 
     def _encode(self, tok_feat: torch.Tensor,
-                seg: tuple[int, int, int, int]) -> tuple[torch.Tensor, torch.Tensor]:
+                seg: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
         """纯计算：分段投影 + 类型嵌入 + N 层注意力 + 末层 LayerNorm。
 
         **无守卫、无图**——两样都由 `forward` 负责。图快路捕获的就是本函数。
+        `seg` 四元 = 默认档（既有路径，逐位等于今日）；五元 = R2（Z 段走 `proj_z`）。
         """
         tid = self._type_ids(seg, tok_feat.device)
         # 分段投影：各段只取自己那几列，拼回 (B, N, d) 后再进注意力（**批维在 0 轴**）。
         parts, r = [], 0
         for i, n in enumerate(seg):
             if n:
-                parts.append(self.proj[i](tok_feat[:, r:r + n, :_SEG_DIMS[i]]))
+                if i < len(_SEG_DIMS):
+                    parts.append(self.proj[i](tok_feat[:, r:r + n, :_SEG_DIMS[i]]))
+                else:                                   # 第 5 段：Z（R2 区段 token）
+                    parts.append(self.proj_z(tok_feat[:, r:r + n, :F_Z]))
             r += n
-        x = torch.cat(parts, dim=1) + self.type_emb[tid]
+        x = torch.cat(parts, dim=1)
+        if len(seg) == self.N_SEG_TYPES:
+            x = x + self.type_emb[tid]                  # 默认档：**与今日同一条表达式**
+        else:
+            # R2：第 5 类（Z）走 `zone_type_emb`——既有四类的嵌入一位不变（不搞乱 type_emb
+            # 语义：Z 有自己的一行，不是复用 G/类型 3 的嵌入）。
+            tab = torch.cat([self.type_emb, self.zone_type_emb.unsqueeze(0)], dim=0)
+            x = x + tab[tid]
         for layer in self.layers:
             x = layer(x)
         x = self.ln(x)
         return x, x.mean(dim=1)
 
-    def _type_ids(self, seg: tuple[int, int, int, int],
+    def _type_ids(self, seg: tuple[int, ...],
                   device: torch.device) -> torch.Tensor:
         """每个 token 的类型 id `(N,)`——按 `(seg, device)` 缓存。
 

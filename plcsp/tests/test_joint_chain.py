@@ -787,6 +787,9 @@ def test_scalar_adv_mode_regression_pin():
     `docs/progress-log.md`；本条记**两次**由数值批次引起的重捕获（批量重算、打分头批量）。
     三个新头（`r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*`）的排除理由不变：默认关闭档
     它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径"的证据链。
+    ⚠️ **2026-10-05（R2 区段 token）追加排除** `enc.proj_z.*` 与 `enc.zone_type_emb`：同理由
+    ——`route_zones=False`（默认）时 Z 段不存在，这两个参数 grad 为 None。**摘要值未重捕获**
+    （既有参数逐位不变，已用改造前的参数摘要对拍核实）。
     """
     torch.manual_seed(1234)                     # 网络初始化锚点（捕获参照时的同一序列）
     inst = load_mk("mk01")
@@ -798,7 +801,12 @@ def test_scalar_adv_mode_regression_pin():
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
-        if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.")):
+        # 排除默认关档**拿不到梯度**的新增结构：R 头 / ⑫M 头 / ⑪C 头（历史批次），
+        # 以及 R2 的区段投影与区段类型嵌入（2026-10-05）——它们只在 `route_zones=True`
+        # 时被调用，默认档 grad 为 None（不进 `clip_grad_norm_`、不进 Adam），故排除它们
+        # **不削弱**本条对 scalar 口径默认路径的钉法；摘要值因此无需重捕获。
+        if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.",
+                         "enc.proj_z.", "enc.zone_type_emb")):
             continue
         h.update(k.encode("utf-8"))
         h.update(v.detach().numpy().tobytes())
