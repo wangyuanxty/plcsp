@@ -198,6 +198,16 @@ def main() -> None:
                          "`pm_clock`（主轴工时、保养归零）按 Weibull 递增风险上升 ⟹ ③ 有记忆、"
                          "⑫ 多一重收益。**改动力学**；Weibull 形状参数标 assumed、引文待核"
                          "（见 progress-log §44）")
+    # ⚠️ 本节唯一**不改数值语义**的开关（它只改"分几次算"）：故不进 `_make_eval_fn`
+    #    （评估走 `roll_chain(sample=False)`，**不做 logp 重算** ⟹ 与它无关）。
+    ap.add_argument("--recompute-chunk", type=int, default=0, metavar="N",
+                    help="重算的**分段+梯度检查点**（2026-10-05，mk10 显存闸）：0 = 关（默认，"
+                         "一次整批前向，逐位不变）。**批大到被显存挡住时**才需要它——例如 mk10 "
+                         "全开档（`route_k=2`+R2）批 ≈ 8 链 × 440 决策 ≈ 3520，实测峰值 49.58 GB"
+                         "（8 GB 卡）。⚠️ 分段**必须配检查点**才降峰值（单分段不降：图与整批相同）。"
+                         "实测 mk10 全开档：**128 → 峰值 1.32 GB、步时 126 s**（未分段 49.58 GB / "
+                         "171 s——省显存与提速同时发生，因为未分段那一路在撞分配器重试）。"
+                         "但**显存够用时它更慢**（反向要按段重算）：**它是换显存的手段，不是提速的**")
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="策略所在设备：默认 cpu（本仓测试环境是 CPU-only torch）。"
                          "cuda = 整步（在线前向 + 批重算）都在 GPU 上——重算的批大小是 "
@@ -275,7 +285,8 @@ def main() -> None:
                                   constraints=constraints,   # R2：与 ctx 同一份（入口校验同源）
                                   G=args.G, lr=args.lr, route_k=args.route_k,
                                   route_zones=args.route_zones, geom_bias=args.geom_bias,
-                                  pm_head=args.pm_head, charge_head=args.charge_head),
+                                  pm_head=args.pm_head, charge_head=args.charge_head,
+                                  recompute_chunk=args.recompute_chunk),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  parallel=args.parallel, n_workers=args.workers,

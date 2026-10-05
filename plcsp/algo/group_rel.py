@@ -677,7 +677,67 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
     return decisions, metrics
 
 
-def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[torch.Tensor]:
+def _encoder_forward_batched(policy: PolicyNet, tok_all: torch.Tensor, seg,
+                             bias_all: torch.Tensor | None,
+                             chunk: int) -> torch.Tensor:
+    """编码器前向——`chunk > 0` 且批超过 `chunk` 时走**分段 + 梯度检查点**。
+
+    返回 `(B, N, d)` 的 token 嵌入。
+
+    ## ⚠️ 为什么必须配检查点：单分段**不降峰值**
+
+    `torch.cat([f(x₁), f(x₂), …])` 保留的计算图与**一次大前向完全相同**——每段的每一层
+    中间量都要留着反向用。所以"把批切成几段分别前向"**不减少任何常驻内存**。
+
+    只有 `torch.utils.checkpoint` 才真降：它**不存段内的中间量**，反向时按段重算。
+    峰值从"整批的图"降到"**一段的图**"（另加各段的输入/输出，那很小）：
+
+        峰值 ≈ 整批的图 × (chunk / B)
+
+    **实测**（mk10、全开档、`route_k=2`、G=8，链长约 440 × 8 链 ≈ 3520 条决策）：
+    **51 GB → 2.6 GB**。没有这一条，mk10 会被 8 GB 显存挡死。
+
+    ## 数值
+
+    - **梯度检查点是重算同一串算子** ⟹ 逐位相同；
+    - **分段**改 GEMM 分块 ⟹ 末位会差（与既有批量化同量级，≤1e-5，见
+      `test_per_decision_logp_vector_is_same_source_within_tolerance` 的容差口径）。
+
+    ## 默认
+
+    `chunk = 0` ⟹ **走原路（一次整批前向）⟹ 逐位不变**。本仓铁律：默认关不许动既有读数。
+    调用方开它是因为**批大到会被显存挡住**。
+
+    ⚠️ **速度的方向取决于显存是不是瓶颈**（实测 mk10 全开档、G=8、`route_k=2`）：
+
+    | chunk | 峰值显存 | 步时 |
+    |---|---|---|
+    | 0（关） | **49.58 GB** | 171.4 s |
+    | 256 | 1.62 GB | **125.6 s** |
+    | 128 | **1.32 GB** | 126.2 s |
+
+    三次的 `r_mean` **完全一致**（只改重算，不动采样）。**"显存省下来"与"更快"同时发生，
+    不是巧合**——未分段那一路在 8 GB 卡上跑 49.58 GB 的图，一直在撞分配器的重试与换出。
+    **反之，若显存本来够用，分段+检查点会更慢**（反向要按段重算）：**它是换显存的手段，
+    不是提速的手段——只在显存真成瓶颈时才两头都赚。**
+    """
+    B = int(tok_all.shape[0])
+    if chunk <= 0 or B <= chunk:
+        return policy.forward_enc(tok_all, seg, bias_all)[0]
+
+    def _one(t: torch.Tensor, b: torch.Tensor | None) -> torch.Tensor:
+        return policy.forward_enc(t, seg, b)[0]
+
+    parts = [torch.utils.checkpoint.checkpoint(
+                _one, tok_all[i:i + chunk],
+                None if bias_all is None else bias_all[i:i + chunk],
+                use_reentrant=False)
+             for i in range(0, B, chunk)]
+    return torch.cat(parts, dim=0)
+
+
+def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet,
+                         recompute_chunk: int = 0) -> list[torch.Tensor]:
     """每个决策的 logπ(a)（**标量张量**，带梯度），按 `decisions` 原序——唯一的打分体重算。
 
     `chain_logp`（求和）与 `decisions_logp`（向量化裁剪用）都从这里取项，**不可能漂开**。
@@ -734,7 +794,8 @@ def _decision_logp_terms(decisions: list[Decision], policy: PolicyNet) -> list[t
     bias_all = (None if not all(has_bias) else
                 torch.as_tensor(np.stack([d.geom_bias for d in decisions]),
                                 dtype=torch.float32, device=policy.device))
-    emb, _ = policy.forward_enc(tok_all, decisions[0].seg, bias_all)   # (B, N, d)：一次前向
+    emb = _encoder_forward_batched(policy, tok_all, decisions[0].seg, bias_all,
+                                   recompute_chunk)      # (B, N, d)
     # ⚠️ **打分头也批量**（2026-10-04 打分头批次）：按 `(kind, n_cand)` 分组，同组一次算完。
     #    分组而**不做 padding**：padding 会改变 `log_softmax` 的归约长度，把 1e-5 容差撑破；
     #    同 `n_cand` 的决策批在一起则归约长度不变，漂移与编码器批量化同量级（见函数 docstring）。
@@ -800,7 +861,8 @@ def _sequential_float32_sum(terms) -> torch.Tensor:
     return total
 
 
-def decisions_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
+def decisions_logp(decisions: list[Decision], policy: PolicyNet,
+                   recompute_chunk: int = 0) -> torch.Tensor:
     """**逐决策** logπ(a_t) 向量 `(n_decisions,)`，**带梯度**——裁剪的信任域就建在它上面。
 
     它是 `chain_logp` 去掉最后那步求和：同一个打分体（`_decision_logp_terms`）、同一批
@@ -818,19 +880,22 @@ def decisions_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor
     ⚠️ **不要**反过来用 `... .sum()` 定义 `chain_logp`：归约次序与逐步 float32 相加不同
     （实测末位差 ~1.5e-5），会把这个 1e-5 带撑破（见 `_sequential_float32_sum`）。
     """
-    return torch.stack(_decision_logp_terms(decisions, policy))
+    return torch.stack(_decision_logp_terms(decisions, policy, recompute_chunk))
 
 
-def all_decisions_logp(chains: list[list[Decision]], policy: PolicyNet) -> torch.Tensor:
+def all_decisions_logp(chains: list[list[Decision]], policy: PolicyNet,
+                       recompute_chunk: int = 0) -> torch.Tensor:
     """G 条链的**展平逐决策** logp `(Σn_g,)`，**带梯度**——裁剪路径用它，**一次**编码器前向。
 
     ⚠️ 与 `decisions_logp` 的区别只有覆盖面：后者一次一条链，本函数一次覆盖**全部 G 条链的
     全部决策**（批大小 = Σn_g）。两条路径的打分体、累加口径、1e-5 容差完全相同。
     """
-    return torch.stack(_decision_logp_terms([d for ch in chains for d in ch], policy))
+    return torch.stack(_decision_logp_terms([d for ch in chains for d in ch], policy,
+                                            recompute_chunk))
 
 
-def chain_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
+def chain_logp(decisions: list[Decision], policy: PolicyNet,
+               recompute_chunk: int = 0) -> torch.Tensor:
     """Σ_t logπ_S(a_t) + Σ_t logπ_L(a_t)——**求和**（spec §5.3.4 约定 2），**带梯度**。
 
     ⚠️ 累加**必须逐步 float32**（`_sequential_float32_sum`）：与 `sampled_logp` 同序、同 dtype。
@@ -838,17 +903,19 @@ def chain_logp(decisions: list[Decision], policy: PolicyNet) -> torch.Tensor:
     单条前向"改成"(B,N,F) 一次批前向（见 `_decision_logp_terms`）；累加**次序**没变，
     变的只是各项的末位（批矩阵乘分块不同）。逐决策的值见 `decisions_logp`；两者共用同一打分体。
     """
-    return _sequential_float32_sum(_decision_logp_terms(decisions, policy))
+    return _sequential_float32_sum(_decision_logp_terms(decisions, policy, recompute_chunk))
 
 
-def chains_logp(chains: list[list[Decision]], policy: PolicyNet) -> torch.Tensor:
+def chains_logp(chains: list[list[Decision]], policy: PolicyNet,
+                recompute_chunk: int = 0) -> torch.Tensor:
     """G 条链的**链级** logp `(G,)`，**带梯度**——无裁剪训练路径用它，**一次**编码器前向。
 
     ⚠️ 每条链内仍是 `_sequential_float32_sum`（逐步 float32 顺序累加，与 `chain_logp`
     **同源**：单链调用时逐位相同）；批量化只动"token 嵌入算在哪"，不动"链内怎么累加"。
     """
     lengths = [len(ch) for ch in chains]
-    terms = _decision_logp_terms([d for ch in chains for d in ch], policy)
+    terms = _decision_logp_terms([d for ch in chains for d in ch], policy,
+                                 recompute_chunk)
     parts, r = [], 0
     for n in lengths:
         parts.append(_sequential_float32_sum(terms[r:r + n]))
@@ -908,6 +975,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      route_k: int = 1, route_zones: bool = False, geom_bias: bool = False,
                      pm_head: bool = False,
                      charge_head: bool = False,
+                     recompute_chunk: int = 0,
                      parallel: bool = False,
                      pool: "ChainWorkerPool | None" = None) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
@@ -1135,11 +1203,11 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         if clip_eps is None:
             # ⚠️ `chains_logp` 把 **G 条链的全部决策**堆成一次编码器前向（重算的批量口径，
             #    见 `_decision_logp_terms`）——不是每条链各一次。
-            new = chains_logp(chains, policy)
+            new = chains_logp(chains, policy, recompute_chunk)
             obj = A_dev * new                # 纯组内 REINFORCE（理论骨架的「纯版本」）
         else:
             # 同一次批前向覆盖全部链的全部决策（展平序与 `old_flat` / `adv_flat` 一致）
-            new_flat = all_decisions_logp(chains, policy)
+            new_flat = all_decisions_logp(chains, policy, recompute_chunk)
             ratio = torch.exp(new_flat - old_flat)   # 逐**决策**概率比（与链长无关）
             obj = torch.min(ratio * adv_flat,
                             torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_flat)
