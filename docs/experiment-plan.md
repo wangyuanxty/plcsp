@@ -277,6 +277,18 @@ MK01–MK10 **全部跑通，无一崩溃**（多实例第一次跑）。
 
 **补法（投稿前）**：13 臂 × 补 4 个种子 = **52 跑 ≈ 14 h**。**未排期。**
 
+**D 的例外（用户 2026-10-06 裁定）**：**D 的两臂（`scalar` / `reinforce`）与 D 第三臂（`raw`，
+优势 = 原始回报、不减任何均值）跑满 5 个训练种子**——**它们不等投稿前**。理由两条：
+
+1. **D 是核心方法学主张**——`method-transfer-candidates.md` §6.4 判"**GRPO 想立住，必须补
+   REINFORCE 消融**"；且现有两臂**都减了组内均值**，测的是"除不除 std"，**不是**"组内相对必不必要"
+   （`progress-log` §52.3 第 1 条）⟹ **`raw` 那一臂是那条 claim 的唯一证据**。
+2. **若 D 推翻现方法，A 主表 + 13 档消融要全部重跑** ⟹ **越早定案越省。**
+
+⚠️ **其余消融仍按 1 seed**（上表）。且**这个例外已经回本**：4 个 scalar 种子直接证明了
+"`reinforce` 好 15.4%" 是**种子噪声**（`scalar` 自己的 seed 4 = 71.56，与 `reinforce` seed 0 = 71.12 几乎一样），
+并量出了 sd ≈ 5.9——**没有这几个种子，那两条都不会被发现**。
+
 ## 5. 实例口径
 
 - **行程时间口径跟随实例**：MKT 实例走**矩阵**、原始 MK 走**几何**（P4-B 已定）
@@ -613,3 +625,50 @@ in-sample/OOS 差异）。运行产物（不进仓库）：`D:/Temp/phaseA/<arm>
 与 `D:/Temp/phaseA/logs/<arm>.log`（口径行逐条可核）；NSGA-II 与规则基线的 JSON 亦在
 `D:/Temp/phaseA/`。
 
+> 紧随其后的**期① 剩余队列**（D 定案 5 seed · D 第三臂 `raw` · I ⑪ 验证档 · E 前沿 · F 重训对照）
+> 的实际开关表见 **§9.9**（为免与本节撞号，不并入本节）。
+
+### 9.9 期① 剩余队列（D / I / E / F）的实际开关表（**2026-10-06**）
+
+**公共部分**（本队列每个 run 逐字相同，与 §9.8 的公共部分一字不差）：
+
+```bash
+--inst mk01 --steps 300 --seed <s> --G 8 --device cuda --parallel --workers 8 \
+--worker-device cpu --recompute-chunk 128 --eval-every 30 --eval-seeds 5
+```
+
+每 run 一个**独立 `--run-dir`**（`D:/Temp/phase1c/<run>/`；重跑前先删目录）。
+**档 B 全开** = §9.7 第 1 行 `full`：
+`--route-k 2 --route-zones --geom-bias --pm-head --charge-head --multi-drop --batch-head
+--agv-failover --machine-age-failure --t3`。
+
+| # | run | 指定的改动 | 守卫强制的连带项 |
+|---|---|---|---|
+| 1–4 | `d-scalar-s1..s4` | **去 `--t3`**（= §9.7 第 12 行 `m-no-t3` 配置），seed 1–4 | — |
+| 5–8 | `d-reinforce-s1..s4` | 同上 **+ `--adv-mode reinforce`**，seed 1–4 | — |
+| 9–13 | `d-raw-s0..s4` | 同 #1 **+ `--adv-mode raw`**（A = 原始回报 r），seed 0–4 | — |
+| 14 | `i-charge-on` | 档 B 全开 **+ `--agv-battery-kwh 0.1`** | `battery_low=0` 由 `m13` 自动带上 |
+| 15 | `i-charge-off` | 同 #14 **去 `--charge-head`** | T3 keep 去 ⑪ ⟹ `--t3-constraints=congestion,finite_buffer,machine_failure,setup_time,maintenance` |
+| 16 | `i-charge-on-not3` | 同 #14 **去 `--t3`** | — |
+| 17 | `e-eq` | 档 B 全开 **+ `--prefs 1/3 1/3 1/3`** | — |
+| 18 | `e-me` | 档 B 全开 **+ `--prefs 0.5 0.5 0.0`** | — |
+| 19 | `f-retrain-setup` | 档 B 全开 + `setup_min_default=4.0` | **无 CLI**：临时脚本子类覆写 `m13.SimConfig`（`D:/Temp/phase1c/f_retrain.py`） |
+| 20 | `f-retrain-failrate` | 档 B 全开 + `fail_rate` 每机 ×2 | **无 CLI**：临时脚本包住 `sample_layout`（同上；布局属性） |
+
+**D 三臂的唯一变量 = 优势口径**：#1–4 与 #5–8、#9–13 的开关集逐字相同（全部 `t3=False`），
+seed 0 的三条已有（§9.7 的 `m-no-t3` / `adv-reinforce` + 本队列的 `d-raw-s0`）⟹ **三臂各 5 个训练 seed**。
+
+**E 的 5 个 prefs 点**（加权和分解，`--prefs` 给定时**取代** f^ref 派生的 w）：
+三个 one-hot 顶点**复用 A 批次的 `b-ms` / `b-en` / `b-twt`**（§9.8 第 1–3 行——同公共口径、同 seed 0、
+同档 B 开关集，已用 `m17_reeval` 逐条核过），**只新跑两个内点** `e-eq`（重心）与
+`e-me`（makespan–energy 边中点）。权重取法写死为：**三顶点 + 重心 + 最重两目标（energy/makespan，
+f^ref 派生的 w 把 82% 压在 energy）之间的边中点**；1/3 与 0.5 都是精确值，前沿可复现。
+
+**F 的两跑**（重训对照）在**扰动环境**里按同一协议训练（300 步 / G=8 / seed 0 / 档 B 全开）：
+水平取主口径重评扫出的**最不利**档（`setup_min_default` 4.0、`fail_rate` ×2）。
+⚠️ 这两跑的扰动**不在 `m13` 日志里** ⟹ `m17_reeval` **不得**用于它们（会按未扰动口径重建环境）；
+只读 `metrics.ndjson` 的内联评估（含三目标）。主口径的**重评**（只 rollout、不训练）由临时脚本
+`D:/Temp/phase1c/f_sens.py` 跑，口径 = 策略与 `ctx` 保持训练时的原样、**只改动力学**。
+
+**结果**：`progress-log.md` **§52.9**。运行产物（不进仓库）：`D:/Temp/phase1c/<run>/`
+（`metrics.ndjson` + `ckpt.pt`）与 `D:/Temp/phase1c/logs/<run>.log`（口径行逐条可核）。
