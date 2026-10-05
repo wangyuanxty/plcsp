@@ -89,6 +89,26 @@ class ChargerState:
 
 
 @dataclass(frozen=True)
+class QueuedTask:
+    """队列里**一件待取任务的身份**（⑩ 拼批头的硬前置，2026-10-05）。
+
+    为什么需要它：`VehicleState.queued` 只有**长度**，而"这趟带哪几件"必须看得到
+    **是哪些**任务（作业号 / 取货点 / 卸货点 / 目标工序号）。没有它，候选批次**无从枚举**
+    （`method-transfer-candidates.md` §6.6 记的硬前置）。
+
+    ⚠️ 口径**沿用** `des._transporter` 封的 `task = (frm, to, item, _path)`、`item = (job, oi,
+    op, is_last)`——本类只留身份四个字段，**不另造**第二个任务表示。
+    ⚠️ `veh` 是**队列形状**的标记：`bound=True`（每车一 Store）时 = 该车号；FIFO（单个共享
+    Store）时 = **-1**（未绑定车）。两种形状都进同一张表，故 ⑩ 的候选枚举两端同源。
+    """
+    veh: int        # 该任务当前挂在哪台车的队列；-1 = 共享 FIFO 队列（未绑定车）
+    job: int        # 作业号
+    frm: int        # 取货端点（机台号 0..m-1；= n_machines 时是装卸站）
+    to: int         # 卸货端点（同上）
+    oi: int         # 目标工序序号（`item[1]` 口径：投放 = 0、流转 = 目标工序号、回站 = 末工序号+1）
+
+
+@dataclass(frozen=True)
 class Snapshot:
     now: float
     machines: tuple[MachineState, ...]
@@ -114,3 +134,9 @@ class Snapshot:
     # 默认空元组 = 该快照不带桩表（`_cold_start` 或测试手搓）⟹ 占用维恒 0，
     # **不是哨兵**（与 `zone_holder` 为空的约定一致：缺表 = 该维无信息）。
     chargers: tuple[ChargerState, ...] = ()
+    # ⑩ 拼批头的原料：**队列内容**（逐件任务身份，队列序），两种队列形状都进这一张表
+    # （`bound` = 每车一 Store，逐车的表；FIFO = 单个共享 Store，`veh = -1`）。
+    # 空元组 = 队列为空（**不是哨兵**：没有待取任务就是没有）。
+    # ⚠️ 与 `VehicleState.queued`（长度）同源但**不同用途**：那个是"本车还有多少待办"，
+    # 这个是"待办的是哪些件"——缺了它，候选批次无法枚举（见 `QueuedTask`）。
+    queued_tasks: tuple[QueuedTask, ...] = ()

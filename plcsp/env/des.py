@@ -78,6 +78,16 @@ class SimConfig:
     pm_interval: float = 120.0    # ⑫ 预防性维护间隔 [min 主轴工时]
     pm_duration: float = 10.0     # ⑫ 维护停机时长 [min]
     max_agv_capacity: int = 3     # ⑩ 车队载量上限 [件]（1 = 退化为单载）
+    # ⑩ **multi-drop 行程模型开关**（2026-10-05，**模型变更**，不是加一个头）：
+    # `True` 时一趟 = **一个取货点 + 多个卸货点**——AGV 在取货点装走若干件（同取货点、
+    # 不同卸货点），沿途逐站卸下；载货段 = **一串腿**（总时长/能耗 = 各腿之和，区段仍
+    # **逐腿**申请/释放，沿用 `_drive` 既有语义）。
+    # ⚠️ 为什么改模型：`max_agv_capacity`（默认 3）在单卸货点模型下是**死参数**——一次取货
+    # 只有一个卸货点，容量永远用不上（审稿人会问"参数设了不用"）。打开本开关后它第一次
+    # 真的起作用：在车件数 ≤ `capacity`（= ⑩ 异构车队给的载量，关 ⑩ 时恒 1）。
+    # ⚠️ **打开后与旧档读数不可比**：makespan / 能耗 / 趟数 / 行程都会变，这是**预期**的
+    # （模型的定义变了）；默认 `False` ⟹ 与今日**逐位相同**（既有全部读数靠它）。
+    multi_drop: bool = False
     agv_mtbf: float = 480.0       # ⑨ AGV 平均无故障时间 [min]（8 h）
     agv_mttr: float = 10.0        # ⑨ AGV 平均修复时间 [min]
     # ⑨ **故障 failover 开关**（2026-10-05）：`True` = 停机期间把该车**手上/队列里**的任务
@@ -310,6 +320,44 @@ def charge_cands(n_chargers: int) -> tuple[int, ...]:
     不写死常量；`env/` 与 `algo/` 两侧都调本函数，候选集不可能漂开。
     """
     return tuple(range(int(n_chargers) + 1))
+
+
+# ⑩ 拼批头（B）的候选动作码 = **追加件数** s：0 = 只带头件（不拼批），s = 头件 + 队列里
+# 同取货点的**前 s 件**（队列序）。候选集由 `batch_cands` 现算，`env/` 与 `algo/` 两侧同调。
+
+
+def batch_cands(n_same_frm: int, capacity: int) -> tuple[int, ...]:
+    """⑩ 拼批头的候选动作码 `(0, 1, …, min(capacity−1, n_same_frm))`——**动作语义的唯一真相**。
+
+    - 候选 `s` = "头件 + 队列里同取货点的**前 s 件**"（队列序，卸货序同）；
+    - `s = 0` = 不拼批（只带头件 = 今日的单件行为）；
+    - 上限 `capacity − 1`：头件已占 1 个位置，**在车件数 ≤ `capacity`** 由构造保证；
+    - `n_same_frm` = 队列里（头件已取走后）同取货点的任务数。
+
+    ⚠️ 只做**前缀**：同向组内的非前缀子集被支配（同一串载货腿、更差的 FIFO 顺序）。
+    动作空间因此 ≤ `capacity`，链长上界 = 取货次数——不做"逐任务二值决策"（那会引入
+    "同批内先判谁"这一层决策顺序，与既有"一组候选一次打分"的骨架不同构）。
+    """
+    return tuple(range(0, max(0, min(int(capacity) - 1, int(n_same_frm))) + 1))
+
+
+def drop_stops(batch: list) -> list[list]:
+    """⑩ multi-drop 的**卸货序**（v1 规则）：按**任务到达序**（= 队列序）的首次出现排卸货点。
+
+    返回 `[[该站的任务, …], …]`——外层按卸货点首次出现的次序，内层保持队列序。
+    ⚠️ 规则口径（不是决策）：把"卸货顺序"也交给策略是**另一条机制**，v1 不做（登记为开放线索）。
+    """
+    stops: list[list] = []
+    seen: dict[int, int] = {}
+    for t in batch:
+        to = int(t[1])
+        k = seen.get(to)
+        if k is None:
+            seen[to] = len(stops)
+            stops.append([t])
+        else:
+            stops[k].append(t)
+    return stops
 
 
 class MachineSim:
@@ -606,7 +654,7 @@ class AgvSim:
                  stats: dict,
                  tasks_in, machines: list, graph, zm, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 route=None, charge=None, fleet: list | None = None):
+                 route=None, charge=None, fleet: list | None = None, batch=None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -615,6 +663,12 @@ class AgvSim:
         self.con = constraints              # ① congestion 等物流侧开关从这里读
         self.congestion = constraints.congestion    # ① 关 → 无区段管制
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
+        # ⑩ **multi-drop 行程模型开关**（默认关 ⟹ 单卸货点路径逐位不变，见 `SimConfig.multi_drop`）
+        self.multi_drop = bool(cfg.multi_drop)
+        # ⑩ 拼批头（B）的入口：`SimWorld` 给的 `(aid, job, frm, to, oi, cands) -> 动作码` 回调。
+        # `None` = **规则档**（multi_drop 打开时：整条队列找同取货点任务，按队列序取到容量上限）；
+        # 非 None = **策略档**（在预构造的批次候选里选，候选集见 `batch_cands`）。
+        self.batch_policy = batch
         # 路线决策（R）的入口：`SimWorld` 给的 `(aid, src, dst, leg) -> 节点序列` 回调。
         # `None` = **不启用**——`_drive` 恒走 `shortest_node_path`，且不多取快照/不多抽随机数
         # ⟹ 逐位等于"路线头从未存在"的行为（既有全部读数立在这条上）。
@@ -893,6 +947,132 @@ class AgvSim:
             self.stats["tasks_get"] += 1
         return batch
 
+    # ── ⑩ multi-drop（`SimConfig.multi_drop`）：一趟 = 一个取货点 + 多个卸货点 ──
+
+    def _same_frm_indices(self, q, frm: int) -> list[int]:
+        """队列里**同取货点**任务的下标（**队列序**）——multi-drop 的全部候选由此推出。
+
+        ⚠️ 头件此刻**已**被 `q.get()` 取走，故不在这里；本函数返回的是"可以追加"的那些。
+        ⚠️ 读 `q.items` 是**只读偷看**：不 yield ⟹ 单线程 SimPy 下与随后的取出之间无并发窗口。
+        """
+        return [i for i, t in enumerate(q.items) if int(t[0]) == int(frm)]
+
+    @staticmethod
+    def _take_indices(q, idxs: list[int]) -> list:
+        """按下标从 Store 取出若干任务（**保序**，不 yield）。
+
+        ⚠️ 任务队列是**无界** `simpy.Store`：`_do_get` 只在 `items` 非空时弹出队首，
+        而 `items` 非空时不会有等待中的 getter（put 当场把等待者唤醒）⟹ 直接改 `items`
+        不丢事件、不破坏 FIFO。**只用在这一处**，别扩散到别处。
+        """
+        out = [q.items[i] for i in idxs]
+        for i in sorted(idxs, reverse=True):
+            q.items.pop(i)
+        return out
+
+    def _collect_multi(self, q, frm: int, first: tuple) -> list:
+        """⑩ multi-drop **规则档**（multi_drop 开、批次策略关）：取走队列里**所有**同取货点
+        任务，最多 `capacity` 件（**头件已占 1 位**）；卸货序 = 队列序（`drop_stops`）。
+
+        ⚠️ 放宽到**全队列**（不再只看队首连续段）会跳过中间其它取货点的任务——那些任务被本趟
+        越过、稍后才服务。这正是 ⑩ 的权衡来源（拼批省运输 vs 打乱 FIFO 顺序），不是缺陷。
+        `capacity == 1`（⑩ 异构车队关）⟹ 一件都不追加，与"该约束从未存在"逐位相同。
+        """
+        idxs = self._same_frm_indices(q, frm)[:max(0, self.capacity - 1)]
+        extra = self._take_indices(q, idxs)
+        self.stats["tasks_get"] += len(extra)
+        batch = [first] + extra
+        self._count_batch(batch)
+        return batch
+
+    def _count_batch(self, batch: list) -> None:
+        """⑩ 拼批读数（**只在 multi-drop 档计数**，默认档恒 0 ⟹ 既有读数零影响）：
+
+        - `batch_trips`：取货次数（= 批次数，一趟一记）；
+        - `batch_items`：Σ 批大小（**装走**的件数，含后来被退回重跑的）；
+        - `batch_ge2`：批大小 ≥ 2 的次数——**存在性判据**的直接读数。
+
+        ⚠️ 与 `trips`（= 开始负载段的趟数，会因退回重跑而多于批次数）**不是同一个量**：
+        "平均每趟件数"一律按 `batch_items / batch_trips` 算，才不受退回重跑污染。
+        """
+        self.stats["batch_trips"] = self.stats.get("batch_trips", 0) + 1
+        self.stats["batch_items"] = self.stats.get("batch_items", 0) + len(batch)
+        if len(batch) > 1:
+            self.stats["batch_ge2"] = self.stats.get("batch_ge2", 0) + 1
+
+    def _collect_batch(self, q, frm: int, to: int, first: tuple,
+                       job: int, oi: int) -> list:
+        """⑩ 拼批头（策略档）：在**预构造的批次候选**（`batch_cands`）里问策略选一个。
+
+        候选 `s` = 头件 + 队列里同取货点的前 `s` 件（队列序）。候选 < 2（队列里没有同取货点
+        任务 ⟹ 只有 `s=0`）时**不记决策、直接返回单件**——同 R 头的"候选 < 2 不记决策"
+        （记一条单候选的假决策只会给链 logp 添一个恒 0 项）。
+        ⚠️ 非候选动作**显式报错**（同 S/L/R/M/C 五头）：静默回退会掩盖策略/候选集不一致，
+        让整条链的 logp 与动作错位而无人察觉。
+        """
+        idxs = self._same_frm_indices(q, frm)
+        cands = batch_cands(len(idxs), self.capacity)
+        if len(cands) < 2:
+            return [first]
+        code = int(self.batch_policy(self.aid, int(job), int(frm), int(to), int(oi), cands))
+        if code not in cands:
+            raise ValueError(
+                f"policy_b 选了非候选动作 {code}；候选={cands}（本车 {self.aid}，"
+                f"队列同取货点 {len(idxs)} 件）——静默回退会掩盖策略/候选集不一致。")
+        extra = self._take_indices(q, idxs[:code])
+        self.stats["tasks_get"] += len(extra)
+        batch = [first] + extra
+        self._count_batch(batch)
+        return batch
+
+    def _deliver_multi(self, q, batch: list):
+        """⑩ multi-drop 的**负载段**：一趟停多个卸货点，逐站卸下该站的件（卸货序 = 队列序）。
+
+        - **载货段 = 一串腿**：`frm → to₁ → to₂ → …`，逐腿走 `_drive(..., "loaded")`——
+          沿用既有的**逐段申请/释放区段**语义（不另造）；总时长/能耗 = 各腿之和
+          （`_drive` 逐腿累 `agv_loaded_min` 与耗电）。
+        - **记账逐件正确**：每站卸完即 `set_load(剩余在车件数)`、逐件清 `job_agv` ⟹
+          `agv_load_n` / `in_flight` / `JobState.on_agv` 在多件在车时仍逐件准。
+        - **失败回退**：某腿失败（区段争用超时/等待环）⟹ 把**仍在车上**的件（本站与后续站，
+          已卸下的不动）退回队列——与单卸货点档的"整批退回"同语义（此处的"批" = 未交付部分）。
+        - `trips` 在**开始负载段时** +1（一趟一记；1 件档同样记 1）。
+        """
+        if self.failover and self.down:
+            self.track.set_load(self.aid, 0)
+            yield from self._requeue_hand(batch)
+            return
+        stops = drop_stops(batch)                    # v1 规则：按任务到达序排卸货点
+        self.stats["trips"] += 1
+        on_board = len(batch)
+        cur = self.machines[int(batch[0][0])].pad.dock_node     # 取货点（本趟起点）
+        for si, stop in enumerate(stops):
+            to = int(stop[0][1])
+            dst = self.machines[to].pad.dock_node            # 端点号 → 通道节点（同取货点口径）
+            ok, self.pos_node = yield from self._drive(cur, dst, "loaded")
+            if not ok:
+                # 整批未交付部分（本站 + 后续站）退回队列；已卸下的站不动。
+                self.track.set_load(self.aid, 0)
+                left = [t for s2 in stops[si:] for t in s2]
+                for t in left:
+                    self.track.job_agv[t[2][0]] = -1
+                yield self.env.timeout(self.cfg.zone_hold)
+                self.stats["requeue"] = self.stats.get("requeue", 0) + 1
+                for t in left:
+                    q.put(t)
+                return
+            for (_f, t2, _item2, _p2) in stop:
+                self.stats["agv_del"][self.aid] += 1
+                self.stats["agv_pos"][self.aid] = t2
+                # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
+                while len(self.machines[t2].in_q.items) >= self.machines[t2].in_q.capacity:
+                    yield self.env.timeout(self.cfg.zone_hold)
+                yield self.machines[t2].in_q.put(_item2)
+                self.track.job_agv[_item2[0]] = -1       # 投递完成，工件离车
+                self.stats["deliveries"] += 1
+                on_board -= 1
+                self.track.set_load(self.aid, on_board)  # 逐件递减（`in_flight` 的"车上"部分）
+            cur = self.machines[to].pad.dock_node
+
     def _drive(self, src: int, dst: int, leg: str):
         """把车从 `src` 节点开到 `dst` 节点，行驶时长累入 `leg` 态（"empty" / "loaded"）。
 
@@ -992,15 +1172,25 @@ class AgvSim:
                     self.track.job_agv[item[0]] = -1
                     self.track.set_load(self.aid, 0)
                     continue
-            # ⑩ 同向拼车：把队首连续的同 (取货点, 卸货点) 任务一并装走
-            batch = yield from self._collect(q, frm, to, (frm, to, item, path))
+            # ⑩ 拼车/拼批：默认档 = 队首连续段同 (取货点, 卸货点)；multi-drop 档 = 全队列同取货点
+            # （规则档），或策略在预构造的批次候选里选（`batch_policy` 非空 = 拼批头，见 `_collect_batch`）。
+            if not self.multi_drop:
+                batch = yield from self._collect(q, frm, to, (frm, to, item, path))
+            elif self.batch_policy is None:
+                batch = self._collect_multi(q, frm, (frm, to, item, path))
+            else:
+                batch = self._collect_batch(q, frm, to, (frm, to, item, path), item[0], item[1])
             # 快照跟踪（P2 Task 1）：取到任务即记车号——FIFO 路径没有派车分支，只靠这里，
             # 否则 `JobState.in_transit` 在旧规则路径上恒为 False。
             for (_f0, _t0, _it0, _p0) in batch:
                 self.track.job_agv[_it0[0]] = self.aid
-            # ── 负载段：取货点 → 卸货点（整批一趟）──
-            # 快照跟踪（P2 Task 1）：取货后负载行驶，本趟在运件数 = 批次大小（F5：in_flight 的"车上"部分）
+            # ── 负载段（⑩ multi-drop：一个取货点 → **多个**卸货点）──
             self.track.set_load(self.aid, len(batch))
+            if self.multi_drop:
+                yield from self._deliver_multi(q, batch)
+                continue
+            # ── 负载段：取货点 → 卸货点（整批一趟，**单卸货点**：逐位不变）──
+            # 快照跟踪（P2 Task 1）：取货后负载行驶，本趟在运件数 = 批次大小（F5：in_flight 的"车上"部分）
             if self.failover and self.down:
                 # ⑨ failover **检查点 3**（腿间、不持锁）：空载段期间趴窝 ⟹ 整批退回，
                 # 不带货趴窝（今日行为是照跑负载段）。
@@ -1092,7 +1282,7 @@ class SimWorld:
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
                         seed_chain: int = 0, charger_res=(), route=None, pm=None,
-                        charge=None) -> tuple[
+                        charge=None, batch=None) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -1111,6 +1301,9 @@ class SimWorld:
         返回值。透传给每台 `MachineSim`，`_pm_after_op` 消费。
         ⚠️ `charge`（⑪ 充电头）：同上，`None` = 规则驱动（低电 → 最近空闲桩）；`run_gated`
         传 `_make_charge_fn(...)` 的返回值。透传给每台 `AgvSim`，`_maybe_charge` 消费。
+        ⚠️ `batch`（⑩ 拼批头，B）：同上，`None` = **规则档**（`multi_drop=True` 时 `_collect_multi`
+        按队列序取满容量；`multi_drop=False` 时该开关无意义）；`run_gated` 传 `_make_batch_fn(...)`
+        的返回值。透传给每台 `AgvSim`，`_collect_batch` 消费。
         ⚠️ `charger_res` 存成活引用（`self.charger_res`）：`snapshot()` 要按它报**当时**的桩占用
         （C 头的候选特征原料）——不存的话快照只能看到空表，占用维恒 0（静默死维）。
         """
@@ -1136,7 +1329,7 @@ class SimWorld:
                                entities, self.g, zm, self.constraints, specs[a],
                                np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
                                track, chargers=self.layout.chargers, charger_res=charger_res,
-                               bound=bound, route=route, charge=charge, fleet=agvs))
+                               bound=bound, route=route, charge=charge, fleet=agvs, batch=batch))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
@@ -1268,8 +1461,9 @@ class SimWorld:
         都算，见下）。另外两个约束量：`JobState.rework_cnt` = 该作业**累计**返工次数（与
         `stats["rework_events"]` 同分支 ++）；`VehicleState.zone_wait` = 该车**当前**区段等待
         时长（`ZoneManager.current_wait`，不在等待 = 0.0，放行即清零）。
+        `queued_tasks` = **队列内容**（逐件身份，⑩ 拼批头的原料；两种队列形状都接，见下）。
         """
-        from .snapshot import JobState, MachineState, Snapshot, VehicleState
+        from .snapshot import JobState, MachineState, QueuedTask, Snapshot, VehicleState
         ms = []
         for i, m in enumerate(self.machines):
             q = m.in_q.items
@@ -1311,6 +1505,16 @@ class SimWorld:
         # 车上那部分必须单独数，因为已装车的批次**已经离开队列**。
         queued = (sum(len(s.items) for s in self.tasks_in) if isinstance(self.tasks_in, list)
                   else len(self.tasks_in.items))
+        # ⑩ 拼批头：队列**内容**（逐件身份，队列序）。两种形状都接——`bound` 每车一张表
+        # 标 `veh = 车号`；FIFO 共享表标 `veh = -1`。任务身份口径 = `_transporter` 的
+        # `task = (frm, to, item, _path)`，**不另造**（见 `snapshot.QueuedTask`）。
+        qt: list[QueuedTask] = []
+        for a, store in (list(enumerate(self.tasks_in)) if isinstance(self.tasks_in, list)
+                         else [(-1, self.tasks_in)]):
+            for t in store.items:
+                item = t[2]
+                qt.append(QueuedTask(veh=int(a), job=int(item[0]), frm=int(t[0]),
+                                     to=int(t[1]), oi=int(item[1])))
         return Snapshot(now=float(self.env.now), machines=tuple(ms), jobs=tuple(js),
                         vehicles=tuple(vs), n_done=len(self.completes),
                         in_flight=queued + sum(self._agv_load_n),
@@ -1329,7 +1533,8 @@ class SimWorld:
                         chargers=tuple(ChargerState(occupied=int(res.count),
                                                     waiting=len(res.queue),
                                                     capacity=int(res.capacity))
-                                       for res in self.charger_res))
+                                       for res in self.charger_res),
+                        queued_tasks=tuple(qt))
 
     def _zone_wait_max(self) -> tuple[float, ...]:
         """逐区段的**当前**等待压力 `(n_zones,)`——每个区段取"正在等它"的车里最大的等待时长。
@@ -1433,6 +1638,11 @@ class SimWorld:
                 "agv_dry_events": stats["agv_dry_events"],
                 # ⑨ failover：故障期间退回/转交的任务件数（默认关 ⟹ 恒 0）
                 "agv_failover_tasks": stats["agv_failover_tasks"],
+                # ⑩ multi-drop / 拼批读数（**只在 multi_drop 档非零**，默认档恒 0）：
+                # 取货次数 / Σ 批大小 / 批大小 ≥2 的次数（存在性判据的直接读数）
+                "batch_trips": stats.get("batch_trips", 0),
+                "batch_items": stats.get("batch_items", 0),
+                "batch_ge2": stats.get("batch_ge2", 0),
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
@@ -1457,7 +1667,8 @@ class SimWorld:
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
-                  policy_r=None, route_k: int = 2, policy_m=None, policy_c=None) -> dict:
+                  policy_r=None, route_k: int = 2, policy_m=None, policy_c=None,
+                  policy_b=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1498,11 +1709,20 @@ class SimWorld:
         ⚠️ `policy_c` 非空但 ⑪ `charging` 关闭 → **显式报错**：⑪ 关时电池从不增减、
         充电桩机制根本不存在（决策点不存在），给策略一个死动作只会污染链 logp。
 
-        ⚠️ 三个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
+        ⚠️ **`policy_b`（⑩ 拼批头，B）**：`None`（默认）= **规则档**——`SimConfig.multi_drop`
+        打开时 `AgvSim._collect_multi` 按"全队列同取货点、队列序、取满容量"拼批；
+        非空 = **策略驱动**：AGV 在取货点、头件已取走后，在**预构造的批次候选**
+        （`batch_cands`：s = 0..min(capacity−1, 同取货点任务数)）里选一个。契约与五头对称：
+        `policy_b(snap, aid, job, frm, to, oi, cands) -> 动作码`。
+        ⚠️ `policy_b` 非空但 `SimConfig.multi_drop` 关 → **显式报错**：单卸货点模型下
+        一趟只有一个卸货点、载量恒用不上（决策点不存在），给策略一个死动作只会污染链 logp。
+
+        ⚠️ 多个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
         `algo/` 层做。决策留痕同理：`group_rel.roll_chain` 自记自己的 `Decision` 链
         （旧的 `dict["decision_log"]` 回传因零消费者已删，评审 M-2）。
         """
-        if policy_l is None and not online_s and policy_m is None and policy_c is None:
+        if (policy_l is None and not online_s and policy_m is None and policy_c is None
+                and policy_b is None):
             return self.run(seed_chain=seed_chain, op_choices=op_choices)
         if online_s and policy_s is None:
             raise ValueError("online_s=True 需要 policy_s 回调（S 层决策入口）")
@@ -1533,6 +1753,15 @@ class SimWorld:
                     "根本不存在（决策点不存在），给策略一个死动作只会污染链 logp。"
                     "请开 ⑪ 或传 policy_c=None。")
             charge_fn = self._make_charge_fn(policy_c)
+        batch_fn = None
+        if policy_b is not None:
+            if not self.cfg.multi_drop:
+                raise ValueError(
+                    "policy_b 非空但 SimConfig.multi_drop=False：单卸货点模型下一趟只有一个"
+                    "卸货点、载量上限永远用不上（`_collect` 只拼同 (取货点, 卸货点)）——"
+                    "决策点不存在，给策略一个死动作只会污染链 logp。"
+                    "请开 multi_drop 或传 policy_b=None。")
+            batch_fn = self._make_batch_fn(policy_b)
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -1572,7 +1801,8 @@ class SimWorld:
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
-                                          route=route_fn, pm=pm_fn, charge=charge_fn)
+                                          route=route_fn, pm=pm_fn, charge=charge_fn,
+                                          batch=batch_fn)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1607,6 +1837,10 @@ class SimWorld:
                 "agv_dry_events": stats["agv_dry_events"],
                 # ⑨ failover：故障期间退回/转交的任务件数（默认关 ⟹ 恒 0）
                 "agv_failover_tasks": stats["agv_failover_tasks"],
+                # ⑩ multi-drop / 拼批读数（同 run()：只在 multi_drop 档非零）
+                "batch_trips": stats.get("batch_trips", 0),
+                "batch_items": stats.get("batch_items", 0),
+                "batch_ge2": stats.get("batch_ge2", 0),
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "fail_events": stats["fail_events"],
@@ -1730,6 +1964,29 @@ class SimWorld:
             return choice
 
         return charge
+
+    def _make_batch_fn(self, policy_b):
+        """构造 **⑩ 拼批决策（B）** 的回调 `batch(aid, job, frm, to, oi, cands) -> 动作码`。
+
+        契约与 S/L/R/M/C 五头对称：`env/` 只给**原始快照**（此刻的活状态）、任务身份与候选
+        动作码，**不构造特征**（层次纪律：`env/` 不得依赖 `nn/`）——B 头的决策特征与逐候选
+        特征由 `algo/` 侧从快照 + 任务身份自造（见 `group_rel.batch_feat` / `_batch_cand_feat`）。
+        候选集由仿真侧按 `batch_cands` 现算（与 `algo/` 侧**同一函数、同一顺序**——两处不可能漂）。
+        ⚠️ 候选 < 2 时 `_collect_batch` **根本不调本回调**（无同取货点任务 = 不构成决策），
+        故这里不会再遇到"单候选"的退化情形。
+        ⚠️ 非候选动作**显式报错**（同其余五头）：静默回退会掩盖策略/候选集不一致，
+        让整条链的 logp 与动作错位而无人察觉。
+        """
+
+        def batch(aid: int, job: int, frm: int, to: int, oi: int, cands: tuple[int, ...]) -> int:
+            snap = self.snapshot()                  # 只读（见 `snapshot()` 的契约）
+            choice = int(policy_b(snap, int(aid), int(job), int(frm), int(to), int(oi), cands))
+            if choice not in cands:
+                raise ValueError(f"policy_b 选了非候选动作 {choice}；候选={cands}"
+                                 f"（本车 {aid}，{frm}→{to}，作业 {job}）")
+            return choice
+
+        return batch
 
     @staticmethod
     def _release(env, store, item):
