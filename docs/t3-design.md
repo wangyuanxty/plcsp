@@ -1,6 +1,12 @@
 # T3 拉格朗日：实现设计（2026-10-05）
 
-> **状态：设计，未实现。** 它是**冻结前的最后一个阻塞项**。
+> **状态：已实现（2026-10-05，T3 批）。** 落点：`plcsp/env/t3_budget.py`（冻结预算表 +
+> 对偶上升 + 可控性守卫）、`plcsp/algo/group_rel.py`（罚项进优势、λ 回传）、
+> `plcsp/algo/runner.py`（λ 的跨步持有者）、`plcsp/m17_t3_calib.py`（标定脚本）、
+> `plcsp/m13_train_a.py`（CLI）、`plcsp/tests/test_t3_{budget,lagrangian}.py`（验收）。
+> ⚠️ **实现与本设计的三处偏差（含理由）记在 `docs/progress-log.md` §49**——
+> 标定环境、③ 的可控性守卫、G=2 时罚项结构性失效。
+>
 > 依据：`docs/mechanism-designs.md` §T3（预算原则已定）+ 用户 2026-10-05 的裁定 +
 > `docs/method-transfer-candidates.md` §6.7（T3 进冻结前清单）。
 > **本文只为开工前定死接口与验收判据**，不是 spec、不是计划。

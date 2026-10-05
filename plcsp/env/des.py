@@ -429,6 +429,9 @@ class MachineSim:
                     if self.pm_clock >= self.cfg.pm_interval:
                         yield self.env.timeout(self.cfg.pm_duration)
                         self.stats["pm_events"] += 1
+                        # T3 ⑫：被阈值强制触发的那部分。`.get` 兜底——手搓 stats 的测试夹具
+                        # 不带新键（同 `agv_dry_events` 的既有写法）
+                        self.stats["pm_events_forced"] = self.stats.get("pm_events_forced", 0) + 1
                         self.pm_clock = 0.0
                 else:                                   # 策略驱动（⑫ 维护头）
                     yield from self._pm_after_op()
@@ -447,10 +450,22 @@ class MachineSim:
         ⚠️ 回调**只拿机台号**：快照与候选特征由 `algo/` 层自取（层次纪律，同 `run_gated`），
         且它必须与规则同记账（`pm_events` / `pm_duration` / `pm_clock` 归零）——否则两条
         驱动路径的指标不可比。
+        ⚠️ **`pm_events` 拆三键（T3 ⑫）**：`pm_events_forced` = 逾期强制触发的那部分、
+        `pm_events_chosen` = 策略在未逾期时**主动**选的那部分，`pm_events` = 两者之和
+        （既有读数不变）。T3 的 ⑫ 激活量**只取 forced**——罚"策略主动保养"等于罚它刚拿到
+        的动作（`mechanism-designs.md` §T3 的关键定义）。
         """
-        if self.pm_clock >= self.cfg.pm_interval or self.pm(self.pad.id) == PM_CAND_NOW:
+        if self.pm_clock >= self.cfg.pm_interval:
             yield self.env.timeout(self.cfg.pm_duration)
             self.stats["pm_events"] += 1
+            # 逾期：规则是硬底线，策略只能提前。`.get` 兜底（手搓 stats 的夹具不带新键）
+            self.stats["pm_events_forced"] = self.stats.get("pm_events_forced", 0) + 1
+            self.pm_clock = 0.0
+        elif self.pm(self.pad.id) == PM_CAND_NOW:
+            yield self.env.timeout(self.cfg.pm_duration)
+            self.stats["pm_events"] += 1
+            # 未逾期：策略主动选的（T3 不罚这部分）
+            self.stats["pm_events_chosen"] = self.stats.get("pm_events_chosen", 0) + 1
             self.pm_clock = 0.0
 
     def run(self):
@@ -1065,8 +1080,13 @@ class AgvSim:
                 self.stats["agv_del"][self.aid] += 1
                 self.stats["agv_pos"][self.aid] = t2
                 # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
+                # ⚠️ T3 ② 的激活量 = **被迫等待时长 [min]**（本循环累计），两处投递路径
+                # （本函数 + `run` 的单卸货点段）**各记一处**，漏一处即低估一半。
+                _t_block = self.env.now
                 while len(self.machines[t2].in_q.items) >= self.machines[t2].in_q.capacity:
                     yield self.env.timeout(self.cfg.zone_hold)
+                self.stats["buffer_block_min"] = (self.stats.get("buffer_block_min", 0.0)
+                                                  + (self.env.now - _t_block))
                 yield self.machines[t2].in_q.put(_item2)
                 self.track.job_agv[_item2[0]] = -1       # 投递完成，工件离车
                 self.stats["deliveries"] += 1
@@ -1215,8 +1235,15 @@ class AgvSim:
                 self.stats["agv_del"][self.aid] += 1  # L 层状态轨迹（负载差/最后位置）
                 self.stats["agv_pos"][self.aid] = t2
                 # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
+                # ⚠️ T3 ② 的激活量 = **被迫等待时长 [min]**（本循环累计）。它与
+                # `_deliver_multi` 的同名循环是**两处独立落点**——本处走单卸货点档，那处走
+                # multi-drop 档；少记一处 = 该档的 ② 激活量恒 0（静默低估）。
+                _t_block = self.env.now
                 while len(self.machines[t2].in_q.items) >= self.machines[t2].in_q.capacity:
                     yield self.env.timeout(self.cfg.zone_hold)
+                # `.get` 兜底：手搓 stats 的测试夹具不带新键（同 `agv_dry_events` 的写法）
+                self.stats["buffer_block_min"] = (self.stats.get("buffer_block_min", 0.0)
+                                                  + (self.env.now - _t_block))
                 yield self.machines[t2].in_q.put(_item2)
                 self.track.job_agv[_item2[0]] = -1       # 快照跟踪（P2 Task 1）：投递完成，工件离车
                 self.stats["deliveries"] += 1
@@ -1573,7 +1600,11 @@ class SimWorld:
                  "setup_min": [0.0] * self.inst.n_machines,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
+                 # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
                  "rework_events": 0, "pm_events": 0,
+                 "pm_events_forced": 0, "pm_events_chosen": 0,
+                 # ② 有限缓冲：因输入缓冲满而**被迫等待**的累计时长 [min]（T3 ② 的激活量）
+                 "buffer_block_min": 0.0,
                  # 物流侧约束的事件计数（⑨⑩⑪）
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
                  # ⑪ 模型修复的读数：任务边界上发现本车耗尽的次数（"不可用"事件的计数）
@@ -1634,6 +1665,11 @@ class SimWorld:
                 "setup_minutes_total": float(sum(stats["setup_min"])),
                 "rework_events": stats["rework_events"],
                 "pm_events": stats["pm_events"],
+                # ⑫ 拆键（T3）：forced = 被阈值强制触发（T3 的激活量）、chosen = 策略主动选
+                "pm_events_forced": stats["pm_events_forced"],
+                "pm_events_chosen": stats["pm_events_chosen"],
+                # ② 有限缓冲：被迫等待时长 [min]（T3 ② 的激活量；两处投递路径都计）
+                "buffer_block_min": float(stats["buffer_block_min"]),
                 "trips": stats["trips"], "charge_events": stats["charge_events"],
                 "agv_fail_events": stats["agv_fail_events"],
                 "agv_dry_events": stats["agv_dry_events"],
@@ -1772,7 +1808,11 @@ class SimWorld:
                  "setup_min": [0.0] * self.inst.n_machines,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
+                 # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
                  "rework_events": 0, "pm_events": 0,
+                 "pm_events_forced": 0, "pm_events_chosen": 0,
+                 # ② 有限缓冲：因输入缓冲满而**被迫等待**的累计时长 [min]（T3 ② 的激活量）
+                 "buffer_block_min": 0.0,
                  # 物流侧约束的事件计数（⑨⑩⑪）
                  "trips": 0, "charge_events": 0, "agv_fail_events": 0,
                  # ⑪ 模型修复的读数：任务边界上发现本车耗尽的次数（"不可用"事件的计数）
@@ -1831,6 +1871,12 @@ class SimWorld:
                 "setup_minutes_total": float(sum(stats["setup_min"])),
                 "rework_events": stats["rework_events"],
                 "pm_events": stats["pm_events"],
+                # ⑫ 拆键（T3）：forced = 被阈值强制触发（T3 的激活量）、chosen = 策略主动选。
+                # 规则档 forced == pm_events、chosen == 0（规则不会主动提前保养）。
+                "pm_events_forced": stats["pm_events_forced"],
+                "pm_events_chosen": stats["pm_events_chosen"],
+                # ② 有限缓冲：被迫等待时长 [min]（T3 ② 的激活量；两处投递路径都计）
+                "buffer_block_min": float(stats["buffer_block_min"]),
                 # 物流侧约束的事件计数（⑨⑩⑪）——run_gated 此前不带，⑪ C 头的效果读数要用
                 # （`charge_events`）/ 模型修复的读数要用（`agv_dry_events`），故补齐。
                 "trips": stats["trips"], "charge_events": stats["charge_events"],
@@ -1852,7 +1898,13 @@ class SimWorld:
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
                 "travel_time_total": float(stats["travel_time"]),
-                # 口径随结果自报（同 run()；run_gated 此前连 zone_wait 都没带，本批不动它）
+                # ① 区段等待（T3 ① 的激活量 `zone_wait["total"]`）——run_gated 此前**没带**，
+                # 而训练路径走的正是它（`roll_chain`）⟹ 不补这一键则 T3 的 ① 读不到激活量。
+                # 口径与 run() 逐字相同（`zm.waits` 的 n/total/max）。
+                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
+                              "max": float(max(zm.waits)) if zm.waits else 0.0},
+                "n_zones": zm.n,
+                # 口径随结果自报（同 run()）
                 "transport": self.inst.transport,
                 "unmapped_legs": stats.get("unmapped_legs", 0),
                 "unmapped_min": float(stats.get("unmapped_min", 0.0))}

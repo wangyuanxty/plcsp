@@ -58,6 +58,7 @@ G=4 5.00 s/步，基准 3.00/12.75），**本批未实现为开关**（需两模
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 from statistics import mean, pstdev
 
@@ -68,9 +69,11 @@ from .algo.policy import PolicyNet
 from .algo.runner import run_training
 from .algo.setup import build_setup
 from .env.constraints import ConstraintConfig
-from .env.des import SimConfig, rollout
+from .env.des import CHARGE_CAND_SKIP, PM_CAND_NOW, SimConfig, rollout
 from .env.instances import load_mk
 from .env.reward import ReferenceObjectives, reward_weights
+from .env.t3_budget import (BUDGET_RATIO, T3_CONSTRAINTS, T3_ETA, T3Budget,
+                            T3Lagrangian, action_usage, check_influenceable)
 from .nn.encoder import LayoutEncoder
 
 # 评估种子起点。⚠️ **必须避开训练用过的扰动流**（评审 F1 修的就是这里）：`joint_chain_step`
@@ -130,7 +133,7 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                   constraints: ConstraintConfig | None = None, route_k: int = 1,
                   route_zones: bool = False, geom_bias: bool = False,
                   pm_head: bool = False, charge_head: bool = False,
-                  batch_head: bool = False):
+                  batch_head: bool = False, t3: bool = False):
     """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。
 
     ⚠️ `constraints` 必须与训练同一份（R2）：评估跑的是训练后的策略，动力学口径不一致
@@ -142,16 +145,37 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     它们每一个都改变**策略看到的输入或动作空间**——训练开、评估关 = 用**另一个策略**评估。
     `cfg` 里的 `agv_failover` / `machine_age_failure` 是**动力学**开关，随 `cfg` 一并到达，同理必须同源。
     **本函数的每个开关都要与 `main` 传给 `joint_chain_step` 的那一份逐字相同。**
+    ⚠️ **`t3`**：T3 **不改动力学、也不改策略输入**（罚项只在训练的优势上），故评估不需要它；
+    但 T3 的上界判据（设计 §4.2"预算过紧会把动作推成单一取值"）要在**训练后的策略**上看——
+    故 `t3=True` 时额外报两个动作使用率（⑪ 充电 / ⑫ 保养频率），供退化守卫读数。
     """
     def eval_fn(policy) -> dict:
-        ms = [float(roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
-                               ctx=ctx, sample=False, constraints=constraints,
-                               route_k=route_k, route_zones=route_zones,
-                               geom_bias=geom_bias, pm_head=pm_head,
-                               charge_head=charge_head, batch_head=batch_head)[1]["makespan"])
-              for s in range(seeds)]
-        return {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
-                "rule_makespan": rule}
+        ms, jobs, hits = [], [], []
+        charge_use, pm_now = [], []
+        for s in range(seeds):
+            dec, met = roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
+                                  ctx=ctx, sample=False, constraints=constraints,
+                                  route_k=route_k, route_zones=route_zones,
+                                  geom_bias=geom_bias, pm_head=pm_head,
+                                  charge_head=charge_head, batch_head=batch_head)
+            ms.append(float(met["makespan"]))
+            # ⚠️ 完成度必须一起报：未跑完的 episode 的 makespan 是**部分完工的最大值**
+            #（`max(completes)`），单看它会读出"小得多的 makespan"这种假改进。
+            jobs.append(int(met["jobs_done"]))
+            hits.append(bool(met["horizon_hit"]))
+            if t3:      # 退化守卫（上界）的动作分布读数：只在 T3 档报
+                charge_use.append(action_usage(dec, "C",
+                                               lambda a: a != CHARGE_CAND_SKIP))
+                pm_now.append(action_usage(dec, "M", lambda a: a == PM_CAND_NOW))
+        out = {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
+               "rule_makespan": rule,
+               "jobs_done_min": min(jobs), "horizon_hit_frac": sum(hits) / len(hits)}
+        if t3:
+            # ⑪ 的"充电动作使用率"与 ⑫ 的"主动保养占比"——上界退化守卫的直接读数
+            #（`t3_budget.usage_is_degenerate` 是判据；这里只报分布）
+            out["charge_action_usage"] = mean(charge_use)
+            out["pm_now_rate"] = mean(pm_now)
+        return out
     return eval_fn
 
 
@@ -205,6 +229,23 @@ def main() -> None:
                          "`pm_clock`（主轴工时、保养归零）按 Weibull 递增风险上升 ⟹ ③ 有记忆、"
                          "⑫ 多一重收益。**改动力学**；Weibull 形状参数标 assumed、引文待核"
                          "（见 progress-log §44）")
+    # ── T3 拉格朗日（2026-10-05；默认关 ⟹ 逐位不变）──
+    ap.add_argument("--t3", action="store_true",
+                    help="T3 拉格朗日：奖励加罚项 r' = r − Σλᵢâᵢ，λ 对偶上升（无 critic）。"
+                         "默认关（优势路径一字不改，逐位等于既有读数）。需要配套的**动作头**"
+                         "（⑫/③ 要 --pm-head（③ 还要 --machine-age-failure）、⑪ 要 --charge-head）"
+                         "——没有对应动作的约束不可控，入口显式报错（同 ④⑨ 不纳入的理由）。"
+                         "λ 由训练环跨步持有、初值 0；`--resume` 不恢复 λ（见 runner）")
+    ap.add_argument("--t3-constraints", default="all",
+                    help='T3 的约束子集（逗号分隔）：all（默认，六条全上：'
+                         f'{",".join(T3_CONSTRAINTS)}）或子集如 "congestion,finite_buffer,setup_time"')
+    ap.add_argument("--t3-ratio", type=float, default=BUDGET_RATIO,
+                    help=f"预算比例 b = ratio × a^ref（默认 {BUDGET_RATIO}；a^ref 是冻结表里的"
+                         "参考激活量，见 env/t3_budget.py）。⚠️ 双侧判据的旋钮：太松 ⟹ 机制空转、"
+                         "太紧 ⟹ 把动作咬死（上界守卫盯动作分布）")
+    ap.add_argument("--t3-eta", type=float, default=T3_ETA,
+                    help=f"对偶上升步长 η（默认 {T3_ETA}）：λ ← clip(λ + η(â − b), 0, λ_max)；"
+                         "⚠️ 待扫（太大震荡、太小到不了预算），默认值只是可用起点")
     # ⚠️ 本节唯一**不改数值语义**的开关（它只改"分几次算"）：故不进 `_make_eval_fn`
     #    （评估走 `roll_chain(sample=False)`，**不做 logp 重算** ⟹ 与它无关）。
     ap.add_argument("--recompute-chunk", type=int, default=0, metavar="N",
@@ -215,6 +256,16 @@ def main() -> None:
                          "实测 mk10 全开档：**128 → 峰值 1.32 GB、步时 126 s**（未分段 49.58 GB / "
                          "171 s——省显存与提速同时发生，因为未分段那一路在撞分配器重试）。"
                          "但**显存够用时它更慢**（反向要按段重算）：**它是换显存的手段，不是提速的**")
+    ap.add_argument("--pm-interval", type=float, default=None, metavar="MIN",
+                    help="⑫ 的保养间隔 [主轴分钟]（**机制验证档**）。默认 None = SimConfig 的 "
+                         "120——MK01 每机负载 ~25.5 主轴分钟 ⟹ **从不逾期**，⑫ 的被迫激活量"
+                         "（`pm_events_forced`）恒 0、T3 的 ⑫ 罚项不被激活（这是 T3 标定用"
+                         "短间隔档的理由，见 env/t3_budget.py）。改它 = 改动力学，读数与默认档不可比")
+    ap.add_argument("--agv-battery-kwh", type=float, default=None, metavar="KWH",
+                    help="把车队电池全换成该容量 [kWh]（**机制验证档**，同 test_charge_head 的"
+                         "小电池口径：0.10 + `battery_low=0`）。默认 None = 布局默认 2–4 kWh——"
+                         "一个 episode 放不空 ⟹ ⑪ 的耗尽激活量（`agv_dry_events`）恒 0，"
+                         "T3 的 ⑪ 罚项无从生效。**改布局 ⟹ 读数与默认档不可比**（电池是布局属性）")
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="策略所在设备：默认 cpu（本仓测试环境是 CPU-only torch）。"
                          "cuda = 整步（在线前向 + 批重算）都在 GPU 上——重算的批大小是 "
@@ -262,7 +313,21 @@ def main() -> None:
     cfg = SimConfig(agv_failover=args.agv_failover,
                     machine_age_failure=args.machine_age_failure,
                     multi_drop=args.multi_drop)
+    # ⚠️ 小电池档（可选）：电池是**布局**属性、`battery_low` 是 **cfg** 属性，两者必须一起改
+    #    （同 `test_charge_head` 的口径：只改电池不改 `battery_low`，规则档会在低电就补电、
+    #    **到不了耗尽**）。`battery_low` 必须在 `build_training_setup` **之前**进 cfg——
+    #    否则 `ctx` 与 `ReferenceObjectives.of` 会按两份 cfg 取参考运行（m_ref 与 f^ref
+    #    不同源，静默错位）。车队的电池替换在布局采样之后做（布局是 `build_training_setup` 产的）。
+    if args.agv_battery_kwh is not None:
+        cfg = replace(cfg, battery_low=0.0)
+    if args.pm_interval is not None:
+        cfg = replace(cfg, pm_interval=args.pm_interval)
     inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst, cfg=cfg)
+    if args.agv_battery_kwh is not None:
+        from .env.layout import AgvSpec
+        for i, a in enumerate(lay.agvs):
+            lay.agvs[i] = AgvSpec(id=a.id, speed_factor=a.speed_factor,
+                                  capacity=a.capacity, battery_kwh=args.agv_battery_kwh)
     # ⚠️ 设备在**建好策略之后**统一搬（`--device cuda` 时整步在 GPU 上：在线前向经
     #    `forward_enc`、批重算经 `_decision_logp_terms`、动作采样流经 `policy.device` 三处
     #    全部跟随参数设备，没有任何一处硬编码 cpu）。
@@ -282,8 +347,28 @@ def main() -> None:
           f"geom_bias={args.geom_bias} pm_head={args.pm_head} "
           f"charge_head={args.charge_head} batch_head={args.batch_head} "
           f"multi_drop={args.multi_drop} agv_failover={args.agv_failover} "
-          f"machine_age_failure={args.machine_age_failure}")
+          f"machine_age_failure={args.machine_age_failure} t3={args.t3}")
+    if args.agv_battery_kwh is not None:
+        print(f"[m13] ⚠️ 小电池档：车队电池全换 {args.agv_battery_kwh} kWh、battery_low=0 "
+              f"（电池是**布局**属性 ⟹ 改动力学，与默认档读数不可比；⑪ 这才可能跑到耗尽）")
+    if args.pm_interval is not None:
+        print(f"[m13] ⚠️ 短保养间隔档：pm_interval={args.pm_interval}（改动力学；⑫ 的被迫激活量"
+              f" `pm_events_forced` 这才可能非零）")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
+    # T3：预算表查不到实例 ⟹ `T3Budget` 显式报错（未标定实例不得静默无罚项）。
+    # ⚠️ 可控性守卫在**开工前**查（同一个函数也守在 `joint_chain_step` 入口）——
+    #    否则要跑完参考运行才发现"⑫ 罚了但策略没有保养动作"。
+    t3_state = None
+    if args.t3:
+        keep = (tuple(T3_CONSTRAINTS) if args.t3_constraints == "all" else
+                tuple(s.strip() for s in args.t3_constraints.split(",") if s.strip()))
+        check_influenceable(keep, args.pm_head, args.charge_head, cfg.machine_age_failure)
+        budget = T3Budget(inst, keep=keep, ratio=args.t3_ratio)
+        t3_state = T3Lagrangian(budget, eta=args.t3_eta)
+        print(f"[m13] T3 开：keep={budget.keep}｜{budget.describe()}")
+        print(f"[m13] T3 λ0=0、η={t3_state.eta}、λ_max={t3_state.lam_max}；λ 由训练环跨步持有"
+              f"（`--resume` 不恢复 λ）；退化守卫读数走 --eval-every 的 charge_action_usage /"
+              f" pm_now_rate", flush=True)
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
     print(f"[m13] seed={args.seed} 锁定「初始化 + 仿真流 + 动作采样」：同 seed 可逐位复现"
           "（同设备跨进程亦然；例外：--resume 续跑，以及跨设备——CPU/CUDA 的动作采样流不同，"
@@ -307,9 +392,11 @@ def main() -> None:
                                         geom_bias=args.geom_bias,
                                         pm_head=args.pm_head,
                                         charge_head=args.charge_head,
-                                        batch_head=args.batch_head)
+                                        batch_head=args.batch_head,
+                                        t3=args.t3)
                           if args.eval_every > 0 else None),
-                 eval_every=(args.eval_every or None))
+                 eval_every=(args.eval_every or None),
+                 t3=t3_state)
     print(f"[m13] 完成：{run_dir / 'metrics.ndjson'}（每步一行）｜{run_dir / 'ckpt.pt'}")
 
 

@@ -31,7 +31,9 @@ def _spy(monkeypatch) -> dict:
     def fake(*_a, **kw):
         seen.clear()
         seen.update(kw)
-        return [], {"makespan": 1.0}
+        # 完成度两键：`_make_eval_fn` 自 2026-10-05（T3 批）起一并报它们——未跑完的 episode
+        # 的 makespan 是**部分完工**的最大值，单看会把掐表读成改进。
+        return [], {"makespan": 1.0, "jobs_done": 1, "horizon_hit": False}
 
     monkeypatch.setattr(m13, "roll_chain", fake)
     return seen
