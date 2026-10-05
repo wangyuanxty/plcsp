@@ -176,7 +176,7 @@ def test_trained_argmax_beats_rule_baseline(a_run: _ARun):
     规则基线 = `rollout`（每工序取最短候选 + 规则派车，`seed_chain=0`）——即 `M_ref` 的
     同一次运行（与 `ReferenceObjectives` 同源），故这条断言的分母与奖励口径一致。
 
-    ⚠️ **R1 预警过"30 步可能反超不了"**，故本条**实测定档**（同进程、`torch.manual_seed(0)`，
+    ⚠️ **R1 预警过"30 步可能反超不了"**，故本条**按实测确定**（同进程、`torch.manual_seed(0)`，
     布局 seed 0、默认 `SimConfig`）：训练后 **81.8** vs 规则 **103.4**（**−20.9%**），
     逐种子 `[75.0, 78.8, 87.8, 80.8, 79.1, 87.0, 92.3, 86.7, 75.0, 75.1]`。**反超余量足够，
     故保留严格 `<`，不降级**；牙齿由 `test_untrained_control_does_not_beat_rule_baseline` 提供

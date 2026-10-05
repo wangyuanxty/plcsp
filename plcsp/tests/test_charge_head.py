@@ -8,7 +8,7 @@
    堵死（死锁），故车必须能跑完**已开始**的行程。
    没有这条修复，充电是**纯成本、零收益**（行驶 + 充电时长 + 计入能耗目标），
    最优策略是"永不充"，C 决策退化。
-   ⚠️ 电池只在 ⑪ `charging` 开启时增减，故 **⑪ 关档本修复不可能触发**——既有 ⑪ 关读数
+   ⚠️ 电池只在 ⑪ `charging` 开启时增减，故 **⑪ 关态本修复不可能触发**——既有 ⑪ 关读数
    （含 `ABLATION_GROUPS["-物流"]` 与 `None` 组）继续有效。
 
 2. **C 决策**：`AgvSim._maybe_charge` 的规则（低电 → 最近**空闲**桩）改为策略决策，
@@ -18,14 +18,14 @@
    同型）；候选之间的分数差只能来自 `feat_cand`，上下文只经 GELU 的非线性调节敏感度。
 
 **判据**（与设计文档 §⑪ 的验收一致）：
-1. `charge_head=False`（默认）⟹ 链路逐位等于今日（黄金摘要钉死）；⑪ 关档同样逐位不变；
+1. `charge_head=False`（默认）⟹ 链路逐位等于今日（黄金摘要钉死）；⑪ 关态同样逐位不变；
 2. C 决策真的进链 logp、有梯度、同 seed 可复现；
 3. **生产路径**的 token 下标守卫（不得自己提供下标）+ 变异检查（见 `docs/progress-log.md` §31）；
-4. liveness 两半：小电池档**真的会耗尽**（`agv_dry_events`）；「永远现在充」策略相对规则档
+4. liveness 两半：小电池验证档**真的会耗尽**（`agv_dry_events`）；「永远现在充」策略相对规则配置
    **可测地改变行为**。
 
 ⚠️ **默认参数不动**（§27.1 纪律一）：`layout.sample_layout` 的默认电池 2–4 kWh 在一个
-episode 里放不空（实测 mk01 全程每车耗电 ~0.1–0.27 kWh）。故验证一律用**显式小电池档**
+episode 里放不空（实测 mk01 全程每车耗电 ~0.1–0.27 kWh）。故验证一律用**显式小电池验证档**
 （`AgvSpec(battery_kwh=0.10)` + `battery_low=0.0`，同 `m11_constraint_binding` 的先例）——
 改默认会为第二个不必要的理由作废全部读数。
 """
@@ -50,21 +50,21 @@ from plcsp.env.layout import AgvSpec
 from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.features import F_MAX, SEG_SLICE
 
-# 黄金摘要：`charge_head=False` 档的链路指纹（决策类型 + 全部打分上下文 + tok_idx + 动作 +
+# 黄金摘要：`charge_head=False` 配置的链路指纹（决策类型 + 全部打分上下文 + tok_idx + 动作 +
 # 采样 logp + 关键指标）。**捕获自改造前的树**（`git stash` 前的 HEAD，脚本在系统临时目录），
 # 并与 `test_maintenance_head.PM_HEAD_OFF_DIGEST` **同值**——这两条钉的是同一条默认路径，
-# 一个改建档行为的改动会同时翻红两处。
+# 一个改变该配置行为的改动会同时翻红两处。
 #   kinds={'S':55,'L':65} n=120，makespan=118.8647282376667
 CHARGE_HEAD_OFF_DIGEST = "5a06255d6d57d2f507c7186a198c11ec056454a359265809c80da40c98f4c5ae"
 
-# ⑪ 关档的链路指纹——**同样捕获自改造前的树**。本修复的"不可能触发"由此证明：
+# ⑪ 关态的链路指纹——**同样捕获自改造前的树**。本修复的"不可能触发"由此证明：
 # 关掉 ⑪ 后电池恒为 `battery_cap`（`_drain` / `_drain_idle` / `_maybe_charge` 全部直接返回），
 # `battery <= 0` 恒不成立，耗尽门永不生效 ⟹ 链路逐位不变。
 CHARGING_OFF_DIGEST = "dc766fd04a6d042cd65ca924e3e2727311f49cf19072ad739a7847551b8304d5"
 
-# 验证用的**小电池档**：电池 0.10 kWh + `battery_low=0.0`。
+# 验证用的**小电池验证档**：电池 0.10 kWh + `battery_low=0.0`。
 # ⚠️ `battery_low` 必须为 0：默认 0.20 时规则在 0.02 kWh 就补电，电池**到不了 0**
-# （实测 mk01 默认档最小 2.64 kWh、0.3 kWh 档最小 0.098 kWh）——那样本判据测不到任何东西。
+# （实测 mk01 默认配置最小 2.64 kWh、0.3 kWh 配置最小 0.098 kWh）——那样本判据测不到任何东西。
 # `low=0` 时规则只在**恰好 0** 动手，车必然先跑干（实测 3 个种子均触 0）。
 SMALL_BATTERY_KWH = 0.10
 
@@ -78,7 +78,7 @@ def _setup(charge=False, constraints=None):
 
 
 def _small_battery_setup(charge_off=False):
-    """小电池档的 (inst, layout, dm, cfg)：车队电池全换成 `SMALL_BATTERY_KWH`，`battery_low=0`。"""
+    """小电池验证档的 (inst, layout, dm, cfg)：车队电池全换成 `SMALL_BATTERY_KWH`，`battery_low=0`。"""
     inst = load_mk("mk01")
     cfg = SimConfig()
     cfg.battery_low = 0.0
@@ -132,7 +132,7 @@ class _NoMixEncoder(torch.nn.Module):
         return x, x.mean(dim=1)
 
 
-# ────────────────────────── 1. 关闭档逐位不变（摘要在前文） ──────────────────────────
+# ────────────────────────── 1. 关态逐位不变（摘要在前文） ──────────────────────────
 
 @pytest.mark.unit
 def test_charge_head_off_is_bit_identical_to_baseline():
@@ -141,14 +141,14 @@ def test_charge_head_off_is_bit_identical_to_baseline():
     torch.manual_seed(20261004)                 # 与捕获脚本逐字对齐的初始化锚点
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, charge_head=False)
-    assert [d.kind for d in dec].count("C") == 0, "关闭档不得产生 C 决策"
+    assert [d.kind for d in dec].count("C") == 0, "关态不得产生 C 决策"
     assert _chain_digest(dec, met) == CHARGE_HEAD_OFF_DIGEST, \
         "关闭充电头后链路变了——既有读数不再成立"
 
 
 @pytest.mark.unit
 def test_charging_off_is_bit_identical_to_baseline():
-    """判据 1（模型修复的"不可能触发"）：⑪ 关档 ⟹ 链路逐位等于改造前。
+    """判据 1（模型修复的"不可能触发"）：⑪ 关态 ⟹ 链路逐位等于改造前。
 
     ⑪ 关时电池恒为 `battery_cap`（`_drain` / `_drain_idle` / `_maybe_charge` 全部直接返回），
     `battery <= 0` 恒不成立——耗尽门永不生效。这是既有 ⑪ 关读数（-物流 / None 消融组）继续
@@ -161,7 +161,7 @@ def test_charging_off_is_bit_identical_to_baseline():
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx,
                           constraints=off, charge_head=False)
     assert _chain_digest(dec, met) == CHARGING_OFF_DIGEST, \
-        "⑪ 关档的链路变了——耗尽后果在 ⑪ 关时被触发了（本修复必须不可能）"
+        "⑪ 关态的链路变了——耗尽后果在 ⑪ 关时被触发了（本修复必须不可能）"
 
 
 @pytest.mark.unit
@@ -186,7 +186,7 @@ def test_charge_decisions_join_the_chain_and_its_logp():
     inst, lay, dm, cfg, ctx, pol = _setup()
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, charge_head=True)
     assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, \
-        f"充电头档跑不完：horizon_hit={met['horizon_hit']} jobs={met['jobs_done']}"
+        f"充电头配置跑不完：horizon_hit={met['horizon_hit']} jobs={met['jobs_done']}"
     c_dec = [d for d in dec if d.kind == "C"]
     assert len(c_dec) >= 10, f"C 决策太少（{len(c_dec)}）——判据失去意义"
     n_ch = len(lay.chargers)
@@ -318,7 +318,7 @@ def test_c_head_reads_the_deciding_agvs_token_on_the_production_path():
 def test_small_battery_agvs_really_run_dry_and_recover():
     """判据 4a：⑪ 开 + 小电池 ⟹ 车**真的跑到 0**（不可用），且**必须能恢复**（不死锁）。
 
-    规则档（C 关）也走耗尽门——这就是模型修复的落点：没有它，车在 0 电量照样接活，
+    规则配置（C 关）也走耗尽门——这就是模型修复的落点：没有它，车在 0 电量照样接活，
     "充电"是纯成本零收益。`agv_dry_events` = 任务边界上发现本车耗尽的次数。
     ⚠️ 断言"跑完 + 全部作业完成"是**防死锁**的读数：耗尽门只在任务边界（不持锁）判定，
     车总能跑完已开始的行程并补上电。
@@ -327,9 +327,9 @@ def test_small_battery_agvs_really_run_dry_and_recover():
     for s in (0, 1):
         r = SimWorld(inst, lay, dm, cfg, constraints=cons).run(seed_chain=s)
         assert r["jobs_done"] == inst.n_jobs and not r["horizon_hit"], \
-            f"小电池档未跑完（seed={s}）——耗尽门把仿真卡死了"
+            f"小电池验证档未跑完（seed={s}）——耗尽门把仿真卡死了"
         assert r["battery_min_kwh"] == 0.0, \
-            f"小电池档没跑到 0（min={r['battery_min_kwh']}）——本判据的前提不成立"
+            f"小电池验证档没跑到 0（min={r['battery_min_kwh']}）——本判据的前提不成立"
         assert r["agv_dry_events"] > 0, \
             f"车跑干了却不记为不可用（seed={s}）——耗尽没有后果，充电仍是无收益的成本"
         assert r["charge_events"] > 0, "跑干后没补过电——恢复路径断了"
@@ -341,12 +341,12 @@ def test_charging_off_never_produces_dry_events():
     inst, lay, dm, cfg, cons = _small_battery_setup(charge_off=True)
     world = SimWorld(inst, lay, dm, cfg, constraints=cons)
     r = world.run(seed_chain=0)
-    assert r["agv_dry_events"] == 0, "⑪ 关档出现耗尽——电池在没有 ⑪ 时也被扣了"
+    assert r["agv_dry_events"] == 0, "⑪ 关态出现耗尽——电池在没有 ⑪ 时也被扣了"
     # 电池恒为满（`battery_frac == 1.0`）；`battery_min_kwh` 的 0.0 是"无耗电记录"哨兵
     # （stats 里的 `inf` 在返回时折成 0.0），**不是**真的掉到 0。
     assert all(v.battery_frac == pytest.approx(1.0) for v in world.snapshot().vehicles), \
-        "⑪ 关档电池应当恒为容量"
-    assert r["battery_min_kwh"] == 0.0, "⑪ 关档 battery_min_kwh 应是 '无耗电记录' 哨兵 0.0"
+        "⑪ 关态电池应当恒为容量"
+    assert r["battery_min_kwh"] == 0.0, "⑪ 关态 battery_min_kwh 应是 '无耗电记录' 哨兵 0.0"
     assert r["jobs_done"] == inst.n_jobs and not r["horizon_hit"]
 
 
@@ -377,10 +377,10 @@ def test_depletion_gate_never_fires_while_holding_a_zone_lock(monkeypatch):
 
 @pytest.mark.unit
 def test_always_charge_now_policy_moves_behaviour_versus_the_rule():
-    """判据 4b：动作**有效果**——强制「永远现在充」相对规则档可测地改变行为。
+    """判据 4b：动作**有效果**——强制「永远现在充」相对规则配置可测地改变行为。
 
     同 seed、同确定性派车（`policy_l`），只有 C 回调不同：
-    - **规则档**（`policy_c=None`）：`battery_low=0` ⟹ 只在恰好 0 时补电（"跑干再充"）；
+    - **规则配置**（`policy_c=None`）：`battery_low=0` ⟹ 只在恰好 0 时补电（"跑干再充"）；
     - **永远现在充**：每个空闲点都去 0 号桩 ⟹ 充电次数更多、时序不同（行驶/排队/充电都是成本）。
     """
     inst, lay, dm, cfg, cons = _small_battery_setup()
@@ -397,9 +397,9 @@ def test_always_charge_now_policy_moves_behaviour_versus_the_rule():
         seed_chain=1, policy_l=pick_first, policy_c=always)
     for name, met in (("规则", rule), ("永远现在充", now)):
         assert met["jobs_done"] == inst.n_jobs and not met["horizon_hit"], \
-            f"{name}档未跑完：jobs={met['jobs_done']} horizon_hit={met['horizon_hit']}"
-    assert trace, "策略档没有调用 C 回调"
+            f"{name} 配置未跑完：jobs={met['jobs_done']} horizon_hit={met['horizon_hit']}"
+    assert trace, "策略配置没有调用 C 回调"
     assert now["charge_events"] > rule["charge_events"], \
-        (f"「永远现在充」的充电次数 {now['charge_events']} 未超过规则档 "
+        (f"「永远现在充」的充电次数 {now['charge_events']} 未超过规则配置 "
          f"{rule['charge_events']}——动作没有被执行")
     assert now["makespan"] != rule["makespan"], "动作被执行了却没改变时序"

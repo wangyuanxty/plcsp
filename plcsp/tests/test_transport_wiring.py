@@ -44,7 +44,7 @@ def _exact_caliber_constraints():
 
     ⚠️ **⑪ 必须关**：矩阵口径下单车一趟 episode 会耗掉 ~3.5 kWh（0.5 kW × ~342 min 负载 +
     0.2 kW × 空载），与电池容量 2–4 kWh 同量级 ⟹ 车**会**去充电桩，而充电桩没有矩阵项
-    （默认策略 `raise` 会直接报错、`geometry` 会往总额里混入几何腿）。既有几何口径测试没这个问题
+    （默认策略 `raise` 会直接报错、`geometry` 会往总额里混入几何段）。既有几何口径测试没这个问题
     （整段 episode 只耗 0.27 kWh，见 §5.7），**不要**照抄它的约束配置。
 
     ⚠️ **⑧ 也必须关**（本批新增的判断）：矩阵口径的交期标定表 `TF_RDD_MATRIX` 要到
@@ -170,7 +170,7 @@ def test_unmapped_endpoint_raises_by_default():
 def test_unmapped_endpoint_falls_back_to_geometry_and_is_counted():
     """⚠️ Review Focus #5：显式选 `geometry` 策略时**降级要留痕**（计数 + 时长都进 metrics）。
 
-    口径：这一档是"矩阵覆盖不到的路段用几何补"，必须在表里声明——**不得**无声降级。
+    口径：这一配置是"矩阵覆盖不到的路段用几何补"，必须在表里声明——**不得**无声降级。
     """
     mkt = load_mkt("mk01")
     agv, lay = _agv(mkt.base, speed_factor=1.0, hetero=True, unmapped="geometry")
@@ -212,7 +212,7 @@ def test_geometry_instance_never_gets_a_matrix_caliber():
 
 @pytest.mark.unit
 def test_rollout_declares_its_transport_caliber_in_the_metrics():
-    """口径必须**随结果自报**——否则两档口径的数并排放时无从分辨（P4-A Review Focus #1 同型）。"""
+    """口径必须**随结果自报**——否则两种口径的数并排放时无从分辨（P4-A Review Focus #1 同型）。"""
     mk = rollout(load_mk("mk01"), seed_chain=1, cfg=SimConfig(n_agv=3))["transport"]
     # ⚠️ 矩阵 + ⑪ 开时充电桩没有矩阵项 ⟹ 必须显式选降级策略（本测试只看口径标签，用 ⑧ 关
     #    把交期标定的依赖摘掉——矩阵交期表要到 Task 3 才落盘）。
@@ -232,7 +232,7 @@ def test_reference_runs_of_the_two_calibers_do_not_share_the_cache():
     from plcsp.env.des import reference_run
 
     # ⚠️ 矩阵口径的参考运行必须显式声明"充电桩用几何补"——矩阵口径下 ⑪ 真的会 binding
-    #    （单车一趟耗电与电池同量级），默认 `raise` 会在充电腿处显式报错（这正是设计要的）。
+    #    （单车一趟耗电与电池同量级），默认 `raise` 会在充电段处显式报错（这正是设计要的）。
     cfg = SimConfig(n_agv=6, transport_unmapped="geometry")
     a = reference_run(load_mk("mk01"), cfg=cfg, seed_layout=0)["makespan"]
     b = reference_run(load_mkt("mk01").base, cfg=cfg, seed_layout=0)["makespan"]

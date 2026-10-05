@@ -31,7 +31,7 @@ from plcsp.nn.features import F_MAX
 from plcsp.nn.state_emb import GEOM_BIAS_W, build_geom_bias, build_tok
 
 # 黄金摘要：与 `test_route_choice.GOLDEN_CHAIN_DIGEST` 同一口径的独立脚本值（**改造前**捕获，
-# 2026-10-05）。`geom_bias=False`（默认）时它必须逐字复现——偏置的接线若在关档下动了任何一位
+# 2026-10-05）。`geom_bias=False`（默认）时它必须逐字复现——偏置的接线若在关态下动了任何一位
 # （多算一次快照/多走一条分支），这里翻红。
 GEOM_OFF_CHAIN_DIGEST = "4241fec403248727280c2aacc888569f03b7d3b5b50a53dc10f2fc0031479228"
 
@@ -76,7 +76,7 @@ def _vs(node):
                         speed_factor=1.0, zone_wait=0.0)
 
 
-# ────────────────────────── 1. 关档逐位不变 ──────────────────────────
+# ────────────────────────── 1. 关态逐位不变 ──────────────────────────
 
 @pytest.mark.unit
 def test_geom_bias_off_is_bit_identical_to_baseline():
@@ -85,9 +85,9 @@ def test_geom_bias_off_is_bit_identical_to_baseline():
     torch.manual_seed(20261005)
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    assert all(d.geom_bias is None for d in dec), "关档不得记录几何偏置"
+    assert all(d.geom_bias is None for d in dec), "关态不得记录几何偏置"
     assert _chain_digest(dec, met) == GEOM_OFF_CHAIN_DIGEST, \
-        "geom_bias 关档的链路变了——既有读数不再成立"
+        "geom_bias 关态的链路变了——既有读数不再成立"
 
 
 @pytest.mark.unit
@@ -105,7 +105,7 @@ def test_zero_bias_is_a_bitwise_no_op_in_the_encoder():
     x = torch.as_tensor(tok, dtype=torch.float32).unsqueeze(0)
     o_off, _ = pol.forward_enc(x, seg)
     o_zero, _ = pol.forward_enc(x, seg, np.zeros((x.shape[1], x.shape[1]), dtype=np.float32))
-    assert torch.equal(o_off, o_zero), "全零偏置不是逐位无操作——关档路径被动过"
+    assert torch.equal(o_off, o_zero), "全零偏置不是逐位无操作——关态路径被动过"
 
 
 # ────────────────────────── 2. 偏置的数值契约 ──────────────────────────
@@ -218,7 +218,7 @@ def test_machine_token_scores_change_with_a_perturbed_bias():
 
 @pytest.mark.unit
 def test_geom_bias_changes_decision_logp_on_the_production_path():
-    """判据 3：`geom_bias=True` 的决策 logp 必须与关档不同（同一初始化、逐决策比）。
+    """判据 3：`geom_bias=True` 的决策 logp 必须与关态不同（同一初始化、逐决策比）。
 
     ⚠️ 只比 logp 不比动作：未训练策略下采样落点可能恰好相同（动作相同并不表示输入没变）。
     """
@@ -261,14 +261,14 @@ def test_geom_bias_batched_recompute_matches_single():
 
 @pytest.mark.unit
 def test_geom_bias_gradient_reaches_encoder():
-    """判据 4：偏置档的链 logp 反传照常到编码器（偏置只改输入，不改梯度通路）。"""
+    """判据 4：偏置配置的链 logp 反传照常到编码器（偏置只改输入，不改梯度通路）。"""
     inst, lay, dm, cfg, ctx = _setup()
     torch.manual_seed(13)
     pol = PolicyNet(enc=LayoutEncoder())
     dec, _met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, geom_bias=True)
     chain_logp(dec, pol).backward()
     g = pol.enc.proj[0].weight.grad
-    assert g is not None and g.abs().sum() > 0, "偏置档下编码器没有梯度"
+    assert g is not None and g.abs().sum() > 0, "偏置配置下编码器没有梯度"
 
 
 @pytest.mark.unit
@@ -279,7 +279,7 @@ def test_geom_bias_works_together_with_route_zones():
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2,
                           route_zones=True, geom_bias=True)
-    assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, "②+R2 档跑不完"
+    assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, "②+R2 配置跑不完"
     r = next(d for d in dec if d.kind == "R")
     assert r.geom_bias is not None and r.zone_idx is not None
     assert r.geom_bias.shape == (sum(r.seg), sum(r.seg)) == (r.tok.shape[0], r.tok.shape[0])

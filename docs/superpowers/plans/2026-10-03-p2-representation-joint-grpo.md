@@ -1,5 +1,7 @@
 # P2+P3 表征重建与联合链 GRPO 实施计划
 
+> ⚠️ **历史文档**：本批已完成，正文口径可能已过期（旧用词「腿」/「档」按当时写法保留）。当前口径见 `docs/INDEX.md` §5 与 `docs/experiment-plan.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把"输入全零、编码器不在活路径上、两头各训各的"的骨架，改造成 spec §5.3 定义的**在线两决策 + 共享编码器 + 联合链 GRPO + 三目标奖励**，并让 A（加权标量化）在 MK01 上端到端跑通。
@@ -12,7 +14,8 @@
 
 ## Global Constraints
 
-- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
+- **项目根** = `D:
+esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python** 一律用 `D:/anaconda/python.exe`。**CPU-only**。
 - **单位约定（bug#13，不得改动）**：仿真时间 = 分钟，布局坐标 = 米，能耗 = kWh。
 - **回归门禁**：`plcsp/tests/` 的 **107 项必须始终全绿**。

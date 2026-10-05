@@ -77,7 +77,7 @@ def test_fleet_size_is_explicit_in_the_result():
 @pytest.mark.unit
 def test_instance_name_carries_fleet_and_layout():
     """⚠️ Review Focus #1：结果自带的 `name` 必须**把车辆数与机台数写出来**——
-    否则两档车数的数混在一起时无从分辨（HF2021 的 2 台 vs HGS 的 v=m）。"""
+    否则两个报告档的车数混在一起时无从分辨（HF2021 的 2 台 vs HGS 的 v=m）。"""
     s = load_mkt("mk01", n_agv=2).name
     assert "v=2" in s and "m=6" in s
 

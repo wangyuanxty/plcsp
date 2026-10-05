@@ -64,7 +64,7 @@ from .env.instances import Instance, load_mk
 
 TAU_LO, TAU_HI, TAU_STEP = 0.50, 6.00, 0.05
 # ⚠️ 网格上限**按行程时间口径**取（P4-B Task 3 Step 1 实测）：矩阵口径的行程是分钟的整数级
-#    （几何口径 ~0.2 min/腿），参考 makespan 大数倍 ⟹ 同一个 LB 下 τ 要同比放大。
+#    （几何口径 ~0.2 min/段），参考 makespan 大数倍 ⟹ 同一个 LB 下 τ 要同比放大。
 #    实测最大 `M_ref / LB` = 55.39（mk10）⟹ ×1.5 = 83.09 ⟹ 取 85.0（实测比值表见模块 docstring）。
 #    ⚠️ **不要**抬高几何口径的上限（`TAU_HI`）——搜索空间一开，冻结表可能选出不同的 (τ,R)，
 #    作废 §21.2 的冻结表（`test_frozen_table_is_reproduced_by_the_calibration_script` 盯着）。

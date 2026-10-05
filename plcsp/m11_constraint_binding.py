@@ -10,9 +10,9 @@
 | 列 | 问的是 | 依据 |
 |---|---|---|
 | **关态** | 该约束**在默认参数下**是否 binding | `ConstraintConfig.with_off(name)`——就是消融表那一下 |
-| **极端档** | 把该约束的参数**推到极端**是否 binding | 布局/配置参数外推，不改 `des.py` 逻辑 |
+| **极端参数** | 把该约束的参数**推到极端**是否 binding | 布局/配置参数外推，不改 `des.py` 逻辑 |
 
-两列都 < 2% 才是"这个约束在本工况下真的无所谓"；只有关态 < 2% 而极端档 ≫ 2%，说明是**默认参数太小**，
+两列都 < 2% 才是"这个约束在本工况下真的无所谓"；只有关态 < 2% 而极端参数 ≫ 2%，说明是**默认参数太小**，
 不是机制无关——机器故障就是这一类。
 
 **关态的附加作用**：未接线的开关在关态会给出**恰好 0.00%**（配置变了但没人读它）。
@@ -57,7 +57,7 @@ LABELS = {"congestion": "①拥堵", "finite_buffer": "②有限缓冲", "machin
           "charging": "⑪充电", "maintenance": "⑫预防性维护"}
 
 
-# ── 极端档探针：只改布局/配置参数，**不改 des.py 逻辑** ──
+# ── 极端参数探针：只改布局/配置参数，**不改 des.py 逻辑** ──
 # 签名 (lay, cfg) -> None，就地修改。未接入的约束没有探针（会打印"探针缺失"）。
 
 def _probe_machine_failure(lay, cfg) -> None:
@@ -71,7 +71,7 @@ def _probe_finite_buffer(lay, cfg) -> None:
 
 
 def _probe_congestion(lay, cfg) -> None:
-    cfg.zone_granularity = "all"        # 极端：全图一个区段（争用最强档）
+    cfg.zone_granularity = "all"        # 极端：全图一个区段（争用最强的粒度）
 
 
 def _probe_rework(lay, cfg) -> None:
@@ -151,7 +151,7 @@ def _is_significant(delta_pct: float, sd_pct: float, n_seed: int) -> bool:
 
     ② 用**配对差的标准误** sd/sqrt(n)（不是 sd 本身）——逐种子配对后共同随机性已消掉，
     2*SE 在 n=10 时约为 0.63*sd（t≈2，p≈0.05）。若误用 2*sd，会把 +82.9% 这种
-    巨大效应也判成噪声（sd 在故障频发档下本来就大）。
+    巨大效应也判成噪声（sd 在故障频发参数下本来就大）。
     """
     se = sd_pct / math.sqrt(max(n_seed, 1))
     return abs(delta_pct) >= BINDING_PCT and abs(delta_pct) >= 2.0 * se
@@ -197,7 +197,7 @@ def main() -> None:
               f"energy={st.mean(base['energy']):6.2f} kWh  "
               f"tardy={st.mean(base['tardy']):4.2f}/{n_j}"
               f" ({100*st.mean(base['tardy'])/n_j:4.1f}%)  twt={st.mean(base['twt']):7.1f}")
-        print(f"  {'约束':<14}{'关态 Δ(判据)':>14}{'(σ)':>8}   {'极端档':<14}{'Δ(判据)':>10}   判定")
+        print(f"  {'约束':<14}{'关态 Δ(判据)':>14}{'(σ)':>8}   {'极端参数':<14}{'Δ(判据)':>10}   判定")
 
         n_seed = len(base["makespan"])
 

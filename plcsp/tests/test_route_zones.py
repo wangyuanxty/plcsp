@@ -33,11 +33,11 @@ from plcsp.nn.state_emb import build_tok, zone_features
 
 # 黄金摘要：**改造前**（2026-10-05，HEAD=95e94d7）在 MK01、`route_k=2`、`route_zones=False`
 # 上捕获的链路指纹（决策类型 + 全部打分上下文 + tok_idx + 动作 + 采样 logp + 关键指标）。
-# 它钉的是"R2 关档 ⟹ 既有 route_k=2 读数逐位不变"——R2 的接线（build_tok 的 zof、
-# `_act` 的 zone 分支、R 头的新参数）若在关档下动了任何一位，这里立刻翻红。
+# 它钉的是"R2 关态 ⟹ 既有 route_k=2 读数逐位不变"——R2 的接线（build_tok 的 zof、
+# `_act` 的 zone 分支、R 头的新参数）若在关态下动了任何一位，这里立刻翻红。
 # 同一次捕获还复算了 `route_k=1` 的摘要（与 test_route_choice.GOLDEN_CHAIN_DIGEST 同源口径的
 # 独立脚本，值为 4241fec403248727280c2aacc888569f03b7d3b5b50a53dc10f2fc0031479228，
-# 与改造前逐位相同——默认档的保证由既有黄金摘要继续守着，这里只钉 route_k=2 关档）。
+# 与改造前逐位相同——默认配置的保证由既有黄金摘要继续守着，这里只钉 route_k=2 关态）。
 R2_OFF_CHAIN_DIGEST = "9fe15b4f293e74bf43e47652c079a13f54395a066dc6e03f4c1eff1c88b0a7c8"
 
 
@@ -81,27 +81,27 @@ class _NoMixEncoder(torch.nn.Module):
         return x, x.mean(dim=1)
 
 
-# ────────────────────────── 1. 关档逐位不变 ──────────────────────────
+# ────────────────────────── 1. 关态逐位不变 ──────────────────────────
 
 @pytest.mark.unit
 def test_route_zones_off_is_bit_identical_to_baseline():
     """判据 1：`route_zones=False`（默认）⟹ 既有 `route_k=2` 链路逐位不变——黄金摘要钉死。
 
     摘要含每条决策的 tok/feat/cand_feat/cand/tok_idx/action/logp 与
-    makespan/travel/energy/deliveries。R2 的接线若在关档下动了 `build_tok` 的行数、
+    makespan/travel/energy/deliveries。R2 的接线若在关态下动了 `build_tok` 的行数、
     R 头的打分式或采样流，这里立刻变红。
     """
     inst, lay, dm, cfg, ctx = _setup()
     torch.manual_seed(20261005)                 # 与改造前捕获脚本逐字对齐的初始化锚点
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2)
-    assert [d.kind for d in dec].count("R") == 115, "关档的 R 决策数变了——先查采样流"
+    assert [d.kind for d in dec].count("R") == 115, "关态的 R 决策数变了——先查采样流"
     assert all(d.seg == (inst.n_machines, inst.n_jobs, cfg.n_agv, 1) for d in dec), \
-        "关档的 seg 必须是四元组（不得出现 Z 段）"
+        "关态的 seg 必须是四元组（不得出现 Z 段）"
     assert all(d.zone_idx is None and d.zone_mask is None for d in dec), \
-        "关档不得记录任何区段 token 下标"
+        "关态不得记录任何区段 token 下标"
     assert _chain_digest(dec, met) == R2_OFF_CHAIN_DIGEST, \
-        "R2 关档的 route_k=2 链路变了——既有读数不再成立"
+        "R2 关态的 route_k=2 链路变了——既有读数不再成立"
 
 
 @pytest.mark.unit
@@ -113,7 +113,7 @@ def test_route_zones_requires_route_k_gt_1():
         roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=1, route_zones=True)
 
 
-# ────────────────────────── 2. 打开档：区段 token 真的进序列 ──────────────────────────
+# ────────────────────────── 2. 打开后：区段 token 真的进序列 ──────────────────────────
 
 @pytest.mark.unit
 def test_zone_tokens_extend_the_sequence_and_record_candidate_indices():
@@ -128,7 +128,7 @@ def test_zone_tokens_extend_the_sequence_and_record_candidate_indices():
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2,
                           route_zones=True)
-    assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, "R2 档跑不完"
+    assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, "R2 配置跑不完"
     n_base = inst.n_machines + inst.n_jobs + cfg.n_agv + 1          # Z 段起点
     segs = {d.seg for d in dec}
     assert segs == {(inst.n_machines, inst.n_jobs, cfg.n_agv, 1, n_zones)}, \
@@ -157,7 +157,7 @@ def test_zone_tokens_extend_the_sequence_and_record_candidate_indices():
     dec_b, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, route_k=2,
                           route_zones=True)
     sig = lambda ds: [(d.kind, d.cand, d.action, d.logp) for d in ds]     # noqa: E731
-    assert sig(dec) == sig(dec_b), "R2 档同 seed 不再可复现"
+    assert sig(dec) == sig(dec_b), "R2 配置同 seed 不再可复现"
 
 
 @pytest.mark.unit
@@ -196,7 +196,7 @@ def test_zone_feature_is_not_a_dead_dim():
 
 @pytest.mark.unit
 def test_build_tok_default_is_four_segments_and_zone_rows_are_zero_padded():
-    """`build_tok` 的默认档（`zof=None`）仍是四段；带 Z 段时只填 `SEG_SLICE["Z"]` 的列。"""
+    """`build_tok` 的默认配置（`zof=None`）仍是四段；带 Z 段时只填 `SEG_SLICE["Z"]` 的列。"""
     inst, lay, dm, cfg, ctx = _setup()
     from plcsp.env.des import SimWorld
     snap = SimWorld(inst, lay, dm, cfg).snapshot()
@@ -246,10 +246,10 @@ def test_r_scores_change_with_zone_state_even_when_cand_features_are_equal():
     d = float((logits[0, 0, 1] - logits[0, 0, 0]).item())
     assert abs(d) > 1e-8, (
         "`feat_cand` 相同、途经区段不同，两条候选却同分——区段 token 没有到达 R 头打分")
-    # 对照：不传区段（R2 关档口径）时两行同值必须同分——证明差异确实来自区段 token
+    # 对照：不传区段（R2 关态口径）时两行同值必须同分——证明差异确实来自区段 token
     plain = pol.route_logits_emb(tok, drive, cand, torch.tensor([v_idx, v_idx]))
     assert torch.allclose(plain[0, 0, 0], plain[0, 0, 1]), \
-        "关档口径下两行同值候选不应有分差——本判据的对照失效"
+        "关态口径下两行同值候选不应有分差——本判据的对照失效"
 
 
 @pytest.mark.unit

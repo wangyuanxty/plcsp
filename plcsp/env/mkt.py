@@ -55,7 +55,7 @@ def load_mkt_layout(n_machines: int, *, drop_lu: bool = True) -> np.ndarray:
 # ⚠️ 每个方法的**车数设定**（Review Focus #1）：`"m"` = 该实例的机台数；整数 = 固定车数。
 # HF2021 的 2 台是**二手转述**（§19.7d 存疑点②原文如此），引用时须保留这个限定词。
 # 机读形式存在的理由：`MKT_PUBLISHED` 只有数字，下游画表/画图时若只拿它，
-# "HF2021 与 HGS 不同车数"这条事实就会丢掉，两档车数的数会被并排当成可比。
+# "HF2021 与 HGS 不同车数"这条事实就会丢掉，两个报告档的车数会被并排当成可比。
 MKT_PUBLISHED_AGV: dict[str, "str | int"] = {
     "HGS_JMS2024": "m",
     "HA_DQN_CIS2025": "m",

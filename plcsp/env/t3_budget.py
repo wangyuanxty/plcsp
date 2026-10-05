@@ -31,16 +31,16 @@
 - **默认 `pm_interval=120` 在 mk01/mk02 从不逾期**（每机 ~25.5 主轴分钟）⟹ ⑫ 的
   `pm_events_forced ≡ 0`。
 
-故标定环境显式取**机制真的活的档**：`pm_interval=T3_PM_INTERVAL`（短间隔）+
-`battery_low=T3_BATTERY_LOW`（0，规则档不到 0 不补电）+ `T3_BATTERY_KWH`（小电池）。
+故标定环境显式取**机制真的活的配置**：`pm_interval=T3_PM_INTERVAL`（短间隔）+
+`battery_low=T3_BATTERY_LOW`（0，规则配置不到 0 不补电）+ `T3_BATTERY_KWH`（小电池）。
 六条约束在该环境下**全部非零**（`test_t3_budget.py` 逐实例核对表 == 脚本重算）。
 ⚠️ 换 cfg / 换布局（电池是**布局**的属性）⟹ `aᵢ^ref` 变，须重跑 `plcsp/m17_t3_calib.py`。
 本表的保证与 ⑧ 交期的 (τ,R) 同型：**"激活量落带"是 cfg 条件的**，表本身是冻结产物。
 
 ⚠️ **③ 的口径差（如实声明，不是静默错位）**：标定环境**没有开役龄模型**
-（`machine_age_failure=False`）——实测开着它 + 短间隔保养时，规则档自己就把役龄压在低位，
+（`machine_age_failure=False`）——实测开着它 + 短间隔保养时，规则配置自己就把役龄压在低位，
 mk01 的参考故障数从 2 掉到 **0**，既无法归一化、也会把预算标到 0 附近（正是设计 §4.2 的
-上界退化形态）。故 ③ 的 `aᵢ^ref` 是"**无记忆故障率**下的参考次数"，而 T3 训练档**必须开
+上界退化形态）。故 ③ 的 `aᵢ^ref` 是"**无记忆故障率**下的参考次数"，而 T3 训练配置**必须开
 役龄**（③ 的可控性守卫）——两者的差在语义上等价于"把 ③ 的预算锚在**不保养**的行为水平上"，
 b = 参考的一半意味着"允许的被迫故障数"（mk01 = 1 次）；策略保养得好 ⟹ â 低于 b ⟹ λ 落 0
 （不咬人），保养得差 ⟹ 故障上升 ⟹ λ 咬人。这正是 ③ 想要的语义。
@@ -92,7 +92,7 @@ ACTIVATION_SOURCES: dict[str, str] = {
 
 # ══ 对偶上升的默认参数 ══
 # `bᵢ` = `BUDGET_RATIO × aᵢ^ref`（= 归一化后的目标水平，设计 §4.1 第 2 步的"目标激活率"）。
-# 0.5 = 设计原文的例子值（"如参考档的 50%"）。**它同时是双侧判据的旋钮**：
+# 0.5 = 设计 §4.1 的例子值（"如参考调度的 50%"）。**它同时是双侧判据的旋钮**：
 # 下界（防"约束不再咬人"）要求策略改进后 â 仍不得为 0，上界（防"咬死动作"）要求动作分布
 # 不退化——标定脚本打印网格供复核，逐约束的目标率**留作开放线索**（设计 §7）。
 BUDGET_RATIO = 0.5
@@ -105,9 +105,9 @@ T3_ETA = 0.1
 T3_LAMBDA_MAX = 10.0
 
 # ══ 标定环境（`aᵢ^ref` 的测量条件；见模块 docstring） ══
-T3_PM_INTERVAL = 10.0     # ⑫：默认 120 在 mk01/mk02 从不逾期 ⟹ 短间隔档
-T3_BATTERY_KWH = 0.10     # ⑪：默认 2–4 kWh 放不空 ⟹ 小电池档（同 test_charge_head 的口径）
-T3_BATTERY_LOW = 0.0      # ⑪：规则档的补电阈值必须为 0，否则车到不了 0（同 §33.4）
+T3_PM_INTERVAL = 10.0     # ⑫：默认 120 在 mk01/mk02 从不逾期 ⟹ 短间隔验证档
+T3_BATTERY_KWH = 0.10     # ⑪：默认 2–4 kWh 放不空 ⟹ 小电池验证档（同 test_charge_head 的口径）
+T3_BATTERY_LOW = 0.0      # ⑪：规则配置的补电阈值必须为 0，否则车到不了 0（同 §33.4）
 
 
 # ══ 冻结表：逐实例、逐口径的参考激活量 `aᵢ^ref`（表列序 = `T3_CONSTRAINTS`） ══
@@ -313,17 +313,17 @@ def check_influenceable(keep, pm_head: bool, charge_head: bool,
 
     理由与 ④⑨ 不纳入同一条：罚"策略无法控制的事"只会加噪。三条的**作用手段**分别是：
 
-    - **⑫ 维护**：提前保养 = M 头的动作 ⟹ 需要 `pm_head`（规则档在阈值处自动发生，策略无动作）；
+    - **⑫ 维护**：提前保养 = M 头的动作 ⟹ 需要 `pm_head`（规则配置在阈值处自动发生，策略无动作）；
     - **③ 机器故障**：役龄故障率随 `pm_clock` 上升、提前保养把它归零（设计 §1.1）⟹ 需要
       `pm_head` **且** `cfg.machine_age_failure`（后者关时故障率是常数，保养不改变故障）；
-    - **⑪ 充电**：早充 = C 头的动作 ⟹ 需要 `charge_head`（规则档按低电阈值补电，策略无动作）。
+    - **⑪ 充电**：早充 = C 头的动作 ⟹ 需要 `charge_head`（规则配置按低电阈值补电，策略无动作）。
 
     不在 `keep` 里的约束不受限。违规**显式报错**，不静默剔除（静默剔除会让"T3 到底罚了
     什么"与配置不符而无人察觉）。
     """
     if "maintenance" in keep and not pm_head:
         raise ValueError(
-            "T3 含 ⑫ 维护，但 pm_head=False：规则档的保养在阈值处自动发生、策略没有任何"
+            "T3 含 ⑫ 维护，但 pm_head=False：规则配置的保养在阈值处自动发生、策略没有任何"
             "动作能改变它 ⟹ 罚 `pm_events_forced` 是罚策略无法控制的事（④⑨ 不纳入的"
             "同一条理由）。请开 pm_head，或把 maintenance 移出 T3 约束集。")
     if "machine_failure" in keep and not (pm_head and machine_age_failure):
@@ -334,7 +334,7 @@ def check_influenceable(keep, pm_head: bool, charge_head: bool,
             "请同时开 pm_head 与 machine_age_failure，或把 machine_failure 移出 T3 约束集。")
     if "charging" in keep and not charge_head:
         raise ValueError(
-            "T3 含 ⑪ 充电，但 charge_head=False：规则档按低电阈值补电、策略没有'何时充'"
+            "T3 含 ⑪ 充电，但 charge_head=False：规则配置按低电阈值补电、策略没有'何时充'"
             "的动作 ⟹ 罚 `agv_dry_events` 基本不可控。请开 charge_head，"
             "或把 charging 移出 T3 约束集。")
 

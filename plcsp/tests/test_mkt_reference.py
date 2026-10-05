@@ -1,4 +1,4 @@
-"""MKT 上跑我们参考调度的测试（P4-A Task 3；P4-B Task 4 起**两档、矩阵口径**）。
+"""MKT 上跑我们参考调度的测试（P4-A Task 3；P4-B Task 4 起**两个报告档、矩阵口径**）。
 
 ⚠️ P4-A 时本文件的设计前提是「`trans_time` 未接进仿真 ⟹ `ours` 跑在原始 MK 几何上」；
 P4-B 已把矩阵接进仿真 ⟹ 该前提**作废**，对应断言按下述方式更新：
@@ -6,7 +6,7 @@ P4-B 已把矩阵接进仿真 ⟹ 该前提**作废**，对应断言按下述方
 - 绊线 `test_our_column_declares_its_own_basis_and_is_not_mkt_yet` **翻转**为
   `test_our_column_declares_the_mkt_basis`（**改写非删除**，计数不减）；
 - `test_our_reference_is_in_the_published_ballpark` 仍留（量级判据仍有效），
-  但量级基准从"几何口径的 ~107"变成"矩阵口径的 ~205（档 A）/ ~678（档 B）"。
+  但量级基准从"几何口径的 ~107"变成"矩阵口径的 ~205（报告档 A）/ ~678（报告档 B）"。
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def test_our_reference_is_in_the_published_ballpark():
     """量级核验：我们的参考调度（最短候选 + 轮询派车）应落在已发表数字的**同一量级**。
 
     ⚠️ P4-B 起 `ours` 走**矩阵口径**，量级比 P4-A 的几何口径（~107）大数倍：
-    档 A（机制全关）实测 **205.0**、档 B（全开）**711.5**（§22.2 同参数），对照 HGS=153 ⟹ 带 [0.3×, 5.0×] 仍覆盖。
+    报告档 A（机制全关）实测 **205.0**、报告档 B（全开）**711.5**（§22.2 同参数），对照 HGS=153 ⟹ 带 [0.3×, 5.0×] 仍覆盖。
     这一步**只判量级**：若掉回 40 上下 ⟹ 矩阵口径被回退成几何（旧断言想抓的缺陷）；
     若跑出几千 ⟹ 单位错了（矩阵被当成秒或又除了一次换算）。
     """
@@ -75,7 +75,7 @@ def test_our_reference_is_in_the_published_ballpark():
 def test_fleet_size_changes_the_reference_result():
     """⚠️ Review Focus #1：换车数**必须真的改变**参考调度的读数——否则车辆数列是装饰。
 
-    （若不同 v 跑出同一 Cmax，说明 `n_agv` 没进 `SimConfig`／没进布局，两档车数会被当成可比。）
+    （若不同 v 跑出同一 Cmax，说明 `n_agv` 没进 `SimConfig`／没进布局，两个报告档的车数会被当成可比。）
     """
     from plcsp.m14_mkt_reference import reference_table
 
@@ -100,12 +100,12 @@ def test_fleet_comparability_is_computed_not_hardcoded():
     r_m = reference_table(("mk01",), n_agv=6, seeds=1)[0]      # mk01 是 6 机 → v=m 即 6 台
     assert r_m["comparable_fleet"] == {
         "HGS_JMS2024": True, "HA_DQN_CIS2025": True, "HF2021_LAHC": False}, \
-        "v=m 这一档：HGS/HA-DQN 同车数，HF2021(2 台) 不同"
+        "v=m 这一车数：HGS/HA-DQN 同车数，HF2021(2 台) 不同"
 
     r_2 = reference_table(("mk01",), n_agv=2, seeds=1)[0]      # 与 HF2021 同口径
     assert r_2["comparable_fleet"] == {
         "HGS_JMS2024": False, "HA_DQN_CIS2025": False, "HF2021_LAHC": True}, \
-        "v=2 这一档：只有 HF2021 同车数——脚注若写死就会说反"
+        "v=2 这一车数：只有 HF2021 同车数——脚注若写死就会说反"
 
 
 @pytest.mark.unit

@@ -2,8 +2,8 @@
 
 钉住四件事：
 
-1. **评价口径**——走 `rollout`（FIFO 规则派车）、默认不传 `agv_phi`、档位取 `REPORT_TIERS`；
-2. **三目标**——返回 (makespan, energy, TWT)，且档 A 的 TWT 恒 0（⑧ 关，口径使然）；
+1. **评价口径**——走 `rollout`（FIFO 规则派车）、默认不传 `agv_phi`、报告档取 `REPORT_TIERS`；
+2. **三目标**——返回 (makespan, energy, TWT)，且报告档 A 的 TWT 恒 0（⑧ 关，口径使然）；
 3. **可复现**——同 seed 两轮跑出逐位相同的目标值；
 4. **代价记账**——实测仿真次数 ≤ pop×(gen+1) 的理论上界，且随结果带出。
 """
@@ -78,7 +78,7 @@ def test_evaluation_uses_the_fifo_rollout_entry(monkeypatch):
     prob.evaluate_one(np.zeros(prob.n_var))
     assert seen and seen[-1]["op_choices"] is not None, "评价没把机台选择交给仿真"
     assert seen[-1]["agv_phi"] is None, (
-        "默认档传了 agv_phi ⟹ 派车从共享队列 FIFO 变成了 bound 逐车队列，口径变了")
+        "默认配置传了 agv_phi ⟹ 派车从共享队列 FIFO 变成了 bound 逐车队列，口径变了")
     assert seen[-1]["constraints"] is mod.REPORT_TIERS["A-MKT"]
 
 
@@ -94,11 +94,11 @@ def test_small_budget_run_on_mk01_returns_three_objectives():
     assert res.F.shape[1] == 3, "目标数不是三种"
     assert res.F.shape[0] >= 1 and res.X.shape[0] == res.F.shape[0]
     assert np.all(res.F[:, 2] == 0.0), (
-        "档 A 关着 ⑧ 交期 ⟹ TWT 必须恒 0；非零说明档位/交期接线变了")
+        "报告档 A 关着 ⑧ 交期 ⟹ TWT 必须恒 0；非零说明报告档/交期接线变了")
     assert np.all(res.F[:, 1] > 0.0), "能耗必须为正（M2 模型）"
     assert 6 <= res.n_eval <= 6 * 2, f"实测仿真次数 {res.n_eval} 超出 [pop, pop×(gen+1)]"
     assert res.sim_s > 0.0 and res.wall_s >= res.sim_s
-    # `summary()` 必须真的能跑（它随结果报口径：档位/开关/代价）——2026-10-05 曾因
+    # `summary()` 必须真的能跑（它随结果报口径：报告档/开关/代价）——2026-10-05 曾因
     # 引用了结果对象上不存在的字段当场 AttributeError，而当时没有任何测试调用它。
     text = res.summary()
     assert res.tier in text and "multi_drop=" in text and "Pareto" in text
@@ -138,7 +138,7 @@ def test_front_points_are_mutually_nondominated():
 
 @pytest.mark.unit
 def test_tier_flags_document_the_two_calibers():
-    """两档的机制开关必须与 `REPORT_TIERS` 同源：档 A 关 ⑧（TWT 死）、档 B 开 ⑧。"""
+    """两个报告档的机制开关必须与 `REPORT_TIERS` 同源：报告档 A 关 ⑧（TWT 死）、报告档 B 开 ⑧。"""
     from plcsp.env.constraints import REPORT_TIERS
 
     assert REPORT_TIERS["A-MKT"].due_dates is False
@@ -149,14 +149,14 @@ def test_tier_flags_document_the_two_calibers():
 def test_eval_spec_carries_the_cfg_switches():
     """`EvalSpec` 的三个 `SimConfig` 级开关进 `cfg()`；**默认全关**（逐位等于既有读数）。
 
-    ⚠️ A 主对比要拿 NSGA-II 与 DRL 的同一档比，DRL 跑在 `multi_drop=True` 等之上
+    ⚠️ A 主对比要拿 NSGA-II 与 DRL 的同一配置比，DRL 跑在 `multi_drop=True` 等之上
     （`experiment-plan.md` §9.7）——缺了它们就是"两个动力学各跑各的"，而且**不报错**。
     """
     from plcsp.baselines.nsga2 import EvalSpec
 
     c0 = EvalSpec(tier="A-MKT", n_agv=2).cfg()
     assert c0.multi_drop is False and c0.agv_failover is False
-    assert c0.machine_age_failure is False, "默认档不再是既有读数口径"
+    assert c0.machine_age_failure is False, "默认配置不再是既有读数口径"
     assert c0.n_agv == 2
 
     c1 = EvalSpec(tier="B-Full", n_agv=3, multi_drop=True, agv_failover=True,

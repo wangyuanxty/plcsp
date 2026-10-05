@@ -6,7 +6,7 @@
     λ(a) = base · β · (a / η)^(β−1)      a = `pm_clock`（主轴工时累计、保养归零）
                                          η = `pm_interval`，β = `machine_age_beta`（assumed）
 
-- β = 1 ⟹ λ ≡ base（与常数档同式）；β > 1 ⟹ 严格递增；[0, η] 上均值 = base。
+- β = 1 ⟹ λ ≡ base（与常数故障率同式）；β > 1 ⟹ 严格递增；[0, η] 上均值 = base。
 - 自变量**只能是 `pm_clock`**（当前状态里已有的量）——不许引入历史量（用户裁定）。
 - ⚠️ **改动力学**：故障的"何时"变了；保养（⑫）因此多一重收益（把故障率打回 0）。
 - 只对 ③ 成立，**不推广**到 ④⑨。
@@ -29,7 +29,7 @@ from plcsp.env.instances import load_mk
 from plcsp.env.layout import MachinePad
 from plcsp.nn.encoder import LayoutEncoder
 
-# 改造前捕获的三条摘要（failover 与全部既有开关默认关；高故障档把布局机台的 fail_rate
+# 改造前捕获的三条摘要（failover 与全部既有开关默认关；高故障配置把布局机台的 fail_rate
 # 抬到 0.05/min，让故障真的发生）。
 DIGESTS = {
     "default": "55eb330943239131db49dbad0e3421c4793416f2b8009a1f2b292bf9d906e5a8",
@@ -61,7 +61,7 @@ def _run(cfg, hot_beta=None, hot_fail=False):
     return dec, met
 
 
-# ────────────────────────── 1. 关档逐位不变 ──────────────────────────
+# ────────────────────────── 1. 关态逐位不变 ──────────────────────────
 
 @pytest.mark.unit
 @pytest.mark.parametrize("label,cfg,hot", [
@@ -69,18 +69,18 @@ def _run(cfg, hot_beta=None, hot_fail=False):
     ("pm20", SimConfig(pm_interval=20.0), False),
 ])
 def test_age_failure_off_is_bit_identical_to_baseline(label, cfg, hot):
-    """判据 1（低故障档）：关档时链路与读数逐位等于改造前。"""
+    """判据 1（低故障配置）：关态时链路与读数逐位等于改造前。"""
     _dec, met = _run(cfg, hot_fail=hot)
-    assert _digest(met) == DIGESTS[label], f"{label} 档链路变了——既有读数不再成立"
+    assert _digest(met) == DIGESTS[label], f"{label} 配置链路变了——既有读数不再成立"
 
 
 @pytest.mark.unit
 def test_age_failure_off_with_failures_is_bit_identical():
-    """判据 1（高故障档）：`fail_rate=0.05` 让故障真的发生（fail_events=12），仍逐位不变。"""
+    """判据 1（高故障配置）：`fail_rate=0.05` 让故障真的发生（fail_events=12），仍逐位不变。"""
     cfg = SimConfig(pm_interval=20.0)
     _dec, met = _run(cfg, hot_fail=True)
-    assert met["fail_events"] == 12, "前提：本档必须有故障，否则判据盖不住故障路径"
-    assert _digest(met) == DIGESTS["hotfail"], "高故障档链路变了——既有读数不再成立"
+    assert met["fail_events"] == 12, "前提：本配置必须有故障，否则判据盖不住故障路径"
+    assert _digest(met) == DIGESTS["hotfail"], "高故障配置链路变了——既有读数不再成立"
 
 
 # ────────────────────────── 2. 曲线的性质 ──────────────────────────
@@ -90,7 +90,7 @@ def test_weibull_rate_shape_and_mean_matching():
     """判据 2/4（纯函数）：β=1 恒为 base；β>1 严格递增且 [0,η] 均值 = base；β<1 报错。"""
     base, eta = 0.05, 20.0
     assert machine_fail_rate(base, 7.0, 1.0, eta) == pytest.approx(base), \
-        "β=1 必须退化回常数率（与关档同式的自检点）"
+        "β=1 必须退化回常数率（与关态同式的自检点）"
     ages = [0.0, 5.0, 10.0, 15.0, 20.0, 30.0]
     vals = [machine_fail_rate(base, a, 2.0, eta) for a in ages]
     assert vals[0] == pytest.approx(0.0), "β>1 的 Weibull 风险在役龄 0 处为 0"
@@ -175,7 +175,7 @@ def test_failure_rate_rises_with_age_within_a_cycle():
 
 @pytest.mark.unit
 def test_maintenance_resets_the_failure_rate():
-    """判据 3：保养（规则档到点强制）把 `pm_clock` 归零 ⟹ 下一次抽样的尺度跳回上限。
+    """判据 3：保养（规则配置到点强制）把 `pm_clock` 归零 ⟹ 下一次抽样的尺度跳回上限。
 
     `pm_interval=150`、每道工序 100 主轴分钟：第 2 道工序结束时逾期 ⟹ 强制保养；保养后
     第一抽样的 λ(0)=0，尺度 = 1e-9 的倒数（≈1e9）——与保养前的小尺度形成断崖。
@@ -183,7 +183,7 @@ def test_maintenance_resets_the_failure_rate():
     cfg = SimConfig(pm_interval=150.0, machine_age_failure=True, machine_age_beta=2.0,
                     repair_time=0.0)
     m, scales, stats = _drive(cfg, [100.0, 100.0, 100.0])
-    assert stats["pm_events"] == 1, f"前提：本档必须恰好触发一次保养，实得 {stats['pm_events']}"
+    assert stats["pm_events"] == 1, f"前提：本配置必须恰好触发一次保养，实得 {stats['pm_events']}"
     assert m.pm_clock < cfg.pm_interval
     zeros = [s for a, s in scales if a == 0.0]
     before = [s for a, s in scales if a > 0.0]
@@ -200,7 +200,7 @@ def test_maintenance_resets_the_failure_rate():
 
 @pytest.mark.unit
 def test_beta_one_degenerates_to_the_baseline_chain():
-    """判据 4：β=1 时 λ ≡ base，故链路必须与关档**逐位相同**（内置退化为自检点）。"""
+    """判据 4：β=1 时 λ ≡ base，故链路必须与关态**逐位相同**（内置退化为自检点）。"""
     cfg_hot = SimConfig(pm_interval=20.0)
     _d0, met_off = _run(cfg_hot, hot_fail=True)
     cfg_on = SimConfig(pm_interval=20.0, machine_age_failure=True, machine_age_beta=1.0)
@@ -224,7 +224,7 @@ def test_age_failure_requires_failure_and_maintenance_on():
 
 @pytest.mark.unit
 def test_age_failure_changes_dynamics_and_sensitivity():
-    """判据 2（系统级）+ 要报的数：高故障档下开档的 fail_events/makespan 与关档不同，
+    """判据 2（系统级）+ 要报的数：高故障配置下打开后的 fail_events/makespan 与关态不同，
     且形状参数 β 影响读数（敏感性 1.5/2/3）。"""
     cfg_off = SimConfig(pm_interval=20.0)
     _d, met_off = _run(cfg_off, hot_fail=True)
@@ -234,5 +234,5 @@ def test_age_failure_changes_dynamics_and_sensitivity():
         _d, met = _run(cfg, hot_fail=True)
         res[beta] = met
         assert met["fail_events"] != met_off["fail_events"], \
-            f"β={beta} 的故障数与关档相同——曲线没影响动力学"
+            f"β={beta} 的故障数与关态相同——曲线没影响动力学"
     assert len({_digest(m) for m in res.values()}) == 3, "三个 β 的读数应互不相同（敏感性可见）"

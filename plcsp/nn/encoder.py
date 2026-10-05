@@ -2,7 +2,7 @@
 
 序列 = [M...M (机台) | B...B (作业) | V...V (车辆) | G (全局)]，四段行数 (n_m, n_jobs, n_agv, 1)。
 ⚠️ 2026-10-05（R2）：**可选第五段 Z（区段 token）**——只在 `route_zones=True` 时由
-`build_tok` 追加在末位，`seg` 随之变五元；默认档四段、四元组、**序列一位不变**。
+`build_tok` 追加在末位，`seg` 随之变五元；默认配置四段、四元组、**序列一位不变**。
 输入是 **(B, N, F_MAX)** 张量（`B ≥ 1`；列定义见 `features.py`：各段补零到 `F_MAX=11`）：
 
 - **每段一个自己的 `Linear`**（`proj`，2026-10-04 改）：M/B/V/G 各自投到 `d_model`，
@@ -59,7 +59,7 @@ class AttnLayer(nn.Module):
         if bias is not None:
             # ② 几何/度量偏置：加在 softmax **之前**的分数上（分头广播），与 `type_emb` 正交
             # ——类型嵌入改的是 token 初始嵌入，偏置改的是注意力分数。`bias=None`（默认）
-            # 时这一行不存在 ⟹ 默认档逐位不变。
+            # 时这一行不存在 ⟹ 默认配置逐位不变。
             scores = scores + bias.unsqueeze(1)                    # (B,N,N) → (B,1,N,N)
         w = F.softmax(scores, dim=-1)
         out = (w @ v).transpose(1, 2).reshape(B, N, self.d)
@@ -88,7 +88,7 @@ class LayoutEncoder(nn.Module):
         self.d_model, self.n_heads, self.n_layers = d_model, n_heads, n_layers
         self.feat_dim = feat_dim
         # batch=1 的 CUDA 图快路（见 `cuda_graph.CudaGraphForward`）：**每 seg 一张图**。
-        # 在 CPU 档恒为空——CPU 路径一位不变（`_graph_ok` 第一条件就挡住）。
+        # 在 CPU 配置下恒为空——CPU 路径一位不变（`_graph_ok` 第一条件就挡住）。
         self._graphs: dict[tuple[int, ...], CudaGraphForward] = {}
         # 类型 id 按 (seg, device) 缓存（见 `_type_ids`）。
         self._tid_cache: dict[tuple, torch.Tensor] = {}
@@ -103,7 +103,7 @@ class LayoutEncoder(nn.Module):
         self.ln = nn.LayerNorm(d_model)
         # ⚠️ **R2 区段 token（2026-10-05）——新增参数一律建在既有参数之后，且不消耗全局
         # 抽签流**：`torch.random.fork_rng()` 把 `nn.Linear` 的构造抽签隔离掉。否则这些
-        # 多出来的随机数会把**后续**（PolicyNet 的头）的初始化整体移位，默认关档的黄金摘要
+        # 多出来的随机数会把**后续**（PolicyNet 的头）的初始化整体移位，默认关态的黄金摘要
         # （含随机初值）全部作废。`proj` 仍是 4 个 Linear、`type_emb` 仍是 4 行——既有
         # 参数的形状与取值一位不变；Z 段只在 `seg` 有五元时使用。
         with torch.random.fork_rng():
@@ -117,7 +117,7 @@ class LayoutEncoder(nn.Module):
         返回 (token 嵌入 (B, N, d), 全局上下文 (B, d)=按 token 均值池化)。
         `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
         核对补零列为 0，并核对总长。
-        ⚠️ **`seg` 允许四元或五元**（2026-10-05，R2）：四元 = 默认档（M/B/V/G，逐位等于今日）；
+        ⚠️ **`seg` 允许四元或五元**（2026-10-05，R2）：四元 = 默认配置（M/B/V/G，逐位等于今日）；
         五元 = `route_zones=True` 时多出的 Z 段（区段 token，类型 id 4，走独立的 `proj_z`
         与 `zone_type_emb`）。两种长度都由调用方（`build_tok`）决定。
         ⚠️ **`bias`（② 几何/度量偏置，2026-10-05）**：`(N,N)` 或 `(B,N,N)` 的可加偏置，
@@ -139,8 +139,8 @@ class LayoutEncoder(nn.Module):
         #    削弱，只是换了位置：它查的是**进来的**张量，而图重放前正是把这个张量拷进静态缓冲。
         self._require_zero_padding(tok_feat, seg)
         if bias is not None:
-            # 偏置档不做 CUDA 图：图只捕获 `tok_feat`，把 bias 也塞进图要再造一条静态缓冲，
-            # 收益（CPU 档为零、GPU 非默认）不抵复杂度。语义与 eager 完全一致。
+            # 偏置配置不做 CUDA 图：图只捕获 `tok_feat`，把 bias 也塞进图要再造一条静态缓冲，
+            # 收益（CPU 配置为零、GPU 非默认）不抵复杂度。语义与 eager 完全一致。
             if bias.dim() == 2:
                 bias = bias.unsqueeze(0).expand(tok_feat.shape[0], -1, -1)
             return self._encode(tok_feat, seg, bias)
@@ -151,7 +151,7 @@ class LayoutEncoder(nn.Module):
     def _graph_ok(self, tok_feat: torch.Tensor) -> bool:
         """是否走 CUDA 图快路。三条缺一不可（见 `cuda_graph` 模块 docstring）：
 
-        - **在 CUDA 上**：CPU 档不建图 ⟹ 既有读数逐位不变。
+        - **在 CUDA 上**：CPU 配置不建图 ⟹ 既有读数逐位不变。
         - **batch=1**：B>1 是重算路径——eager 已够快，且**要梯度**。
         - **无梯度**：CUDA 图不支持 autograd，故只在 `torch.no_grad()` 下录/放。
           重算由 `_decision_logp_terms` 带梯度调用；万一 `Σn_g == 1`，这一条也把它挡在图外。
@@ -179,7 +179,7 @@ class LayoutEncoder(nn.Module):
         """纯计算：分段投影 + 类型嵌入 + N 层注意力 + 末层 LayerNorm。
 
         **无守卫、无图**——两样都由 `forward` 负责。图快路捕获的就是本函数。
-        `seg` 四元 = 默认档（既有路径，逐位等于今日）；五元 = R2（Z 段走 `proj_z`）。
+        `seg` 四元 = 默认配置（既有路径，逐位等于今日）；五元 = R2（Z 段走 `proj_z`）。
         `bias` = ② 的逐层注意力偏置（`None` = 不加，逐位等于今日）。
         """
         tid = self._type_ids(seg, tok_feat.device)
@@ -194,7 +194,7 @@ class LayoutEncoder(nn.Module):
             r += n
         x = torch.cat(parts, dim=1)
         if len(seg) == self.N_SEG_TYPES:
-            x = x + self.type_emb[tid]                  # 默认档：**与今日同一条表达式**
+            x = x + self.type_emb[tid]                  # 默认配置：**与今日同一条表达式**
         else:
             # R2：第 5 类（Z）走 `zone_type_emb`——既有四类的嵌入一位不变（不搞乱 type_emb
             # 语义：Z 有自己的一行，不是复用 G/类型 3 的嵌入）。
@@ -213,7 +213,7 @@ class LayoutEncoder(nn.Module):
         下会抛 `RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph
         capture unless the CPU tensor is pinned`（§36.5 第 2 条）。
         缓存顺带省掉每次前向的 4 次 `torch.full` + 1 次 `cat`——`seg` 是实例级常量。
-        值域与逐次重建完全相同，故 CPU 档逐位不变。
+        值域与逐次重建完全相同，故 CPU 配置逐位不变。
         """
         key = (seg, device)
         tid = self._tid_cache.get(key)

@@ -48,7 +48,7 @@ def test_frozen_table_is_reproduced_by_the_calibration_script(name: str):
 def test_every_constraint_is_alive_in_the_calibration_environment(name: str):
     """六条约束的 `a^ref` 必须**全部 > 0**——为 0 就无法归一化（`â = a/a^ref` 无定义）。
 
-    这条是"标定环境选得对"的判据：默认档下 ⑪（默认电池放不空）与 ⑫（mk01/mk02 的
+    这条是"标定环境选得对"的判据：默认配置下 ⑪（默认电池放不空）与 ⑫（mk01/mk02 的
     `pm_interval=120` 从不逾期）的参考激活量恒 0（实测），故标定环境显式取小电池 + 短间隔。
     """
     row = t3_ref_vector(load_mk(name))
@@ -206,7 +206,7 @@ def test_influenceable_guard_requires_the_matching_action_head():
         check_influenceable(("machine_failure",), False, True, True)   # 役龄开、pm_head 关
     with pytest.raises(ValueError, match="⑪"):
         check_influenceable(("charging",), True, False, True)
-    # 全开档：不报错
+    # 全开配置：不报错
     check_influenceable(T3_CONSTRAINTS, True, True, True)
 
 
@@ -254,7 +254,7 @@ def test_calibration_cfg_is_per_caliber():
     inst = load_mk("mk01")
     g = calibration_cfg(inst, GEOMETRY)
     m = calibration_cfg(replace(inst, transport=MATRIX), MATRIX)
-    assert g.n_agv == SimConfig().n_agv, "几何口径的标定 cfg 不该动车队规模（默认档）"
+    assert g.n_agv == SimConfig().n_agv, "几何口径的标定 cfg 不该动车队规模（默认配置）"
     assert g.pm_interval > 0.0 and g.battery_low == 0.0, "标定环境：短间隔 + 到 0 才补电"
     assert m.n_agv == inst.n_machines and m.transport_unmapped == GEOMETRY
     with pytest.raises(ValueError, match="口径"):

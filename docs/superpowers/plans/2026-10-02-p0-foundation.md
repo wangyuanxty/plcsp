@@ -1,5 +1,7 @@
 # P0 地基 实施计划（git 建仓 · 包改名 · 死代码归档）
 
+> ⚠️ **历史文档**：本批已完成，正文口径可能已过期（旧用词「腿」/「档」按当时写法保留）。当前口径见 `docs/INDEX.md` §5 与 `docs/experiment-plan.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把项目置于版本控制之下，把包名从说谎的 `geosched` 改为 `plcsp`，并把三条已砍路线的代码归档/删除——全程保持回归测试全绿。
@@ -12,7 +14,8 @@
 
 ## Global Constraints
 
-- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
+- **项目根** = `D:
+esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python 解释器**一律用 `D:/anaconda/python.exe`（Anaconda base；**非** `python`）。**CPU-only，torch 2.14.0+cpu**。
 - **回归测试 `plcsp/tests/test_instances.py` 必须始终全绿（42 项）**——它是 bug#12 的门禁，任何阶段都不得为通过而修改其断言。
 - **不删历史证据**：所有被砍路线的脚本与其产出 `*.jsonl` **一律归档，不删除**（它们是负例证据，见 spec §2）。

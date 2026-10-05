@@ -27,7 +27,7 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, default=10)
     args = ap.parse_args()
 
-    print("实例   n_agv  makespan(sd)        运输总时长  运输占比  相对上一档改善")
+    print("实例   n_agv  makespan(sd)        运输总时长  运输占比  相对上一车数改善")
     for name in INSTANCES:
         inst = load_mk(name)
         prev: float | None = None

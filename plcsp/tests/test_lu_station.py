@@ -7,7 +7,7 @@ Research 61(4):1373-1393, 2023**）。Figure 形态：单一装卸单元在**机
 分界的高度，由**一条短连接段**接到左边缘交叉口；**它不是格点交叉口**。
 
 ⚠️ 本任务的裁定：**口径差只允许体现在"行程时间从哪来"，不得改变问题结构**——故几何口径
-（原始 MK）也有站→首工序机台与末工序机台→站两条腿。
+（原始 MK）也有站→首工序机台与末工序机台→站两条段。
 """
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ def test_makespan_ends_at_the_station_arrival_not_the_last_machine_op():
     """⭐⭐ 最强的一条：**单车、单作业、单工序**下 makespan 逐位等于
     `站→机台 + 加工 + 机台→站`。
 
-    这条挡的是"忘了把回站腿算进 makespan"——那种实现下数字只小一点点、全程不报错，
+    这条挡的是"忘了把回站段算进 makespan"——那种实现下数字只小一点点、全程不报错，
     正是本批最危险的静默形态。用合成实例（不依赖任何已发表数字）把等式钉死。
     """
     inst = Instance(n_jobs=1, n_machines=2, jobs=[[[(0, 10.0)]]], source="lu-probe")
@@ -169,14 +169,14 @@ def test_makespan_ends_at_the_station_arrival_not_the_last_machine_op():
 
     r = rollout(inst, seed_chain=1, cfg=cfg, constraints=_ALL_OFF)
     assert r["travel_time_total"] == pytest.approx(out + back, rel=1e-9), \
-        "行程不等于两条 LU 腿之和——回站腿没跑或没记账"
+        "行程不等于两条 LU 段之和——回站段没跑或没记账"
     assert r["makespan"] == pytest.approx(out + 10.0 + back, rel=1e-9), \
-        "makespan 不是到站时刻——完工时刻仍记在机台上（回站腿没进 makespan）"
+        "makespan 不是到站时刻——完工时刻仍记在机台上（回站段没进 makespan）"
 
 
 @pytest.mark.unit
 def test_matrix_travel_includes_the_lu_legs_looked_up_at_index_zero():
-    """⚠️ 矩阵口径下两条 LU 腿必须**查表**（LU = 下标 0），不得退回几何。
+    """⚠️ 矩阵口径下两条 LU 段必须**查表**（LU = 下标 0），不得退回几何。
 
     与 `test_transport_wiring.py` 的同型断言相比，这一条**把 LU 段也算进去**：端点映射为
     机台 i → i+1、装卸站 → 0。

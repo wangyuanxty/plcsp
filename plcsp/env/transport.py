@@ -13,7 +13,7 @@
 3. 矩阵**非对称**（`m=4` 是唯一例外，见 README §2）⟹ 查表**必须保序**。
 
 ⚠️ **装卸站（LU）的下标 0 现在有消费者**（P4-B Task 2b，2026-10-03 用户裁定）：作业**在装卸站
-入场、在装卸站完工**，故任务里会出现"站→首工序机台"与"末工序机台→站"两条**负载**腿，它们查的
+入场、在装卸站完工**，故任务里会出现"站→首工序机台"与"末工序机台→站"两条**负载段**，它们查的
 正是矩阵的第 0 行/列。`layout.lu` 的节点由 `from_matrix` 自动映射到下标 0——不需要调用方记得传，
 也就没有"忘了传"的口子。若某布局确实没有装卸站（`layout.lu is None`，只应出现在手搓的测试夹具里），
 则下标 0 空置，`test_slot_zero_is_the_load_unload_station_and_nothing_else` 钉住"站 ↔ 0"。
@@ -82,7 +82,7 @@ class TransportCaliber:
         实例机台 i），故这里直接用 `enumerate`。⚠️ 对齐的是**下标**，不是坐标——MKT 矩阵的
         机台编号来自 Brandimarte 的 `.fjs`，两边同源同序（P4-A 已核"加工数据一字不改"）。
         ⚠️ 装卸站**由布局自动带入**（`layout.lu`）——不设开关、不让调用方记得传：
-        "忘了映射装卸站"会是静默错行（整条 LU 腿查错格），不是显式错误。
+        "忘了映射装卸站"会是静默错行（整条 LU 段查错格），不是显式错误。
         """
         node_slot = {int(mp.dock_node): i + 1 for i, mp in enumerate(layout.machines)}
         if len(node_slot) != len(layout.machines):

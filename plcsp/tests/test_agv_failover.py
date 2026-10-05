@@ -4,15 +4,15 @@
 设计（`docs/mechanism-designs.md` 的「⑨ AGV 故障：在途任务退回队列」节，开工前定死）：
 
 - **加决策点？否**——退回是规则（故障期间退回/转交），不是策略动作。
-- **时点不变**：故障仍只在**腿间**（不持任何区段锁）生效——持锁停机 = 死锁。
-  退回发生在三个腿间检查点：循环顶（转交本车队列）、`q.get()` 之后、`_collect` 之后。
+- **时点不变**：故障仍只在**段间**（不持任何区段锁）生效——持锁停机 = 死锁。
+  退回发生在三个段间检查点：循环顶（转交本车队列）、`q.get()` 之后、`_collect` 之后。
 - **退到哪**：`bound`（每车一 Store）转交**未停机的**其它车；FIFO（单个共享 Store）
   放回共享队列队尾。
 - ⚠️ **这是改动力学**：打开后 makespan 会变（⑨ 的代价口径从"仅停机"改为
   "停机 + 重新派车 + 队列重排"）。
 
 本文件的判据即设计节的验收判据 1–5。摘要值是**改造前**（2026-10-05，HEAD=2c7fe87）
-在 MK01 上捕获的（默认档与故障高频档 `agv_mtbf=12, agv_mttr=5`；bound 与 FIFO 两条路径）。
+在 MK01 上捕获的（默认配置与故障高频验证档 `agv_mtbf=12, agv_mttr=5`；bound 与 FIFO 两条路径）。
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from plcsp.env.des import SimConfig, SimWorld
 from plcsp.env.instances import load_mk
 from plcsp.nn.encoder import LayoutEncoder
 
-# 故障高频档：MTBF 12 min ≪ episode，MTTR 5 min——桩桩故障都落在 episode 内。
+# 故障高频验证档：MTBF 12 min ≪ episode，MTTR 5 min——桩桩故障都落在 episode 内。
 HOT = dict(agv_mtbf=12.0, agv_mttr=5.0)
 # 改造前捕获的四个摘要（bound/fifo × 默认/高频，failover 关）。
 DIGESTS = {
@@ -61,14 +61,14 @@ def _expected_tasks(inst) -> int:
     return sum(len(job) + 1 for job in inst.jobs)
 
 
-# ────────────────────────── 1. 关档逐位不变 ──────────────────────────
+# ────────────────────────── 1. 关态逐位不变 ──────────────────────────
 
 @pytest.mark.unit
 @pytest.mark.parametrize("label,hot", [("default", False), ("hot", True)])
 def test_failover_off_is_bit_identical_to_baseline(label, hot):
     """判据 1：`agv_failover=False`（默认）⟹ bound 与 FIFO 两条路径都逐位等于改造前。
 
-    高频档（每小时约 5 次故障）把"退回逻辑若被误触发"的窗口放大——默认档故障少，
+    高频验证档（每小时约 5 次故障）把"退回逻辑若被误触发"的窗口放大——默认配置故障少，
     单靠它盖不住静默漂移。
     """
     cfg = SimConfig(**HOT) if hot else SimConfig()
@@ -76,22 +76,22 @@ def test_failover_off_is_bit_identical_to_baseline(label, hot):
     torch.manual_seed(20261005)
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    assert met["agv_failover_tasks"] == 0, "关档不得发生任何退回/转交"
+    assert met["agv_failover_tasks"] == 0, "关态不得发生任何退回/转交"
     assert _digest(met) == DIGESTS[("bound", label)], \
-        "failover 关档的 bound 路径变了——既有读数不再成立"
+        "failover 关态的 bound 路径变了——既有读数不再成立"
     m2 = SimWorld(inst, lay, dm, cfg).run(seed_chain=0)
-    assert m2["agv_failover_tasks"] == 0, "关档不得发生任何退回/转交"
+    assert m2["agv_failover_tasks"] == 0, "关态不得发生任何退回/转交"
     assert _digest(m2) == DIGESTS[("fifo", label)], \
-        "failover 关档的 FIFO 路径变了——既有读数不再成立"
+        "failover 关态的 FIFO 路径变了——既有读数不再成立"
 
 
 # ────────────────────────── 2. 打开：退回真的发生、动力学真的变 ──────────────────────────
 
 @pytest.mark.unit
 def test_failover_requeues_and_changes_makespan():
-    """判据 2：高频档下 `agv_failover_tasks > 0`，且 makespan 与关档不同。
+    """判据 2：高频验证档下 `agv_failover_tasks > 0`，且 makespan 与关态不同。
 
-    关档读数（改造前捕获）：bound makespan = 139.089103；FIFO = 118.714584。
+    关态读数（改造前捕获）：bound makespan = 139.089103；FIFO = 118.714584。
     打开后任务不再"车趴多久卡多久"，时序必然变——这是改动力学的**预期**后果。
     """
     inst, lay, dm, _, ctx = _setup(SimConfig(**HOT))
@@ -99,16 +99,16 @@ def test_failover_requeues_and_changes_makespan():
     torch.manual_seed(20261005)
     pol = PolicyNet(enc=LayoutEncoder())
     _dec, met_off = roll_chain(inst, lay, dm, cfg_off, pol, seed=0, ctx=ctx)
-    # 同一初始化/同一策略：开档另建一份策略（同 seed ⟹ 同参数）
+    # 同一初始化/同一策略：打开后另建一份策略（同 seed ⟹ 同参数）
     cfg_on = SimConfig(**HOT, agv_failover=True)
     lay_on, dm_on, ctx_on = build_setup(inst, cfg_on)
     torch.manual_seed(20261005)
     pol_on = PolicyNet(enc=LayoutEncoder())
     _dec2, met_on = roll_chain(inst, lay_on, dm_on, cfg_on, pol_on, seed=0, ctx=ctx_on)
     assert met_on["agv_failover_tasks"] > 0, \
-        "高频档下一次退回都没发生——failover 没接上（任务仍卡在停机车手里）"
+        "高频验证档下一次退回都没发生——failover 没接上（任务仍卡在停机车手里）"
     assert met_on["horizon_hit"] is False and met_on["jobs_done"] == inst.n_jobs, \
-        "failover 档跑不完（死锁？）"
+        "failover 配置跑不完（死锁？）"
     assert met_on["makespan"] != met_off["makespan"], \
         "打开 failover 后 makespan 一位没变——退回没有改变动力学"
     assert met_on["makespan"] < met_off["makespan"], \
@@ -128,13 +128,13 @@ def test_failover_conserves_tasks_bound_and_fifo():
     pol = PolicyNet(enc=LayoutEncoder())
     _dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
     assert met["horizon_hit"] is False and met["jobs_done"] == inst.n_jobs
-    assert met["agv_failover_tasks"] > 0, "前提：本档必须真的发生过退回"
+    assert met["agv_failover_tasks"] > 0, "前提：本配置必须真的发生过退回"
     assert met["deliveries"] == n_tasks, \
-        f"bound 档送达 {met['deliveries']} 件 ≠ 任务总数 {n_tasks}——任务丢了或重复执行"
+        f"bound 配置送达 {met['deliveries']} 件 ≠ 任务总数 {n_tasks}——任务丢了或重复执行"
     m2 = SimWorld(inst, lay, dm, cfg).run(seed_chain=0)
     assert m2["horizon_hit"] is False and m2["jobs_done"] == inst.n_jobs
     assert m2["deliveries"] == n_tasks, \
-        f"FIFO 档送达 {m2['deliveries']} 件 ≠ 任务总数 {n_tasks}——任务丢了或重复执行"
+        f"FIFO 配置送达 {m2['deliveries']} 件 ≠ 任务总数 {n_tasks}——任务丢了或重复执行"
 
 
 @pytest.mark.unit
@@ -160,7 +160,7 @@ def test_failover_clears_in_transit_tracking():
 
 @pytest.mark.unit
 def test_failover_never_deadlocks_under_brutal_failures():
-    """判据 5：更狠的故障档（MTBF 6 ≪ MTTR 8，车队近半时间在停机）也必须跑完。
+    """判据 5：更狠的故障配置（MTBF 6 ≪ MTTR 8，车队近半时间在停机）也必须跑完。
 
     若实现让车**在持区段锁时**停机（或退回任务时没释放锁），同区段的车会永久等待 ⟹
     仿真推进到 horizon 仍未完工 ⟹ `horizon_hit=True` 当场翻红。这是"时点不许改"的
@@ -171,14 +171,14 @@ def test_failover_never_deadlocks_under_brutal_failures():
     torch.manual_seed(3)
     pol = PolicyNet(enc=LayoutEncoder())
     _dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    assert met["horizon_hit"] is False, "重故障档掐表（疑似死锁：车在持锁/在途时被处理？）"
+    assert met["horizon_hit"] is False, "重故障配置掐表（疑似死锁：车在持锁/在途时被处理？）"
     assert met["jobs_done"] == inst.n_jobs
     assert met["agv_failover_tasks"] > 0
     # 退回次数不应爆炸：转交给"停机车"会在两辆停机车之间乒乓（任务原地打转、计数虚增）。
-    # 实测重故障档 ≈ 1×任务数；5× 是防乒乓的宽上界，不是性能判据。
+    # 实测重故障配置 ≈ 1×任务数；5× 是防乒乓的宽上界，不是性能判据。
     assert met["agv_failover_tasks"] <= 5 * _expected_tasks(inst), \
         f"退回次数 {met['agv_failover_tasks']} 异常多——疑似在停机车之间乒乓"
-    assert met["deliveries"] == _expected_tasks(inst), "重故障档下任务不守恒"
+    assert met["deliveries"] == _expected_tasks(inst), "重故障配置下任务不守恒"
 
 
 @pytest.mark.unit

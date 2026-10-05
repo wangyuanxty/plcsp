@@ -7,7 +7,7 @@
 
 **判据**（与设计文档 §⑫ 的验收一致）：
 1. `pm_head=False`（默认）⟹ 链路逐位等于今日（黄金摘要钉死，既有读数全靠它）；
-2. 短间隔档下 M 决策**真的发生**、进链 logp、梯度到 M 头、同 seed 可复现；
+2. 短间隔验证档下 M 决策**真的发生**、进链 logp、梯度到 M 头、同 seed 可复现；
 3. 动作**有效果**：强制「永远现在保养」把首次保养提前到规则不可能达到的时刻；
 4. **规则仍是硬底线**：逾期（`pm_clock >= pm_interval`）**强制**保养、不产生决策——策略
    只能把保养提前，不能推迟过强制点（设计 §⑫「推迟：强制停机落在更晚」）。
@@ -42,23 +42,23 @@ from plcsp.env.snapshot import MachineState, Snapshot
 from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.features import F_MAX, SEG_SLICE
 
-# 验证用的**短间隔档**（默认仍是 120.0，见模块 docstring）：MK01 机台负载 ~25.5 min，
+# 验证用的**短间隔验证档**（默认仍是 120.0，见模块 docstring）：MK01 机台负载 ~25.5 min，
 # 10 min 间隔下每台机在整个 episode 里都会被强制保养 1–2 次。
 PM_SHORT = 10.0
 
-# 黄金摘要：`pm_head=False` 档的链路指纹（决策类型 + 全部打分上下文 + tok_idx + 动作 +
+# 黄金摘要：`pm_head=False` 配置的链路指纹（决策类型 + 全部打分上下文 + tok_idx + 动作 +
 # 采样 logp + 关键指标）。**捕获自改造前的树**：先在改造前的工作树（HEAD=39f095f）上算出，
 # 改造后再用 `git worktree` 在当时的 HEAD（9bbcc1e，期间只有文档提交推进、代码同 39f095f）
 # 复算一次，两处同值——它不是实现完之后现编的基准：
 #   kinds={'S':55,'L':65,'R':0} n=120，makespan=118.8647282376667
-# 任何"多抽一个随机数 / 多取一次快照 / 下标映射变了"的关闭档漂移都会翻红。
+# 任何"多抽一个随机数 / 多取一次快照 / 下标映射变了"的关态漂移都会翻红。
 PM_HEAD_OFF_DIGEST = "5a06255d6d57d2f507c7186a198c11ec056454a359265809c80da40c98f4c5ae"
 
 
 def _setup(interval=PM_SHORT):
     """(inst, layout, dm, cfg, ctx, policy)——与 `roll_chain` 的签名对齐（同 test_route_choice）。
 
-    `interval=None` ⇒ **默认** `SimConfig()`（`pm_interval=120`）——黄金摘要钉的是默认档。
+    `interval=None` ⇒ **默认** `SimConfig()`（`pm_interval=120`）——黄金摘要钉的是默认配置。
     """
     inst = load_mk("mk01")
     cfg = SimConfig() if interval is None else SimConfig(pm_interval=interval)
@@ -108,7 +108,7 @@ class _NoMixEncoder(torch.nn.Module):
         return x, x.mean(dim=1)
 
 
-# ────────────────────────── 1. 关闭档逐位不变（摘要在前文） ──────────────────────────
+# ────────────────────────── 1. 关态逐位不变（摘要在前文） ──────────────────────────
 
 @pytest.mark.unit
 def test_pm_head_off_is_bit_identical_to_baseline():
@@ -121,7 +121,7 @@ def test_pm_head_off_is_bit_identical_to_baseline():
     torch.manual_seed(20261004)                 # 与捕获脚本逐字对齐的初始化锚点
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, pm_head=False)
-    assert [d.kind for d in dec].count("M") == 0, "关闭档不得产生 M 决策"
+    assert [d.kind for d in dec].count("M") == 0, "关态不得产生 M 决策"
     assert _chain_digest(dec, met) == PM_HEAD_OFF_DIGEST, \
         "关闭维护头后链路变了——既有读数不再成立"
 
@@ -145,7 +145,7 @@ def test_pm_head_requires_maintenance_on():
 
 @pytest.mark.unit
 def test_pm_decisions_join_the_chain_and_its_logp():
-    """判据 2：短间隔档下 M 决策必须出现、进链 logp、有梯度、同 seed 可复现。
+    """判据 2：短间隔验证档下 M 决策必须出现、进链 logp、有梯度、同 seed 可复现。
 
     ⚠️ 只断言"链里出现 M"会漏掉"logp 里没有 M"的形态（那些决策成了不产生梯度的装饰），
     故这里**抽掉 M 再算链 logp**，值必须变。
@@ -153,7 +153,7 @@ def test_pm_decisions_join_the_chain_and_its_logp():
     inst, lay, dm, cfg, ctx, pol = _setup()
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, pm_head=True)
     assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, \
-        f"维护头档跑不完：horizon_hit={met['horizon_hit']} jobs={met['jobs_done']}"
+        f"维护头配置跑不完：horizon_hit={met['horizon_hit']} jobs={met['jobs_done']}"
     m_dec = [d for d in dec if d.kind == "M"]
     assert len(m_dec) >= 20, f"M 决策太少（{len(m_dec)}）——判据失去意义"
     assert all(d.cand == PM_CANDS for d in m_dec), \
@@ -279,13 +279,13 @@ def test_pm_head_reads_the_deciding_machines_token_on_the_production_path():
 
 @pytest.mark.unit
 def test_pm_defer_matches_the_rule_and_now_moves_the_first_pm_earlier():
-    """判据 3：策略的动作真的决定保养**何时发生**，且"不保养"档逐位等于规则档。
+    """判据 3：策略的动作真的决定保养**何时发生**，且"不保养"配置逐位等于规则配置。
 
     三个同 seed、同确定性派车（`policy_l`）的运行：
-    - **规则档**（`policy_m=None`）：今日行为；
-    - **永远不保养档**：逾期前不主动停 ⟹ 应与规则档**逐位相同**（强制底线 = 规则）；
-    - **永远现在保养档**：首次保养发生在**第一个决策点**（第一道工序下机）。
-      规则档的首次保养不可能早于 `pm_interval`（主轴工时 ≤ 墙钟，累计 10 min 主轴至少要
+    - **规则配置**（`policy_m=None`）：今日行为；
+    - **永远不保养配置**：逾期前不主动停 ⟹ 应与规则配置**逐位相同**（强制底线 = 规则）；
+    - **永远现在保养配置**：首次保养发生在**第一个决策点**（第一道工序下机）。
+      规则配置的首次保养不可能早于 `pm_interval`（主轴工时 ≤ 墙钟，累计 10 min 主轴至少要
       10 min 墙钟）⟹ 首次保养时刻被**动作**提前了，这是"决策有效果"的直接读数。
     """
     inst = load_mk("mk01")
@@ -308,17 +308,17 @@ def test_pm_defer_matches_the_rule_and_now_moves_the_first_pm_earlier():
                                                  policy_m=pol_now)
     for name, met in (("规则", rule), ("不保养", defer), ("现在保养", now)):
         assert not met["horizon_hit"] and met["jobs_done"] == inst.n_jobs, \
-            f"{name}档未跑完：horizon_hit={met['horizon_hit']} jobs={met['jobs_done']}"
+            f"{name} 配置未跑完：horizon_hit={met['horizon_hit']} jobs={met['jobs_done']}"
     assert defer["pm_events"] == rule["pm_events"] > 0, \
-        (f"「永远不保养」档的保养事件数 {defer['pm_events']} ≠ 规则档 {rule['pm_events']}——"
+        (f"「永远不保养」配置的保养事件数 {defer['pm_events']} ≠ 规则配置 {rule['pm_events']}——"
          "强制底线不是规则原本的行为")
     assert defer["makespan"] == rule["makespan"] and defer["completes"] == rule["completes"], \
-        "「永远不保养」档与规则档的时序不同——决策点改变了规则档的行为"
+        "「永远不保养」配置与规则配置的时序不同——决策点改变了规则配置的行为"
     assert now["pm_events"] > defer["pm_events"], \
-        (f"「永远现在保养」档的保养事件数 {now['pm_events']} 未超过规则档 "
+        (f"「永远现在保养」配置的保养事件数 {now['pm_events']} 未超过规则配置 "
          f"{defer['pm_events']}——动作没有被执行")
-    assert trace, "策略档没有调用 M 回调"
+    assert trace, "策略配置没有调用 M 回调"
     first_now = min(t for t, _m, _c in trace)     # 「现在保养」⟹ 保养就在此刻开始
     assert first_now < PM_SHORT, (
         f"首个决策点 t={first_now:.2f} 不早于 pm_interval={PM_SHORT}——"
-        "规则档的首次保养下界被打破，本判据的'提前'不成立")
+        "规则配置的首次保养下界被打破，本判据的'提前'不成立")

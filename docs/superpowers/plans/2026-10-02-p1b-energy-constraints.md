@@ -1,5 +1,7 @@
 # P1b 能耗与约束 实施计划（M2 能耗模型 · 约束框架 · 剩余约束接入）
 
+> ⚠️ **历史文档**：本批已完成，正文口径可能已过期（旧用词「腿」/「档」按当时写法保留）。当前口径见 `docs/INDEX.md` §5 与 `docs/experiment-plan.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把能耗模型从"假的"（`(process_time+travel_time)×1.0`，算出来是时间不是能量）换成**引证参数的 M2 模型**；把约束做成**配置开关**；接入剩余 9 个约束——**每接入一个就立刻实测它是否 binding**。
@@ -12,7 +14,8 @@
 
 ## Global Constraints
 
-- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
+- **项目根** = `D:
+esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python** 一律用 `D:/anaconda/python.exe`。**CPU-only**。
 - **单位约定（bug#13，不得改动）**：**仿真时间 = 分钟，布局坐标 = 米**。运输 = `距离[m]/(eff_speed×agv_speed_mps)/60`。能源单位 = **kWh**，功率 = **kW**。
 - **回归门禁**：`plcsp/tests/` 的 **69 项必须始终全绿**；`test_instances.py`（42 项）不得改断言。

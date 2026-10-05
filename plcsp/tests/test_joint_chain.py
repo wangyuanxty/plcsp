@@ -124,7 +124,7 @@ def test_chain_setup_features_are_silent_when_constraint_off():
 
     `roll_chain` 把 constraints 透传进 `_mach_cand_feat`（S 头候选特征）与 `task_feat`
     （L 头任务特征第 4 维）**两条**通路；只看 `setup_flag` 单函数盖不住"回调里没传下去"。
-    全开档必须有非零（否则判据恒真，抓不住任何东西）。
+    全开配置必须有非零（否则判据恒真，抓不住任何东西）。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
     full = ConstraintConfig()
@@ -133,7 +133,7 @@ def test_chain_setup_features_are_silent_when_constraint_off():
                             constraints=full.with_off("setup_time"))
     s_on = np.array([float(d.cand_feat.max()) for d in dec_on if d.kind == "S"])
     s_off = np.array([float(d.cand_feat.max()) for d in dec_off if d.kind == "S"])
-    assert s_on.max() > 0.0, "全开档没有换型信号——判据失去意义"
+    assert s_on.max() > 0.0, "全开配置没有换型信号——判据失去意义"
     assert s_off.max() == 0.0, f"⑤ 关时 S 头换型特征仍报 {s_off.max()}——没读约束开关"
     l_off = np.array([float(d.feat[3]) for d in dec_off if d.kind == "L"])
     assert l_off.max() == 0.0, f"⑤ 关时 L 头任务特征第 4 维仍报 {l_off.max()}"
@@ -285,8 +285,8 @@ def test_multi_epoch_clip_trust_region_is_live():
 # 背景（本批的动机，docs/progress-log.md §34/§36/§37）：`roll_chain` 的在线前向是**逐决策**的
 # （每个决策依赖上一刻的仿真状态），不能批；但 `chain_logp` / `decisions_logp` 的重算是
 # **事后**的——全部决策的 token 形状相同（实例级常量），可堆成 (B,N,F) 一次前向。
-# 编码器是 CPU 档耗时主项（本机实测单条 ≈6.0 ms、231 条批成一次 ≈402 ms，吞吐 ~3.4×）；
-# CUDA 档上打分头 + 它引出的逐决策反向小图占整步 ~54%（§36.8），故头也按 `(kind, n_cand)`
+# 编码器是 CPU 配置耗时主项（本机实测单条 ≈6.0 ms、231 条批成一次 ≈402 ms，吞吐 ~3.4×）；
+# CUDA 配置上打分头 + 它引出的逐决策反向小图占整步 ~54%（§36.8），故头也按 `(kind, n_cand)`
 # 分组批量（**不 padding**：padding 会改 `log_softmax` 的归约长度），见 `_decision_logp_terms`。
 
 
@@ -386,7 +386,7 @@ def test_head_scores_are_grouped_batched_by_kind_and_candidate_count(monkeypatch
        的组数与候选数当场抓住。
 
     ⚠️ **不 padding**是本仓的选择（padding 会改 `log_softmax` 的归约长度、撑破 1e-5 容差）：
-    组数必须远小于决策数（MK01/全头档实测 7 组 vs 3400+ 决策）。组数若退化成逐决策，
+    组数必须远小于决策数（MK01/全头配置实测 7 组 vs 3400+ 决策）。组数若退化成逐决策，
     本判据当场红——那说明该改分组键，不是该放宽判据。
     """
     from plcsp.algo.group_rel import _decision_logp_terms
@@ -790,7 +790,7 @@ def test_scalar_adv_mode_regression_pin():
 
     ⚠️ 2026-10-04 早先的三次重捕获（R 头恢复排除 / L 头 token 下标修复 / ⑫⑪ 新头排除）见
     `docs/progress-log.md`；本条记**两次**由数值批次引起的重捕获（批量重算、打分头批量）。
-    三个新头（`r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*`）的排除理由不变：默认关闭档
+    三个新头（`r_head_tok.*` / `pm_head_tok.*` / `c_head_tok.*`）的排除理由不变：默认关态
     它们拿不到梯度，其参数是新增结构、不进本条"scalar 口径"的证据链。
     ⚠️ **2026-10-05（R2 区段 token）追加排除** `enc.proj_z.*` 与 `enc.zone_type_emb`：同理由
     ——`route_zones=False`（默认）时 Z 段不存在，这两个参数 grad 为 None。**摘要值未重捕获**
@@ -806,9 +806,9 @@ def test_scalar_adv_mode_regression_pin():
     joint_chain_step(pol, inst, lay, dm, cfg, ctx, ref, seed=0, G=2, adv_mode="scalar")
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
-        # 排除默认关档**拿不到梯度**的新增结构：R 头 / ⑫M 头 / ⑪C 头（历史批次），
+        # 排除默认关态**拿不到梯度**的新增结构：R 头 / ⑫M 头 / ⑪C 头（历史批次），
         # R2 的区段投影与区段类型嵌入（2026-10-05），以及 ⑩ 拼批头 `b_head_tok`（2026-10-05）
-        # ——它们只在 `route_zones=True` / `batch_head=True` 时被调用，默认档 grad 为 None
+        # ——它们只在 `route_zones=True` / `batch_head=True` 时被调用，默认配置 grad 为 None
         # （不进 `clip_grad_norm_`、不进 Adam），故排除它们
         # **不削弱**本条对 scalar 口径默认路径的钉法；摘要值因此无需重捕获。
         if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.", "b_head_tok.",

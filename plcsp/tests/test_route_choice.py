@@ -31,12 +31,12 @@ from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.features import F_MAX, SEG_SLICE
 
 # 黄金摘要：在 MK01 上跑出的链路指纹，把"路线头关闭 ⟹ 逐位等于既有行为"钉成机器可判的
-# 判据——任何对 `_drive`/`roll_chain` 的改动若在关闭档下动了行为，此处立刻变红（其余测试
+# 判据——任何对 `_drive`/`roll_chain` 的改动若在关态下动了行为，此处立刻变红（其余测试
 # 都盖不住"多抽了一个随机数"或"路径选法变了"这类静默漂移）。
 # ⚠️ 2026-10-04 重捕获（L 头 token 下标修复，不是路线头改动）：旧值
 # `403f68e3ba380857e14a94ada025d667a2cc7e0790abef755ca2845f371c31b0` 钉的是带缺陷的链路
 # ——`_act` 把 L 的**车号**当序列位置，L 头读 M 段机台 token、对车辆特征完全失明；修复后
-# L 的分数与采样动作都变，摘要必须换新基准。路线头关闭档本身的"逐位稳定"仍由本测试守着。
+# L 的分数与采样动作都变，摘要必须换新基准。路线头关态本身的"逐位稳定"仍由本测试守着。
 GOLDEN_CHAIN_DIGEST = "e67a71292fe33c16e64cdcfdc6a6e8104cd06c546a3c4377ca1b9eb9dab55f79"
 
 
@@ -91,7 +91,7 @@ def test_k_shortest_paths_are_distinct_simple_and_ascending():
     src, dst = lay.machines[0].dock_node, lay.machines[5].dock_node
     paths = k_shortest_paths(g, src, dst, 5)
     assert len(paths) == 5, f"网格上应有 5 条不同路径，实得 {len(paths)}"
-    assert paths[0] == shortest_node_path(g, src, dst), "第 0 条必须是最短路（关闭档的基准）"
+    assert paths[0] == shortest_node_path(g, src, dst), "第 0 条必须是最短路（关态的基准）"
     seen = {tuple(p) for p in paths}
     assert len(seen) == len(paths), f"候选路径有重复：{paths}"
     for p in paths:
@@ -251,7 +251,7 @@ def test_route_decisions_join_the_chain_and_its_logp():
 
 @pytest.mark.unit
 def test_route_enabled_chain_is_reproducible_and_differs():
-    """同 seed 下开路线头仍逐位可复现；且与关闭档**不同**（R 真的进了链路）。"""
+    """同 seed 下开路线头仍逐位可复现；且与关态**不同**（R 真的进了链路）。"""
     inst, lay, dm, cfg, ctx, pol = _setup()
     a, met_a = roll_chain(inst, lay, dm, cfg, pol, seed=3, ctx=ctx, route_k=2)
     b, _ = roll_chain(inst, lay, dm, cfg, pol, seed=3, ctx=ctx, route_k=2)
@@ -271,13 +271,13 @@ def test_route_head_off_is_bit_identical_to_baseline():
     任何"多抽一个随机数、路径选法变了、快照多算了一个量"的漂移都会翻红。
     ⚠️ 2026-10-04 重捕获：L 头 token 下标修复（`_act` 车号→V 段 token）改变的是 **L 决策的
     输入**，采样动作与指标随之变化，故摘要换新基准。旧基准 `403f68e3...` 钉的是带缺陷的
-    链路（L 头读机台 token、看不见任何车辆特征）。本测试的**判据**（关闭档逐位稳定）不变。
+    链路（L 头读机台 token、看不见任何车辆特征）。本测试的**判据**（关态逐位稳定）不变。
     """
     inst, lay, dm, cfg, ctx, pol = _setup()
     torch.manual_seed(20261004)                 # 与黄金摘要生成时同一初始化
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
-    assert [d.kind for d in dec].count("R") == 0, "默认档不得产生 R 决策"
+    assert [d.kind for d in dec].count("R") == 0, "默认配置不得产生 R 决策"
     assert _chain_digest(dec, met) == GOLDEN_CHAIN_DIGEST, \
         "关闭路线头后链路变了——既有读数不再成立"
 

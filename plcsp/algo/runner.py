@@ -76,9 +76,9 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
     - `n_workers=None` ⇒ `min(核数, G)`（G 取自 `step_kwargs`）。
     - `worker_device`（2026-10-04 worker 设备批次）：`"cpu"`（默认，逐位等于上一批）/
       `"cuda"`（worker 在自己的进程里建 CUDA 上下文 + GPU 副本，在线前向走 CUDA 图）。
-      CUDA 档**不改**采样流之外的口径；采样流设备跟随 worker 策略设备 ⟹ 与 CPU 档数值不同。
+      CUDA 配置**不改**采样流之外的口径；采样流设备跟随 worker 策略设备 ⟹ 与 CPU 配置数值不同。
       worker 建上下文/建图失败**显式报错**，不退回 CPU worker。
-    - ⚠️ 采样流口径随并行改变（每条链独立流）⟹ **并行档与串行档同 seed 的数值不同**
+    - ⚠️ 采样流口径随并行改变（每条链独立流）⟹ **并行配置与串行配置同 seed 的数值不同**
       （第九次读数作废，见 `progress-log.md` §39）。
     """
     rd = Path(run_dir)
@@ -95,7 +95,7 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
     pool = None
     try:
         if parallel:
-            from .chain_pool import ChainWorkerPool   # 运行时导入：默认档不加载该模块
+            from .chain_pool import ChainWorkerPool   # 运行时导入：默认配置不加载该模块
             missing = [k for k in ("layout", "dm", "cfg", "ctx") if k not in step_kwargs]
             if missing:
                 raise ValueError(

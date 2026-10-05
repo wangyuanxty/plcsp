@@ -1,5 +1,7 @@
 # P4-B MKT 行程时间矩阵接入仿真 + 两档口径报告 实施计划
 
+> ⚠️ **历史文档**：本批已完成，正文口径可能已过期（旧用词「腿」/「档」按当时写法保留）。当前口径见 `docs/INDEX.md` §5 与 `docs/experiment-plan.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 P4-A 落盘的 **MKT 机台间行程时间矩阵**接进 `AgvSim`（今天仿真一律用布局几何算行程时间），使我们的数字能按文献在用的同一口径写进同一张表；并交付**两档报告**（档 A = MKT 口径的退化形态、档 B = 机制全开）。
@@ -14,7 +16,8 @@
 
 ## Global Constraints
 
-- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
+- **项目根** = `D:
+esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python** 一律用 `D:/anaconda/python.exe`；前缀 `PYTHONIOENCODING=utf-8`。**CPU-only**。
 - **单位约定（不得改动）**：仿真时间 = 分钟，布局坐标 = 米，能耗 = kWh。**矩阵已经是分钟**——**不得**对它套几何口径的 `距离 / (eff_speed · 车速) / 60` 换算（本批的头号缺陷形态）。
 - **回归门禁**：`plcsp/tests/` 现有 **283 项必须始终全绿**，且 `ruff check plcsp/` 保持 clean。⚠️ **全套 `plcsp/tests` 约 6 分钟**（`test_end_to_end_a.py` 独占 4 分多），每个任务末尾都要跑，知情安排墙钟。

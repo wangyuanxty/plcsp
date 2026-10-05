@@ -16,12 +16,12 @@
   makespan / energy（kWh）/ TWT。三者都是越小越好。
 - **评价 = `rollout(inst, seed_chain=..., cfg=..., constraints=REPORT_TIERS[tier],
   op_choices=...)`**。这是本仓的**规则派车**入口（AGV 共享队列、空闲车接活），
-  与 ① 规则层、`m14_mkt_reference` 的两档参考表**同一入口**。
+  与 ① 规则层、`m14_mkt_reference` 的两个报告档参考表**同一入口**。
 - **不用 `run_gated`**：那是**在线策略**入口（DRL 的 S/L/R/M/C/B 回调）。
   离线元启发式没有可交给它的策略；用它就要改 NSGA-II 的方法。故不选。
 - **可选 `agv_genes=True`**：额外编码每趟运输任务的车号，走 `run(agv_phi=...)`。
   那条路径是 **bound 派车**（每车一队列）——与 DRL 的 L 头同一条路径。
-  默认关：默认档与 ① 规则层同口径，且标准 NSGA-II 不编码车号。
+  默认关：默认配置与 ① 规则层同口径，且标准 NSGA-II 不编码车号。
 
 ## 决策变量（染色体）
 
@@ -32,15 +32,15 @@
   这是本基线的**已知范围限制**，必须写进论文。
 - （可选）**车号块**：长度 = Σ每作业(工序数 + 1)（= 运输任务总数；MK01 = 65）。
 
-## 两档口径（spec §6.1 / P4-B）
+## 两个报告档的口径（spec §6.1 / P4-B）
 
 - `A-MKT` = `REPORT_TIERS["A-MKT"]`（十机制全关）。用于与已发表数字**对齐**（⚠️ 只对齐**机制**维度——
   本仓 makespan 含 LU 入场/回站段、仿真器也不同，只判量级；见 `progress-log.md` §52.6/§52.7）；
   **确定性**（无故障/返工），单条随机链即可复现。
-  ⚠️ 档 A 关着 ⑧ 交期 ⟹ **TWT 恒为 0**，实际只有两个活目标。
+  ⚠️ 报告档 A 关着 ⑧ 交期 ⟹ **TWT 恒为 0**，实际只有两个活目标。
 - `B-Full` = 机制全开。三目标都活（TWT 非零）；但故障/返工是随机的 ⟹
   整轮评价固定**同一条** `seed_chain`（共同随机数），换链就是换场景。
-- 矩阵实例上档 B 开着 ⑪ 充电，而充电桩在矩阵里没有对应项 ⟹ `transport_unmapped="geometry"`
+- 矩阵实例上报告档 B 开着 ⑪ 充电，而充电桩在矩阵里没有对应项 ⟹ `transport_unmapped="geometry"`
   声明式降级。降级段数/分钟数由仿真逐次报出，本模块累计后随结果带出。
 
 ## 代价（必须随结果报出）
@@ -78,7 +78,7 @@ class EvalSpec:
     """一轮 NSGA-II 的**评价口径**。口径是问题的属性，必须随结果一起报出。
 
     ⚠️ **三个 `SimConfig` 级开关（2026-10-05，A 主对比）默认全 `False` = 逐位等于既有读数**：
-    DRL 的两档（`m13 --constraints None/Full`）跑在 `SimConfig(multi_drop=True,
+    DRL 的两个报告档（`m13 --constraints None/Full`）跑在 `SimConfig(multi_drop=True,
     agv_failover=True, machine_age_failure=…)` 上（`experiment-plan.md` §9.7），基线必须
     **同一套动力学**才可比——`multi_drop` 改交付模型、`agv_failover` 改 ⑨ 停机期间的任务
     归属、`machine_age_failure` 改 ③ 的故障率。缺一个就是"两个问题各跑各的"。
@@ -167,7 +167,7 @@ class MachineAssignmentProblem(Problem):
         self.inst = inst
         self.spec = spec
         if spec.tier not in REPORT_TIERS:
-            raise ValueError(f"未知档位：{spec.tier}；可选 {sorted(REPORT_TIERS)}")
+            raise ValueError(f"未知报告档：{spec.tier}；可选 {sorted(REPORT_TIERS)}")
         self.constraints = REPORT_TIERS[spec.tier]
         self.cfg = spec.cfg()
         xl, xu = gene_bounds(inst, spec.n_agv, spec.agv_genes)
@@ -224,7 +224,7 @@ class Nsga2Result:
         """一段可粘进报告的文本（口径 + 前沿 + 代价）。"""
         theory = self.pop_size * (self.n_gen + 1)
         lines = [
-            f"NSGA-II（pymoo {PYMOO_VERSION}，Apache-2.0）｜档 {self.tier}"
+            f"NSGA-II（pymoo {PYMOO_VERSION}，Apache-2.0）｜报告档 {self.tier}"
             f"｜seed={self.seed}｜sim_seed_chain={self.seed_chain}"
             f"｜pop={self.pop_size}×gen={self.n_gen}｜车号块={self.agv_genes}",
             f"cfg：multi_drop={self.multi_drop}"
@@ -293,13 +293,13 @@ def main() -> None:
                     help='"default" = 该实例的车数设定（MKT: v=m；几何: 3）')
     ap.add_argument("--agv-genes", action="store_true", help="额外编码每趟任务的车号")
     # ⚠️ 三个 `SimConfig` 级开关（2026-10-05，A 主对比）默认全关 ⟹ 既有读数逐位不变。
-    #    DRL 两档跑在它们上面（§9.3/§9.7），基线要同口径时打开对应的那几个。
+    #    DRL 两个报告档跑在它们上面（§9.3/§9.7），基线要同口径时打开对应的那几个。
     ap.add_argument("--multi-drop", action="store_true",
-                    help="⑩ multi-drop 行程模型（DRL 两档都开；缺它就是另一个交付模型）")
+                    help="⑩ multi-drop 行程模型（DRL 两个报告档都开；缺它就是另一个交付模型）")
     ap.add_argument("--agv-failover", action="store_true",
                     help="⑨ 故障 failover（⑨ 关时惰性）")
     ap.add_argument("--machine-age-failure", action="store_true",
-                    help="③ 役龄故障率（档 B 开、档 A 关）")
+                    help="③ 役龄故障率（报告档 B 开、报告档 A 关）")
     args = ap.parse_args()
 
     if args.geometry:

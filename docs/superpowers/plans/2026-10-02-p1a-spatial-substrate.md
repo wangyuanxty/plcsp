@@ -1,5 +1,7 @@
 # P1a 空间基底 实施计划（网格布局 · 格点走廊 · 路径级 zone 申请）
 
+> ⚠️ **历史文档**：本批已完成，正文口径可能已过期（旧用词「腿」/「档」按当时写法保留）。当前口径见 `docs/INDEX.md` §5 与 `docs/experiment-plan.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把车间的空间模型从"一维单环走廊 + 任意 zone 分配"换成**二维网格布局 + 格点走廊 + 沿实际路径的逐段 zone 申请**，使拥堵（约束①）与充电（约束⑪）建立在真实几何之上。
@@ -12,7 +14,8 @@
 
 ## Global Constraints
 
-- **项目根** = `D:esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
+- **项目根** = `D:
+esearch\DeepReinforcementLearningScheduling`。**根目录不留临时产物**（`*.log` / `*.jsonl` / `figs/` / 提取文本 / 渲染图一律进系统临时目录，用完即删）——正式文档放哪里不受限。
 - **Python 解释器**一律用 `D:/anaconda/python.exe`。**CPU-only，torch 2.14.0+cpu**。
 - **单位约定（bug#13 已定，不得改动）**：**仿真时间单位 = 分钟，布局坐标单位 = 米**。运输时间 = `距离[m] / (窄道倍率 × agv_speed_mps) / 60`。`SECONDS_PER_MIN = 60.0` 已定义于 `plcsp/env/des.py`。
 - **回归门禁**：`plcsp/tests/` 的 **49 项必须始终全绿**。其中 `test_instances.py`（42 项）锁定官方 Brandimarte 实例，**任何任务都不得修改其断言**。

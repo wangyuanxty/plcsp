@@ -5,12 +5,12 @@
 
 1. **默认关 ⟹ 逐位不变**：`joint_chain_step` 不带 T3 形参时，参数摘要等于既有的捕获参照
    （`test_joint_chain.test_scalar_adv_mode_regression_pin` 的同一条摘要）。
-2. **λ ≡ 0 时与关档逐位相同**：同一配置下传 `t3_lambda=0` 得到的摘要与上一条**同值**。
+2. **λ ≡ 0 时与关态逐位相同**：同一配置下传 `t3_lambda=0` 得到的摘要与上一条**同值**。
 3. **对偶上升方向**：`â > b ⟹ λ 升`；`â < b ⟹ λ 降`且不为负——用**真实一步**的 diag 验证
    接线（纯函数的逐条性质在 `test_t3_budget.py`）。
-4. **② 的计数两处都记**：单卸货点档只走 `run` 的投递循环、multi-drop 档只走
-   `_deliver_multi` 的循环——两档都要 > 0（删任一处计数器都会让对应档恒 0）。
-5. **⑫ 的拆分**：规则档 `chosen == 0`；策略档主动保养时 `chosen > 0`；`pm_events == forced + chosen`。
+4. **② 的计数两处都记**：单卸货点配置只走 `run` 的投递循环、multi-drop 配置只走
+   `_deliver_multi` 的循环——两种配置都要 > 0（删任一处计数器都会让对应配置恒 0）。
+5. **⑫ 的拆分**：规则配置 `chosen == 0`；策略配置主动保养时 `chosen > 0`；`pm_events == forced + chosen`。
 6. **退化守卫（上界）**：动作使用率的判据能区分退化的策略（恒不充 / 恒充）与非退化策略；
    **训练后的**真实读数在 `m13_train_a --t3 --eval-every` 的 `charge_action_usage` / `pm_now_rate`。
 7. **③ 纳入后可控**：役龄开时"提前保养 ⟹ 故障变少"；役龄关时该因果消失（对照组）。
@@ -46,21 +46,21 @@ from plcsp.env.t3_budget import (T3_CONSTRAINTS, T3_LAMBDA_MAX, T3Budget, T3Lagr
 from plcsp.nn.encoder import LayoutEncoder
 
 # 既有捕获参照（`test_joint_chain.test_scalar_adv_mode_regression_pin` 的同一条摘要，
-# 那两个文件各自持一份、注明同源——两条钉的是同一条默认路径，一个改建档行为的改动会同时翻红）。
+# 那两个文件各自持一份、注明同源——两条钉的是同一条默认路径，一个改变该配置行为的改动会同时翻红）。
 SCALAR_PIN_DIGEST = "003583718aa166e56b995d16f679d91c4dad76933861fb398d66e03226d387fa"
-# 该摘要**不覆盖**的新增结构（默认关档拿不到梯度）：R2 区段投影/类型嵌入、⑩ 拼批头。
+# 该摘要**不覆盖**的新增结构（默认关态拿不到梯度）：R2 区段投影/类型嵌入、⑩ 拼批头。
 _DIGEST_SKIP = ("r_head_tok.", "pm_head_tok.", "c_head_tok.", "b_head_tok.",
                 "enc.proj_z.", "enc.zone_type_emb")
 
 # 只需 S/L 两头的约束子集（不需要维护/充电头即可开 T3）——摘要测试用。
 CHEAP_KEEP = ("congestion", "finite_buffer", "setup_time")
 
-# ⑪ 退化守卫用的小电池档（同 `test_charge_head`：默认 2–4 kWh 放不空 ⟹ 没有充电决策可言）。
+# ⑪ 退化守卫用的小电池验证档（同 `test_charge_head`：默认 2–4 kWh 放不空 ⟹ 没有充电决策可言）。
 SMALL_BATTERY_KWH = 0.10
 
 
 def _digest(policy) -> str:
-    """`state_dict` 的 sha256（排除默认关档拿不到梯度的新增结构）——同既有捕获参照的口径。"""
+    """`state_dict` 的 sha256（排除默认关态拿不到梯度的新增结构）——同既有捕获参照的口径。"""
     h = hashlib.sha256()
     for k, v in sorted(policy.state_dict().items()):
         if k.startswith(_DIGEST_SKIP):
@@ -89,13 +89,13 @@ def mk01():
 
 @pytest.fixture(scope="module")
 def step_off(mk01):
-    """T3 关档的一步（摘要 + diag）——本模块多条判据的参照。"""
+    """T3 关态的一步（摘要 + diag）——本模块多条判据的参照。"""
     inst, lay, dm, cfg, ctx, ref = mk01
     pol, _r, diag = _step(inst, lay, dm, cfg, ctx, ref)
     return _digest(pol), diag
 
 
-# ─────────────────── 1/2. 默认关逐位不变；λ≡0 与关档逐位相同 ───────────────────
+# ─────────────────── 1/2. 默认关逐位不变；λ≡0 与关态逐位相同 ───────────────────
 
 @pytest.mark.unit
 def test_t3_off_matches_the_pinned_scalar_digest(mk01, step_off):
@@ -107,7 +107,7 @@ def test_t3_off_matches_the_pinned_scalar_digest(mk01, step_off):
 
 @pytest.mark.unit
 def test_lambda_zero_is_bit_identical_to_t3_off(mk01, step_off):
-    """判据 2：`λ ≡ 0` 时罚项恒 0 ⟹ 与关档**逐位相同**（"罚项没生效"要能被测出来）。
+    """判据 2：`λ ≡ 0` 时罚项恒 0 ⟹ 与关态**逐位相同**（"罚项没生效"要能被测出来）。
 
     ⚠️ 这条不是恒真：罚项路径改的是"优势怎么算"（`z(r − Σλ·â)` vs `_advantages` 的
     `z(r)`）。若接线写错（如把 â 加而不是减、或在 z 化之后加），λ=0 也会漂开。
@@ -116,9 +116,9 @@ def test_lambda_zero_is_bit_identical_to_t3_off(mk01, step_off):
     budget = T3Budget(inst, keep=CHEAP_KEEP)
     pol, _r, diag = _step(inst, lay, dm, cfg, ctx, ref,
                           t3_lambda=np.zeros(len(budget)), t3_budget=budget, t3_eta=0.1)
-    assert _digest(pol) == step_off[0], "λ≡0 档与 T3 关档不再逐位相同"
+    assert _digest(pol) == step_off[0], "λ≡0 配置与 T3 关态不再逐位相同"
     for k in ("loss", "r_mean", "r_std", "A_std", "grad_norm"):
-        assert float(diag[k]) == float(step_off[1][k]), f"λ≡0 档的 {k} 与关档不同"
+        assert float(diag[k]) == float(step_off[1][k]), f"λ≡0 配置的 {k} 与关态不同"
 
 
 # ─────────────────── 3. 对偶上升：方向、上下界、罚项进优势 ───────────────────
@@ -162,7 +162,7 @@ def test_penalty_enters_the_advantage_and_lambda_follows_dual_ascent(mk01):
     assert float(diag["r_mean"]) == float(d0["r_mean"]), \
         "罚项改了 r_mean——它只该进优势，不该改奖励读数（也不能改仿真）"
     assert float(diag["loss"]) != float(d0["loss"]), \
-        "加了罚项但 loss 与 λ=0 档相同——优势没被改动，罚项是装饰性的"
+        "加了罚项但 loss 与 λ=0 配置相同——优势没被改动，罚项是装饰性的"
 
 
 @pytest.mark.unit
@@ -172,7 +172,7 @@ def test_group_size_two_makes_the_penalty_inert(mk01):
 
     这不是 T3 的缺陷，是"优势只有一个标量、且组内 z 化"的口径在小 G 上的后果：
     `z(v) = (v−mean)/(std+eps)` 在 n=2 时恒为 (−1, +1)·(1/1)（`eps=1e-9` 相对 |a−b|/2 可忽略）。
-    ⟹ **T3 的 G 必须 ≥ 3**（本仓主实验档 G=8）。本条把这条限度写成可执行的判据，
+    ⟹ **T3 的 G 必须 ≥ 3**（本仓主实验配置 G=8）。本条把这条限度写成可执行的判据，
     免得将来有人用 G=2 的读数断言"T3 无效"。
     """
     inst, lay, dm, cfg, ctx, ref = mk01
@@ -221,8 +221,8 @@ def test_buffer_block_min_is_recorded_on_both_delivery_paths():
     """判据 4：② 的"因缓冲满被迫等待"时长在**两处**投递循环各记一笔。
 
     路径隔离（`AgvSim.run`）：`multi_drop=False` 只走单卸货点段的循环，
-    `multi_drop=True` 直接 `continue` 进 `_deliver_multi` 的循环——一档只可能触发一处。
-    ⚠️ 删掉任一处计数器 ⟹ 对应档的 `buffer_block_min` 掉到 0，本测试红（已实地做变异检查）。
+    `multi_drop=True` 直接 `continue` 进 `_deliver_multi` 的循环——一次运行只可能触发一处。
+    ⚠️ 删掉任一处计数器 ⟹ 对应配置的 `buffer_block_min` 掉到 0，本测试红（已实地做变异检查）。
     ⑫ 关（`finite_buffer=False`）时缓冲无界（`inf`）⟹ 循环根本不进 ⟹ 恒 0（对照）。
     """
     inst = load_mk("mk01")
@@ -230,20 +230,20 @@ def test_buffer_block_min_is_recorded_on_both_delivery_paths():
     multi = rollout(inst, seed_chain=0, cfg=SimConfig(multi_drop=True))
     off = rollout(inst, seed_chain=0, cfg=SimConfig(),
                   constraints=ConstraintConfig(finite_buffer=False))
-    assert single["buffer_block_min"] > 0.0, "单卸货点档没记到阻塞时长（漏了 `run` 的循环？）"
-    assert multi["buffer_block_min"] > 0.0, "multi-drop 档没记到阻塞时长（漏了 `_deliver_multi`？）"
-    assert off["buffer_block_min"] == 0.0, "② 关档不该有任何阻塞"
+    assert single["buffer_block_min"] > 0.0, "单卸货点配置没记到阻塞时长（漏了 `run` 的循环？）"
+    assert multi["buffer_block_min"] > 0.0, "multi-drop 配置没记到阻塞时长（漏了 `_deliver_multi`？）"
+    assert off["buffer_block_min"] == 0.0, "② 关态不该有任何阻塞"
 
 
 # ─────────────────── 5. ⑫ 的拆键 ───────────────────
 
 @pytest.mark.unit
 def test_pm_events_split_counts_only_forced_on_the_rule_path():
-    """判据 5：规则档 ⟹ `chosen == 0`（规则不会主动提前保养）、`forced == pm_events`；
-    策略档主动保养 ⟹ `chosen > 0`；恒等式 `pm_events == forced + chosen` 两档都成立。
+    """判据 5：规则配置 ⟹ `chosen == 0`（规则不会主动提前保养）、`forced == pm_events`；
+    策略配置主动保养 ⟹ `chosen > 0`；恒等式 `pm_events == forced + chosen` 两种配置都成立。
     """
     inst = load_mk("mk01")
-    cfg = SimConfig(pm_interval=10.0)          # 短间隔档：默认 120 在 mk01 从不逾期
+    cfg = SimConfig(pm_interval=10.0)          # 短间隔验证档：默认 120 在 mk01 从不逾期
     lay, dm = build_layout_and_dm(inst, cfg)
     pick_first = lambda snap, job, frm, to, oi, cand: cand[0]        # noqa: E731
 
@@ -256,36 +256,36 @@ def test_pm_events_split_counts_only_forced_on_the_rule_path():
     now = _run(lambda snap, m, cand: PM_CAND_NOW)
     for name, met in (("规则", rule), ("不保养", defer), ("现在保养", now)):
         assert met["pm_events"] == met["pm_events_forced"] + met["pm_events_chosen"], \
-            f"{name}档：pm_events 不再是 forced + chosen 之和（既有读数的口径被破坏）"
+            f"{name} 配置：pm_events 不再是 forced + chosen 之和（既有读数的口径被破坏）"
     assert rule["pm_events_forced"] == rule["pm_events"] > 0 and rule["pm_events_chosen"] == 0, \
-        f"规则档应全部是 forced：{rule['pm_events_forced']}/{rule['pm_events']}/" \
+        f"规则配置应全部是 forced：{rule['pm_events_forced']}/{rule['pm_events']}/" \
         f"{rule['pm_events_chosen']}"
     assert defer["pm_events_chosen"] == 0 and defer["pm_events_forced"] == rule["pm_events_forced"], \
-        "「永远不保养」档应与规则档同记账（强制底线 = 规则）"
-    assert now["pm_events_chosen"] > 0, "「永远现在保养」档没有记到主动保养——策略的动作没进 chosen"
+        "「永远不保养」配置应与规则配置同记账（强制底线 = 规则）"
+    assert now["pm_events_chosen"] > 0, "「永远现在保养」配置没有记到主动保养——策略的动作没进 chosen"
     assert now["pm_events_forced"] <= rule["pm_events_forced"], \
         ("主动提前保养**不该增加**逾期强制（提前归零时钟）——实得 "
          f"now={now['pm_events_forced']} > rule={rule['pm_events_forced']}")
 
 
-# ─────────────────── 6. 退化守卫（上界）能区分退化档 ───────────────────
+# ─────────────────── 6. 退化守卫（上界）能区分退化配置 ───────────────────
 
 @pytest.mark.unit
 def test_action_usage_guard_distinguishes_degenerate_charge_policies():
-    """判据 6（判据本身）：⑪ 的动作使用率能区分"恒不充 / 恒充"与"非退化"三档。
+    """判据 6（判据本身）：⑪ 的动作使用率能区分"恒不充 / 恒充"与"非退化"三种配置。
 
     两半：
-    - **真机制**：小电池档 + `run_gated(policy_c=…)`，三个回调各自记账 ⟹ 使用率 0.0 / 1.0 / 中间；
+    - **真机制**：小电池验证档 + `run_gated(policy_c=…)`，三个回调各自记账 ⟹ 使用率 0.0 / 1.0 / 中间；
     - **判据**：把记下的动作喂进 `action_usage` + `usage_is_degenerate`（生产路径的那个函数），
-      退化档必须被判退化、非退化档必须不被判。
+      退化配置必须被判退化、非退化配置必须不被判。
 
     ⚠️ 上界守卫盯**动作分布**、不盯 λ 的大小（设计 §1.1：③ 与 ⑫ 推同一个动作，单看 λ 会低估
     推动力）。真实的"训练后"读数在 `m13_train_a --t3 --eval-every` 的 `charge_action_usage`。
     """
     inst = load_mk("mk01")
-    cfg = SimConfig(battery_low=0.0)           # 规则档到 0 才补电 ⟹ 车会跑干（同 §33.4）
+    cfg = SimConfig(battery_low=0.0)           # 规则配置到 0 才补电 ⟹ 车会跑干（同 §33.4）
     lay, dm = build_layout_and_dm(inst, cfg)
-    for i, a in enumerate(lay.agvs):           # 小电池档（同 test_charge_head）
+    for i, a in enumerate(lay.agvs):           # 小电池验证档（同 test_charge_head）
         lay.agvs[i] = AgvSpec(id=a.id, speed_factor=a.speed_factor,
                               capacity=a.capacity, battery_kwh=SMALL_BATTERY_KWH)
     pick_first = lambda snap, job, frm, to, oi, cand: cand[0]        # noqa: E731
@@ -317,12 +317,12 @@ def test_action_usage_guard_distinguishes_degenerate_charge_policies():
     always, always_met = _run(lambda snap, aid, cands: cands[-1])
     biased, biased_met = _run(_biased)
 
-    assert skip == 0.0 and usage_is_degenerate(skip), "恒不充档的使用率应为 0 且被判退化"
+    assert skip == 0.0 and usage_is_degenerate(skip), "恒不充配置的使用率应为 0 且被判退化"
     assert skip_met["horizon_hit"], \
         ("恒不充 ⟹ 电量耗尽后该车永久不可用 ⟹ episode 跑不完（§33 的既定语义）——"
          f"实得 horizon_hit={skip_met['horizon_hit']}")
-    assert always == 1.0 and usage_is_degenerate(always), "恒充档的使用率应为 1 且被判退化"
-    assert not always_met["horizon_hit"], "恒充档应能跑完（它是过度充电、不是趴窝）"
+    assert always == 1.0 and usage_is_degenerate(always), "恒充配置的使用率应为 1 且被判退化"
+    assert not always_met["horizon_hit"], "恒充配置应能跑完（它是过度充电、不是趴窝）"
     assert 0.0 < biased < 1.0 and not usage_is_degenerate(biased), \
         (f"非退化策略的使用率 {biased} 落在中间带之外（判据失去区分力）；"
          f"跑完={not biased_met['horizon_hit']}")
@@ -334,14 +334,14 @@ def test_action_usage_guard_distinguishes_degenerate_charge_policies():
 def test_failures_respond_to_early_maintenance_only_under_aging():
     """判据 7：**役龄开**时"提前保养 ⟹ 役龄不累积 ⟹ 故障变少"；**役龄关**时该因果消失。
 
-    做法：把机台故障率调高（本档专用布局，MTBF 短 ⟹ 信号强）、`machine_age_beta=3`（敏感性
+    做法：把机台故障率调高（本配置专用布局，MTBF 短 ⟹ 信号强）、`machine_age_beta=3`（敏感性
     扫的上端，风险曲线上翘更陡）、短 `pm_interval`（役龄在 episode 内真的走完 [0, η]）。
     两个同 seed、同确定性派车（`policy_l` 取队首）的运行只差 M 回调：恒保养 vs 恒不保养。
     ⚠️ 对照组（役龄关）是**必须的**：没有它，"故障变少"可能只是 PM 停机改变了时间轴上的
     抽签次序，而不是役龄被归零。
     """
     inst = load_mk("mk01")
-    fail_rate = 0.10                            # 本档专用（默认 ~0–0.003 ⟹ 信号太弱）
+    fail_rate = 0.10                            # 本配置专用（默认 ~0–0.003 ⟹ 信号太弱）
     pick_first = lambda snap, job, frm, to, oi, cand: cand[0]        # noqa: E731
 
     def _run(aging, policy_m):
@@ -360,7 +360,7 @@ def test_failures_respond_to_early_maintenance_only_under_aging():
     assert aged_now["fail_events"] < aged_defer["fail_events"], \
         (f"役龄开时提前保养没有减少故障：now={aged_now['fail_events']} "
          f"defer={aged_defer['fail_events']}——③ 不可控，不该纳入 T3")
-    assert aged_defer["fail_events"] > 0, "役龄档的'不保养'侧一次故障都没有——判据没有区分力"
+    assert aged_defer["fail_events"] > 0, "役龄配置的'不保养'侧一次故障都没有——判据没有区分力"
     assert plain_now["fail_events"] >= plain_defer["fail_events"], \
         (f"役龄**关**时故障也随保养减少（now={plain_now['fail_events']} "
          f"defer={plain_defer['fail_events']}）——因果链不是'役龄被归零'，判据失效")
@@ -405,7 +405,7 @@ def test_run_training_holds_lambda_across_steps(tmp_path):
 
 @pytest.mark.unit
 def test_run_training_without_t3_does_not_inject_t3_kwargs(tmp_path):
-    """`t3=None`（默认）⟹ 训练环**不注入**任何 T3 形参——默认档逐位不变的接线前提。"""
+    """`t3=None`（默认）⟹ 训练环**不注入**任何 T3 形参——默认配置逐位不变的接线前提。"""
     seen = []
 
     def stub_step(policy, inst_, seed, **kw):
@@ -414,7 +414,7 @@ def test_run_training_without_t3_does_not_inject_t3_kwargs(tmp_path):
 
     run_training(PolicyNet(), None, steps=2, step_fn=stub_step, step_kwargs={"G": 2},
                  seed0=0, run_dir=str(tmp_path / "run_plain"), save_every=10)
-    assert seen == [["G"], ["G"]], f"默认档注入了额外形参：{seen}"
+    assert seen == [["G"], ["G"]], f"默认配置注入了额外形参：{seen}"
 
 
 # ─────────────────── 表与训练的一致性（约束全集可开） ───────────────────

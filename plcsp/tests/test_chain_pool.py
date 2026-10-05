@@ -75,7 +75,7 @@ def test_decision_pickle_roundtrip_keeps_all_fields():
 
 @pytest.mark.unit
 def test_parallel_defaults_to_off():
-    """硬要求 1：默认档必须是原串行路径（逐位不变）——默认值就是那条防线。"""
+    """硬要求 1：默认配置必须是原串行路径（逐位不变）——默认值就是那条防线。"""
     sig = inspect.signature(joint_chain_step)
     assert sig.parameters["parallel"].default is False
     assert sig.parameters["pool"].default is None
@@ -98,7 +98,7 @@ def test_pool_rejects_bad_worker_count(tiny):
 
 @pytest.mark.unit
 def test_worker_device_defaults_to_cpu(tiny):
-    """硬要求 1：默认档仍是 CPU worker（上一批的行为与读数逐位不变）。"""
+    """硬要求 1：默认配置仍是 CPU worker（上一批的行为与读数逐位不变）。"""
     _inst, _lay, _dm, _cfg, _ctx, pol, _ref = tiny
     sig = inspect.signature(ChainWorkerPool.__init__)
     assert sig.parameters["worker_device"].default == "cpu"
@@ -122,7 +122,7 @@ def test_pool_starts_the_requested_number_of_workers(tiny, pool):
 
 
 def _per_chain_reference(inst, lay, dm, cfg, ctx, pol, seed, G):
-    """主进程参照：逐链独立采样流（与并行档同一条流），只差"在哪个进程跑"。"""
+    """主进程参照：逐链独立采样流（与并行配置同一条流），只差"在哪个进程跑"。"""
     out = []
     for g in range(G):
         gen = torch.Generator(device="cpu").manual_seed(seed * SEED_STRIDE + g)
@@ -141,7 +141,7 @@ def _assert_chains_equal(refs, got):
             for field in ("tok", "feat", "cand_feat", "tok_idx", "zone_idx", "zone_mask",
                           "geom_bias"):
                 va, vb = getattr(a, field), getattr(b, field)
-                if va is None or vb is None:            # R2 关档：两处都应为 None
+                if va is None or vb is None:            # R2 关态：两处都应为 None
                     assert va is None and vb is None, f"链 {g} 的 {field} 一处有、一处无"
                     continue
                 assert np.array_equal(va, vb), f"链 {g} 的 {field} 不同"
@@ -151,7 +151,7 @@ def _assert_chains_equal(refs, got):
 def test_parallel_matches_per_chain_stream_reference(tiny, pool):
     """隔离对照：**同一条逐链采样流**下，worker 的结果与主进程参照逐位相同。
 
-    串行档（`joint_chain_step(parallel=False)`）G 条链**共用一条**流，数值本就与并行档
+    串行配置（`joint_chain_step(parallel=False)`）G 条链**共用一条**流，数值本就与并行配置
     不同（第九次读数作废，见模块 docstring）——故这里的参照是"主进程里逐链独立流"，
     它只差"在哪个进程跑"这一个变量。相同即证明 IPC 没丢字段、worker 的 CPU 路径与主进程
     一致。**跑两轮**（第二轮前扰动参数并 `sync_policy`）——证明主进程的参数刷新真的到了
@@ -182,7 +182,7 @@ def test_parallel_joint_step_updates_parameters(tiny, pool):
     for key in ("loss", "ratio", "clipped_frac", "grad_norm", "r_mean", "r_std", "A_std"):
         assert key in diag, f"诊断缺 {key}"
     assert any(not torch.equal(a, b) for a, b in zip(before, pol.parameters())), \
-        "并行档跑完一步后参数未更新——主进程的反向/优化器步没接上"
+        "并行配置跑完一步后参数未更新——主进程的反向/优化器步没接上"
 
 
 @pytest.mark.integration
@@ -196,7 +196,7 @@ def test_run_training_owns_and_closes_the_pool(tiny, tmp_path):
                        seed0=0, run_dir=str(tmp_path / "run"), save_every=1,
                        parallel=True, n_workers=2)
     assert out["step"] == 1
-    assert (tmp_path / "run" / "metrics.ndjson").exists(), "并行档没走通 runner 的落盘路径"
+    assert (tmp_path / "run" / "metrics.ndjson").exists(), "并行配置没走通 runner 的落盘路径"
 
 
 @pytest.mark.integration
@@ -222,7 +222,7 @@ def test_pool_failure_is_explicit_and_then_pool_is_closed(tiny):
 #    （D:/anaconda/envs/py312/python.exe）上跑。
 
 _CUDA_ONLY = pytest.mark.skipif(not torch.cuda.is_available(),
-                                reason="需要 CUDA（GF 的 worker 设备档；CPU-only 解释器上不适用）")
+                                reason="需要 CUDA（GF 的 worker 设备配置；CPU-only 解释器上不适用）")
 
 
 @pytest.mark.integration
@@ -241,7 +241,7 @@ def test_cuda_worker_device_without_cuda_raises(tiny):
 @_CUDA_ONLY
 @pytest.mark.integration
 def test_cuda_worker_runs_on_gpu_and_is_bitwise_reproducible(tiny):
-    """CUDA 档：设备核对 + **同配置跑两遍逐位相同**（硬要求 5 的确定性证据）。
+    """CUDA 配置：设备核对 + **同配置跑两遍逐位相同**（硬要求 5 的确定性证据）。
 
     多进程 + 多 CUDA 上下文下"逐位可复现"不是显然的：每条链的采样流是 CUDA generator
     （`torch.multinomial` 在 CUDA 上不接受 CPU generator），故两遍比对的是**整条链**
@@ -281,10 +281,10 @@ def test_cuda_worker_runs_on_gpu_and_is_bitwise_reproducible(tiny):
 @_CUDA_ONLY
 @pytest.mark.integration
 def test_cuda_worker_differs_from_cpu_worker_on_same_seed(tiny):
-    """如实记账：CUDA 档与 CPU 档**不是同一条采样流** ⟹ 同 seed 数值不同（默认档不受影响）。
+    """如实记账：CUDA 配置与 CPU 配置**不是同一条采样流** ⟹ 同 seed 数值不同（默认配置不受影响）。
 
     这不是缺陷——`torch.multinomial` 在 CUDA 上不接受 CPU generator，采样流必须跟随设备
-    （§36.9）。本用例只钉住"两档确实不同"，防止有人把它误当逐位等价档用。
+    （§36.9）。本用例只钉住"两种配置确实不同"，防止有人把它误当逐位等价配置用。
     """
     inst, lay, dm, cfg, ctx, pol, _ref = tiny
     seed, G = 5, 2
@@ -301,7 +301,7 @@ def test_cuda_worker_differs_from_cpu_worker_on_same_seed(tiny):
     finally:
         pg.close()
     pairs = [(a, b) for (dc, _mc), (dg, _mg) in zip(cpu, gpu) for a, b in zip(dc, dg)]
-    assert pairs, "两档都没出决策——用例本身失效"
+    assert pairs, "两种配置都没出决策——用例本身失效"
     same = sum(1 for a, b in pairs if a.action == b.action)
     assert same < len(pairs), \
-        "两档逐位相同？采样流应当随设备不同（§36.9）——判据已失效，请复查"
+        "两种配置逐位相同？采样流应当随设备不同（§36.9）——判据已失效，请复查"

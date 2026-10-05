@@ -7,7 +7,7 @@
 ⚠️ 2026-10-04：① 拥堵 +1（V 段 `zone_wait`）、④ 返工 +1（B 段 `rework_cnt`）——
 两个此前只被仿真执行、对网络不可见的约束。**末位追加**，既有列序不变。
 ⚠️ 2026-10-05（R2）：新增**第五段 "Z"（区段 token）**——只在 `route_zones=True`（且
-`route_k>1`）时出现；默认档仍是四段、四元组 `seg`、序列一位不变。Z 段同样补齐到 `F_MAX`。
+`route_k>1`）时出现；默认配置仍是四段、四元组 `seg`、序列一位不变。Z 段同样补齐到 `F_MAX`。
 
 **归一化一律用实例静态量**（总工时 / `M_ref` / 机器数 / 包围盒对角线）——
 仿真前即知，训练与推理一致。**不用 per-episode 归一化**：在线决策下不可得。
@@ -25,7 +25,7 @@ from ..env.layout import Layout
 
 F_M, F_B, F_V, F_G = 7, 9, 11, 3
 # ⚠️ 2026-10-05（R2 区段 token）：新增第五段 "Z"（区段）——**只在 `route_zones=True` 时出现**
-# （默认档的 seg 仍是四元组、序列一位不变）。F_Z=4 ≤ F_MAX ⟹ token 宽度与补齐规则不变。
+# （默认配置的 seg 仍是四元组、序列一位不变）。F_Z=4 ≤ F_MAX ⟹ token 宽度与补齐规则不变。
 F_Z = 4
 F_MAX = max(F_M, F_B, F_V, F_G, F_Z)     # 11 —— 补齐后的统一宽度
 
@@ -85,10 +85,10 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float,
 
     ⚠️ **`cfg` / `constraints` 必须与跑仿真的那一份相同**：
     - `cfg`（评审 F3）：`pm_interval` 是扫描轴之一（spec §9.2 assumed 参数），写死 120 会让
-      极端档（`m11_constraint_binding` 的 `pm_interval /= 10` → 12.0）下 `pm_left` **静默
+      极端参数（`m11_constraint_binding` 的 `pm_interval /= 10` → 12.0）下 `pm_left` **静默
       死掉**——`pm_clock` 一过 120 就被 clip 到 0，该维恒 0 且零报错。`None` = 默认 `SimConfig()`。
       同理 ① 的 `zone_wait_limit` 是 `zone_wait` 维的除数：必须取跑仿真那一份 cfg，写死会让
-      改了等待上限的档静默错标度。
+      改了等待上限的配置静默错标度。
     - `constraints`（评审 F2）：约束开关会改变仿真的**有效范围**（⑩ 关 → 车队容量全退化为 1），
       归一标度若不跟着退化，特征就报出一个仿真里不存在的值（MK01 实测：⑩ 关时载量维报
       1/2 = 0.5，而仿真里每台车都是满容量 1）。`None` = 十约束全开（向后兼容）。

@@ -1,4 +1,4 @@
-"""`--prefs`（A 主对比的单目标档，2026-10-05）——固定偏好权重**取代** `w`。
+"""`--prefs`（A 主对比的单目标配置，2026-10-05）——固定偏好权重**取代** `w`。
 
 ## 为什么单独立一个测试文件
 
@@ -71,7 +71,7 @@ def test_one_hot_prefs_gives_the_single_objective_advantage():
         neg = -_F[:, i]
         want = (neg - neg.mean()) / (neg.std() + 1e-9)
         assert np.allclose(got, want, rtol=0, atol=1e-6), (
-            f"one-hot {p} 的优势不是 z(−f_{i})——单目标档的含义被改了")
+            f"one-hot {p} 的优势不是 z(−f_{i})——单目标配置的含义被改了")
 
 
 def test_one_hot_scale_is_cancelled_by_the_group_z_score():
@@ -117,7 +117,7 @@ def _one_step(prefs):
 
 @pytest.mark.slow
 def test_joint_step_rewards_follow_prefs():
-    """整步证据：三个 one-hot 与默认档的 `r_mean` **两两不同**。
+    """整步证据：三个 one-hot 与默认配置的 `r_mean` **两两不同**。
 
     ⚠️ 这是"prefs 真的接进了训练环（含 T3 路径共用的 `rewards`）"的绊线：
     只要哪一处漏传 prefs，同 seed 同初始化下四条链逐位同源 ⟹ 四个 `r_mean` 会**全部相等**，
@@ -129,7 +129,7 @@ def test_joint_step_rewards_follow_prefs():
     vals = [round(r_default, 9), round(r_ms, 9), round(r_en, 9)]
     assert len(set(vals)) == 3, (
         f"default/纯 makespan/纯 energy 的 r_mean 出现了相等值 {vals}——"
-        "prefs 没被接进奖励（或哪一份分支漏传），单目标档跑出来的是同一个东西")
+        "prefs 没被接进奖励（或哪一份分支漏传），单目标配置跑出来的是同一个东西")
 
 
 def test_cli_exposes_prefs_and_rejects_all_zero(capsys):
@@ -138,7 +138,7 @@ def test_cli_exposes_prefs_and_rejects_all_zero(capsys):
         sys.argv = ["m13_train_a.py", "--help"]
         m13.main()
     out = capsys.readouterr().out
-    assert "--prefs" in out, "CLI 少了 --prefs——单目标档表达不出来"
+    assert "--prefs" in out, "CLI 少了 --prefs——单目标配置表达不出来"
 
     sys.argv = ["m13_train_a.py", "--prefs", "0", "0", "0"]
     with pytest.raises(ValueError, match="prefs"):

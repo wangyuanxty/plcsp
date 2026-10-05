@@ -118,7 +118,7 @@ class PolicyNet(nn.Module):
                 nn.Linear(hidden, 1))
             # 编码器打分头（⑫ 维护，M）：决策特征 = 该机台状态摘要；逐候选特征 =
             # {现在保养, 不保养} 两个**动作**的后果（见 `pm_logits_emb`）。
-            # ⚠️ 建在最后：既有三头的初始化抽签次序不得变（默认关闭档的黄金摘要靠它）。
+            # ⚠️ 建在最后：既有三头的初始化抽签次序不得变（默认关态的黄金摘要靠它）。
             self.pm_head_tok = nn.Sequential(
                 nn.Linear(enc.d_model + n_feat_pm + n_feat_pm_cand, hidden), nn.GELU(),
                 nn.Linear(hidden, 1))

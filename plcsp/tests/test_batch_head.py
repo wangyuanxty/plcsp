@@ -7,7 +7,7 @@ s = 0 = 不拼批（只带头件 = 单件行为）。
 
 **为什么选"预构造批次"而不是"逐任务二值决策"**（§45.4 的评估在新模型下重做）：
 - 两组在"队列里没有同取货点任务"时都退化（候选 < 2 ⟹ 不记决策）；
-- 同向组内的**非前缀子集被支配**（同一串载货腿、更差的 FIFO 顺序）⟹ 逐任务版多出来的
+- 同向组内的**非前缀子集被支配**（同一串载货段、更差的 FIFO 顺序）⟹ 逐任务版多出来的
   表达力没有对应收益；
 - 逐任务版要引入"同批内先判谁"这一层**决策顺序**，与既有"一组候选一次打分"的骨架不同构，
   且链长上界变成"每个同取货点任务一个决策"；预构造版的链长上界 = 取货次数（MK10 实测
@@ -15,11 +15,11 @@ s = 0 = 不拼批（只带头件 = 单件行为）。
   ⟹ **选预构造批次**；逐任务二值决策**不做**（登记为不做，不是待办）。
 
 **判据**（与设计 §⑩ 的验收 + 本仓纪律一致）：
-1. `batch_head=False`（默认）⟹ 不记 B 决策、链路逐位等于规则档（黄金摘要在下）；
+1. `batch_head=False`（默认）⟹ 不记 B 决策、链路逐位等于规则配置（黄金摘要在下）；
 2. 候选特征三个槽（批件数 / 打乱顺序 / 距离节省）**逐候选不同**，且**只改候选特征分数会变**
    （§31 纪律：守卫必须能不通过——错误实现的变异检查写在注释里）；
 3. 生产路径的 token 下标守卫：B 头读**决定方那台车**的 V token（不得把动作码当下标）；
-4. 策略的选择**改变运输**（强制 s=0 vs s=max 两档读数不同）；
+4. 策略的选择**改变运输**（强制 s=0 vs s=max 两种配置读数不同）；
 5. B 决策进链 logp、带梯度、同 seed 可复现；
 6. 仿真侧的候选集与特征侧重构**同源**（`des.batch_cands` 唯一真相）。
 """
@@ -44,9 +44,9 @@ from plcsp.env.snapshot import QueuedTask, Snapshot, VehicleState
 from plcsp.nn.encoder import LayoutEncoder
 from plcsp.nn.features import F_MAX, SEG_SLICE
 
-# ── 1. 关闭档：不记 B 决策 + 规则档链路指纹（**本批实现后捕获**，作回归钉子） ──
-# 规则档（`multi_drop=True` + `batch_head=False`）是**新路径**（改造前不存在），故这两条
-# 摘要捕获自本批实现之后；它们的用途是钉住"以后动 ⑩ 不得悄悄改规则档"。
+# ── 1. 关态：不记 B 决策 + 规则配置链路指纹（**本批实现后捕获**，作回归钉子） ──
+# 规则配置（`multi_drop=True` + `batch_head=False`）是**新路径**（改造前不存在），故这两条
+# 摘要捕获自本批实现之后；它们的用途是钉住"以后动 ⑩ 不得悄悄改规则配置"。
 #   kinds={'S':55,'L':65} n=120（mk01）｜{'S':115,'L':105} n=220（mk07）
 BATCH_OFF_DIGEST = {
     "mk01": "0b19b14874a80eb26e621c36bda51a100a76b82ae22f86e68207c94e9c35004f",
@@ -81,7 +81,7 @@ def _chain_digest(dec, met) -> str:
 @pytest.mark.unit
 @pytest.mark.parametrize("name", ["mk01", "mk07"])
 def test_batch_head_off_records_no_b_decision_and_matches_the_rule_digest(name):
-    """判据 1：`batch_head=False`（默认）⟹ 不记 B 决策，链路逐位等于规则档。"""
+    """判据 1：`batch_head=False`（默认）⟹ 不记 B 决策，链路逐位等于规则配置。"""
     # ⚠️ 建策略的**抽签序**必须与捕获摘要的脚本逐字相同（先 seed → 再建唯一一个策略）：
     # `_setup` 会多建一个策略（丢弃），多消费一份初始化抽签 ⟹ 摘要必然不同。
     torch.manual_seed(20261005)
@@ -90,9 +90,9 @@ def test_batch_head_off_records_no_b_decision_and_matches_the_rule_digest(name):
     lay, dm, ctx = build_setup(inst, cfg)
     pol = PolicyNet(enc=LayoutEncoder())
     dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, batch_head=False)
-    assert all(d.kind != "B" for d in dec), "关闭档不得出现 B 决策"
+    assert all(d.kind != "B" for d in dec), "关态不得出现 B 决策"
     assert _chain_digest(dec, met) == BATCH_OFF_DIGEST[name], \
-        f"{name} 的规则档链路变了——既有读数不再成立"
+        f"{name} 的规则配置链路变了——既有读数不再成立"
 
 
 @pytest.mark.unit
@@ -120,7 +120,7 @@ def test_batch_feature_widths_match_the_head():
 # ── 2. 候选特征：三个槽的语义 + "只改候选特征分数会变" ──
 
 def _snap_with_queue(tasks, *, node=0, capacity=3):
-    """手搓快照：一台车 + 队列里的若干任务（`QueuedTask`，veh=0 = 绑定档）。"""
+    """手搓快照：一台车 + 队列里的若干任务（`QueuedTask`，veh=0 = 绑定配置）。"""
     v = VehicleState(status=0, node=node, queued=len(tasks), battery_frac=1.0,
                      capacity=capacity, speed_factor=1.0, zone_wait=0.0)
     return Snapshot(now=0.0, machines=(), jobs=(), vehicles=(v,), n_done=0, in_flight=len(tasks),
@@ -269,7 +269,7 @@ def test_sim_and_feature_side_agree_on_the_candidate_set():
 
 @pytest.mark.unit
 def test_batch_choice_changes_transport():
-    """验收 ③：**同一个世界、同一 seed**，强制 s=0（不拼）与 s=max（拼满）两档读数不同。
+    """验收 ③：**同一个世界、同一 seed**，强制 s=0（不拼）与 s=max（拼满）两种配置读数不同。
 
     这是"决策点真的在运输动力学上生效"的直接判据（不是只看 logp）。
     """
@@ -290,7 +290,7 @@ def test_batch_choice_changes_transport():
     assert out["max"]["batch_trips"] < out["zero"]["batch_trips"], \
         "强制拼满没有减少取货次数——拼批没有发生"
     assert (out["max"]["trips"], out["max"]["travel_time_total"]) != \
-        (out["zero"]["trips"], out["zero"]["travel_time_total"]), "两档的运输读数相同"
+        (out["zero"]["trips"], out["zero"]["travel_time_total"]), "两种配置的运输读数相同"
 
 
 # ── 6. 进链、有梯度、可复现 ──
@@ -328,14 +328,14 @@ def test_b_decisions_enter_the_chain_with_grad_and_are_reproducible():
 
 @pytest.mark.unit
 def test_batch_head_on_default_config_produces_multi_item_batches():
-    """存在性（拼批头档）：默认档（`n_agv=3`、`SimConfig(multi_drop=True)`）**真的出现** >1 件的批次。
+    """存在性（拼批头配置）：默认配置（`n_agv=3`、`SimConfig(multi_drop=True)`）**真的出现** >1 件的批次。
 
-    ⚠️ 与 `test_multidrop_transport` 的规则档判据**不同**：这里策略可能主动选 s=0（不拼），
-    故读数 ≤ 规则档。MK01 只有 1 次候选（默认布局只有 0 号车载量 2）⟹ 本判据用 mk07/mk10。
+    ⚠️ 与 `test_multidrop_transport` 的规则配置判据**不同**：这里策略可能主动选 s=0（不拼），
+    故读数 ≤ 规则配置。MK01 只有 1 次候选（默认布局只有 0 号车载量 2）⟹ 本判据用 mk07/mk10。
     """
     for name in ("mk07", "mk10"):
         torch.manual_seed(20261005)
         inst, lay, dm, cfg, ctx, _ = _setup(name)
         pol = PolicyNet(enc=LayoutEncoder())
         _dec, met = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx, batch_head=True)
-        assert met["batch_ge2"] >= 1, f"{name}：拼批头档没有出现 >1 件的批次"
+        assert met["batch_ge2"] >= 1, f"{name}：拼批头配置没有出现 >1 件的批次"

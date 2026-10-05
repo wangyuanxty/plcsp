@@ -2,7 +2,7 @@
 """⑩ multi-drop 行程模型（`SimConfig.multi_drop`）——**模型变更**，不是加一个头。
 
 **改了什么**：一趟 = **一个取货点 + 多个卸货点**。AGV 在取货点装走若干件（同取货点、
-不同卸货点），沿途逐站卸下；载货段 = **一串腿**（总时长 = 各腿之和，区段仍**逐腿**申请/释放）。
+不同卸货点），沿途逐站卸下；载货段 = **多段相连**（总时长 = **各段之和**，区段仍**逐段**申请/释放）。
 **为什么改**：`SimConfig.max_agv_capacity`（默认 3）在单卸货点模型下是**死参数**——一次取货
 只有一个卸货点，容量永远用不上（`des.AgvSim._collect` 的 `while len(batch) < self.capacity`
 因此几乎从不进第二圈）。
@@ -14,7 +14,7 @@
 4. 记账逐件正确：`track.job_agv` / `agv_load_n` / `Snapshot.in_flight` 在多件在车时一致；
 5. 队列内容进 `Snapshot`（`queued_tasks`），**两种队列形状**都接对，身份口径 = `_transporter`
    的 `task` 元组；
-6. **存在性**：默认档（`n_agv=3`）真的出现 >1 件的批次（本批的成败判据）。
+6. **存在性**：默认配置（`n_agv=3`）真的出现 >1 件的批次（本批的成败判据）。
 
 ⚠️ 本文件不测 ⑩ 的**决策**（拼批头）——那是 `test_batch_head.py`。
 """
@@ -36,7 +36,7 @@ from plcsp.env.mkt import load_mkt
 from plcsp.env.layout import AgvSpec, sample_layout
 from plcsp.env.transport import TransportCaliber
 
-# ── 1. 默认档逐位不变：黄金摘要（**改造前**在 MK01/MK07 上捕获，本机 CPU 档） ──
+# ── 1. 默认配置逐位不变：黄金摘要（**改造前**在 MK01/MK07 上捕获，本机 CPU 配置） ──
 # 摘要口径 = `rollout(..., seed_chain=1)` 的 (makespan, energy, deliveries, trips,
 # travel_time_total, moves, tasks_get) + `dbg`。任何默认路径的行为改动都会翻红。
 GOLDEN = {
@@ -56,7 +56,7 @@ def _digest(met: dict) -> str:
 
 
 def _no_charge_cons():
-    """⑪ 关（本文件的判据都在"车不会半路去充电"的干净档上；⑪ 的读数见 test_charge_head）。"""
+    """⑪ 关（本文件的判据都在"车不会半路去充电"的干净配置上；⑪ 的读数见 test_charge_head）。"""
     return ConstraintConfig().with_off("charging")
 
 
@@ -68,7 +68,7 @@ def test_multi_drop_off_is_bit_identical_to_baseline(name, n_agv):
     assert cfg.multi_drop is False, "默认值被改了——既有读数全部作废"
     met = rollout(load_mk(name), seed_chain=1, cfg=cfg)
     assert _digest(met) == GOLDEN[(name, n_agv)], \
-        f"{name} n_agv={n_agv} 的默认档链路变了——既有读数不再成立"
+        f"{name} n_agv={n_agv} 的默认配置链路变了——既有读数不再成立"
 
 
 @pytest.mark.unit
@@ -77,7 +77,7 @@ def test_batch_cands_are_prefixes_up_to_capacity():
     assert batch_cands(0, 3) == (0,)                    # 队列里没有同取货点任务：只有"不拼"
     assert batch_cands(5, 3) == (0, 1, 2)               # 容量封顶（头件已占 1 位）
     assert batch_cands(1, 3) == (0, 1)
-    assert batch_cands(5, 1) == (0,)                    # 容量 1 = 退化（⑩ 关档）
+    assert batch_cands(5, 1) == (0,)                    # 容量 1 = 退化（⑩ 关态）
 
 
 @pytest.mark.unit
@@ -130,7 +130,7 @@ def _task(job: int, frm: int, to: int, oi: int = 0) -> tuple:
 
 @pytest.mark.unit
 def test_collect_multi_takes_whole_queue_same_frm_up_to_capacity():
-    """规则档：**全队列**找同取货点任务（不只看队首连续段），最多 `capacity` 件。"""
+    """规则配置：**全队列**找同取货点任务（不只看队首连续段），最多 `capacity` 件。"""
     agv, env = _bare_agv(capacity=3)
     q = simpy.Store(env)
     # 队列序：同取货点(1) 的 0 号、别的取货点(2) 的、同取货点(1) 的 2 号
@@ -167,7 +167,7 @@ class _StubMachine:
 def test_deliver_multi_stops_once_per_drop_point_in_arrival_order():
     """一趟停多个点、每站卸下该站的件；**卸货序 = 任务到达序**；逐件递减在车件数。
 
-    ⚠️ 区段管制关（① 关）⟹ 时长 = 各腿几何时长之和，可**逐位**对拍，不靠间接推断。
+    ⚠️ 区段管制关（① 关）⟹ 时长 = 各段几何时长之和，可**逐位**对拍，不靠间接推断。
     """
     agv, env = _bare_agv(capacity=3)
     agv.congestion = False
@@ -190,7 +190,7 @@ def test_deliver_multi_stops_once_per_drop_point_in_arrival_order():
     assert agv.stats["deliveries"] == 3 and agv.stats["trips"] == 1
     assert agv.track.agv_load_n[0] == 0 and agv.track.agv_loaded[0] is False
     assert all(v == -1 for v in agv.track.job_agv)
-    # 行程 = 腿 0→2 与 2→1 之和（① 关：一次到底，不拆区段）
+    # 行程 = 段 0→2 与 2→1 之和（① 关：一次到底，不拆区段）
     exp = agv._seg_min(0, 2) + agv._seg_min(2, 1)
     assert agv.stats["travel_time"] == pytest.approx(exp, rel=1e-12)
     assert agv.pos_node == 1, "车应停在最后一个卸货点"
@@ -198,7 +198,7 @@ def test_deliver_multi_stops_once_per_drop_point_in_arrival_order():
 
 @pytest.mark.unit
 def test_deliver_multi_requeues_only_the_undelivered_part():
-    """某一腿失败 ⟹ **仍在车上**的件退回队列（已卸下的不动），在车件数清零。"""
+    """某一段失败 ⟹ **仍在车上**的件退回队列（已卸下的不动），在车件数清零。"""
     agv, env = _bare_agv(capacity=3)
     agv.congestion = False
     agv.machines = [_StubMachine(env, n) for n in (0, 1, 2)]
@@ -210,7 +210,7 @@ def test_deliver_multi_requeues_only_the_undelivered_part():
 
     def flaky(src, dst, leg):
         calls["n"] += 1
-        if calls["n"] == 2:                     # 第二条腿失败
+        if calls["n"] == 2:                     # 第二段行驶失败
             return False, src
         ok, end = yield from orig_drive(src, dst, leg)
         return ok, end
@@ -286,7 +286,7 @@ def test_snapshot_queue_contents_match_the_live_stores_in_both_shapes(multi_drop
 
 @pytest.mark.unit
 def test_multi_drop_delivers_every_task_exactly_once():
-    """判据 4：multi-drop 档下每件任务仍**恰好送达一次**，收尾时车上无货。"""
+    """判据 4：multi-drop 配置下每件任务仍**恰好送达一次**，收尾时车上无货。"""
     inst = load_mk("mk01")
     cfg = SimConfig(multi_drop=True)
     met = rollout(inst, seed_chain=1, cfg=cfg, constraints=_no_charge_cons())
@@ -301,7 +301,7 @@ def test_multi_drop_delivers_every_task_exactly_once():
 @pytest.mark.unit
 @pytest.mark.parametrize("name,min_ge2", [("mk01", 1), ("mk07", 1)])
 def test_default_config_really_produces_multi_item_batches(name, min_ge2):
-    """**判据 6（本批成败）**：默认档（`n_agv=3`、`SimConfig()`）真的出现 >1 件的批次。
+    """**判据 6（本批成败）**：默认配置（`n_agv=3`、`SimConfig()`）真的出现 >1 件的批次。
 
     ⚠️ 口径 = §45.4 的同一条（bound 路径 = 训练路径，`seed_chain=1`）：数**取货时刻**的批大小。
     数字见 `progress-log.md` §47（MK01 的余量很小——如实记录，不粉饰）。
@@ -309,7 +309,7 @@ def test_default_config_really_produces_multi_item_batches(name, min_ge2):
     met = rollout(load_mk(name), seed_chain=1, cfg=SimConfig(multi_drop=True),
                   agv_phi=[], constraints=_no_charge_cons())
     assert met["batch_ge2"] >= min_ge2, \
-        f"{name}：默认档没有出现 >1 件的批次（batch_ge2={met['batch_ge2']}）"
+        f"{name}：默认配置没有出现 >1 件的批次（batch_ge2={met['batch_ge2']}）"
 
 
 @pytest.mark.unit
@@ -321,7 +321,7 @@ def test_multi_drop_makes_the_capacity_parameter_bite():
     """
     inst = load_mk("mk01")
     cons = _no_charge_cons()
-    # 容量上限 1：`sample_layout` 给出全队 capacity=1 ⟹ 规则档一件都拼不起来
+    # 容量上限 1：`sample_layout` 给出全队 capacity=1 ⟹ 规则配置一件都拼不起来
     lay1 = sample_layout(inst.n_machines, seed=0, n_agv=3, max_agv_capacity=1)
     assert all(a.capacity == 1 for a in lay1.agvs)
     dm1 = dock_distance_matrix(build_corridor_graph(lay1))
@@ -331,18 +331,18 @@ def test_multi_drop_makes_the_capacity_parameter_bite():
     assert m1["batch_ge2"] == 0 and m1["batch_items"] == m1["batch_trips"]
 
     met3 = rollout(inst, seed_chain=1, cfg=SimConfig(multi_drop=True), agv_phi=[], constraints=cons)
-    assert met3["batch_items"] > met3["batch_trips"], "容量 3 档必须有拼批发生"
+    assert met3["batch_items"] > met3["batch_trips"], "容量 3 配置必须有拼批发生"
 
 @pytest.mark.unit
 def test_multi_drop_runs_under_the_matrix_caliber():
-    """矩阵口径（MKT 实例）下 multi-drop 也成立：每腿各自查表、**无未映射段**、每件恰好送达一次。
+    """矩阵口径（MKT 实例）下 multi-drop 也成立：每段各自查表、**无未映射段**、每件恰好送达一次。
 
-    ⚠️ ⑪ 必须关：矩阵没有充电桩项（充电腿会走 `unmapped` 降级或显式报错），
+    ⚠️ ⑪ 必须关：矩阵没有充电桩项（充电段会走 `unmapped` 降级或显式报错），
     这是口径的既有约束（同 `test_transport_wiring._exact_caliber_constraints`），不是本批引入的。
     """
     mkt = load_mkt("mk01")
     met = rollout(mkt.base, seed_chain=1, cfg=SimConfig(n_agv=3, multi_drop=True),
                   agv_phi=[], constraints=_no_charge_cons())
-    assert met["unmapped_legs"] == 0, "multi-drop 的腿漏进了未映射端点"
+    assert met["unmapped_legs"] == 0, "multi-drop 的段漏进了未映射端点"
     assert met["deliveries"] == len(met["task_flow"]) and not met["horizon_hit"]
     assert met["batch_trips"] > 0

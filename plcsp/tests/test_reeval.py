@@ -27,7 +27,7 @@ from plcsp.env.constraints import ABLATION_GROUPS
 from plcsp.env.des import SimConfig
 from plcsp.env.instances import load_mk
 
-# 逐字复制 `m13_train_a.main` 的打印格式（`full` 档，见 D:/Temp/phase1/logs/full.log）。
+# 逐字复制 `m13_train_a.main` 的打印格式（`full` run，见 D:/Temp/phase1/logs/full.log）。
 _META_FULL = (
     "[m13] inst=mk01 作业10×机台6 车队3｜steps=300 G=8 lr=0.0003 seed=0｜route_k=2｜"
     "pm_head=True｜device=cuda:0｜parallel=True(workers=8,worker_device=cpu)")
@@ -45,7 +45,7 @@ def _log(meta: str = _META_FULL, sw: str = _SW_FULL, grp: str = _GRP_FULL) -> st
 
 
 def test_parse_full_arm_spec_is_verbatim():
-    """`full` 档：九个开关全 True、约束组 Full、route_k=2、种子/步数逐字读出。"""
+    """`full` run：九个开关全 True、约束组 Full、route_k=2、种子/步数逐字读出。"""
     spec = m17.parse_run_spec(_log())
 
     assert (spec.inst, spec.steps, spec.seed, spec.route_k) == ("mk01", 300, 0, 2)
@@ -55,7 +55,7 @@ def test_parse_full_arm_spec_is_verbatim():
 
 
 def test_parse_minus_production_arm():
-    """`-生产` 档：守卫强制的连带项（pm/役龄关）必须**如实**解析出来。
+    """`-生产` run：守卫强制的连带项（pm/役龄关）必须**如实**解析出来。
 
     ⚠️ 若把 pm_head 解析成 True，重评会调一个训练时根本不存在的维护头 ⟹ 用另一个策略评估。
     """
@@ -72,7 +72,7 @@ def test_parse_minus_production_arm():
 
 
 def test_parse_none_arm_with_route_k_1():
-    """`c-none` 档：`route_k=1` + 五个头全关 + T3 关（无可控约束）——一条都不许漏。"""
+    """`c-none` run：`route_k=1` + 五个头全关 + T3 关（无可控约束）——一条都不许漏。"""
     meta = ("[m13] inst=mk01 作业10×机台6 车队3｜steps=300 G=8 lr=0.0003 seed=0｜route_k=1｜"
             "pm_head=False｜device=cuda:0｜parallel=True(workers=8,worker_device=cpu)")
     sw = ("[m13] 开关（训练=评估，同源）：route_zones=False geom_bias=True pm_head=False "
@@ -85,12 +85,12 @@ def test_parse_none_arm_with_route_k_1():
     assert spec.route_k == 1 and spec.constraint_group == "None"
     assert spec.route_zones is False and spec.pm_head is False
     assert spec.charge_head is False and spec.batch_head is False and spec.t3 is False
-    # `geom_bias` / `multi_drop` / `agv_failover` 在这一档照基线开着——别"顺手"关掉
+    # `geom_bias` / `multi_drop` / `agv_failover` 在这一 run 照基线开着——别"顺手"关掉
     assert spec.geom_bias is True and spec.multi_drop is True and spec.agv_failover is True
 
 
 def test_parse_reinforce_arm_drops_t3():
-    """`adv-reinforce` 档：优势口径是 reinforce、T3 **关**（只支持 scalar）。"""
+    """`adv-reinforce` run：优势口径是 reinforce、T3 **关**（只支持 scalar）。"""
     sw = ("[m13] 开关（训练=评估，同源）：route_zones=True geom_bias=True pm_head=True "
           "charge_head=True batch_head=True multi_drop=True agv_failover=True "
           "machine_age_failure=True t3=False")
@@ -134,9 +134,9 @@ def test_optional_mechanism_arm_lines_are_parsed():
 
     ⚠️ 漏掉它们 = 重评跑在另一种动力学上，且没有任何提示。
     """
-    extra = ("[m13] ⚠️ 小电池档：车队电池全换 0.1 kWh、battery_low=0 "
-             "（电池是**布局**属性 ⟹ 改动力学，与默认档读数不可比；⑪ 这才可能跑到耗尽）\n"
-             "[m13] ⚠️ 短保养间隔档：pm_interval=30.0（改动力学；⑫ 的被迫激活量"
+    extra = ("[m13] ⚠️ 小电池验证档：车队电池全换 0.1 kWh、battery_low=0 "
+             "（电池是**布局**属性 ⟹ 改动力学，与默认配置读数不可比；⑪ 这才可能跑到耗尽）\n"
+             "[m13] ⚠️ 短保养间隔验证档：pm_interval=30.0（改动力学；⑫ 的被迫激活量"
              " `pm_events_forced` 这才可能非零）")
     spec = m17.parse_run_spec(_log() + extra + "\n")
 
@@ -146,7 +146,7 @@ def test_optional_mechanism_arm_lines_are_parsed():
 
 
 def test_spec_cfg_matches_parsed_switches():
-    """`RunSpec.cfg()` 的三个动力学开关与解析值一一对应（默认档 = False）。"""
+    """`RunSpec.cfg()` 的三个动力学开关与解析值一一对应（默认配置 = False）。"""
     spec = m17.parse_run_spec(_log())
     c = spec.cfg()
     assert c.multi_drop is True and c.agv_failover is True and c.machine_age_failure is True
@@ -213,7 +213,7 @@ def test_make_eval_fn_carries_the_constraint_group(monkeypatch):
     fn(policy=None)
 
     assert seen["constraints"] is cons
-    assert cons.maintenance is False, "`-生产` 档没有 ⑫——评估的动力学里也不该有"
+    assert cons.maintenance is False, "`-生产` run 没有 ⑫——评估的动力学里也不该有"
 
 
 def test_count_lines_and_last_inline_eval(tmp_path):

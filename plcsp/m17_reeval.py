@@ -3,13 +3,13 @@
 
 为什么有本脚本
 --------------
-`m13_train_a._make_eval_fn` 在 2026-10-05 之前**只记 makespan**。期① 的 13 档消融
-（MK01、300 步、seed 0）**不会再跑第二遍**（一档 60–77 min），`metrics.ndjson` 里的内联
+`m13_train_a._make_eval_fn` 在 2026-10-05 之前**只记 makespan**。期① 的 13 个消融 run
+（MK01、300 步、seed 0）**不会再跑第二遍**（一个 run 60–77 min），`metrics.ndjson` 里的内联
 评估只有 makespan ⟹ energy 与 TWT 的消融对照只能**事后**从最终策略重算。本脚本做这件事。
 
 口径纪律（三条；缺一条就会**静默**错位）
 ----------------------------------------
-1. **开关从该档的日志解析，不手写开关表。** 手写的表会与实跑漂开，且漂开时零报错。
+1. **开关从该 run 的日志解析，不手写开关表。** 手写的表会与实跑漂开，且漂开时零报错。
    解析两行：`[m13] 开关（训练=评估，同源）：…` 与 `[m13] 约束组=…｜优势口径=…`。
    另需第一行的 `inst=` / `route_k=` / `steps=` / `seed=`——`route_k` 改的是**策略的动作
    空间**，漏了就是用另一个策略评估。解析不出（缺行、缺键、组名不在 `ABLATION_GROUPS`）
@@ -21,14 +21,14 @@
 
 已知边界（引用本脚本的读数时必须一并声明）
 ------------------------------------------
-- **设备**：训练档跑在 CUDA（`--device cuda`）上，本脚本**默认**按门禁口径跑在 **CPU**。
+- **设备**：训练 run 跑在 CUDA（`--device cuda`）上，本脚本**默认**按门禁口径跑在 **CPU**。
   `sample=False` 不消费动作采样流，故不存在"两条流"问题；但 CPU 与 CUDA 的浮点内核
   （以及 CUDA 图快路）可能给出不同结果，**个别决策的 argmax 可能翻转** ⟹ 重评值与训练
-  内联评估**不保证逐位相同**。记录里带 `inline_eval`（该档 `metrics.ndjson` 最后一次内联
+  内联评估**不保证逐位相同**。记录里带 `inline_eval`（该 run 的 `metrics.ndjson` 最后一次内联
   评估）+ `makespan_delta_vs_inline`：口径错位通常给**大**差；设备浮点差多数给 **0**
-  （实测 13 档里 **12 档逐位相同**），但**确定性档**例外（见下条）。
-  ⚠️ **确定性的档要把差读对**：约束全关时仿真的随机源全没了（`c-none` 的 5 个种子给出
-  同一个值），此时一次 argmax 翻转会**整体平移**该档读数（实测 −2.45 / −4.7%），
+  （实测 13 个 run 里 **12 个逐位相同**），但**确定性 run**例外（见下条）。
+  ⚠️ **确定性的 run 要把差读对**：约束全关时仿真的随机源全没了（`c-none` 的 5 个种子给出
+  同一个值），此时一次 argmax 翻转会**整体平移**该 run 读数（实测 −2.45 / −4.7%），
   而**不是**小幅噪声。要与内联评估逐位一致，用 `--device cuda` 重跑（需 GPU 解释器）。
 - **`t3`**：T3 的罚项只加在训练的优势上，**不改动力学、不改策略输入** ⟹ 重评不需要它；
   但开着时评估回调会多报两个动作使用率（⑪/⑫ 的退化守卫读数），故照解析值透传。
@@ -36,7 +36,7 @@
   （`docs/experiment-plan.md` §9.7）。换过 `--eval-seeds` 的 run 必须显式传 `--seeds`。
 - **完成判据**：`metrics.ndjson` 行数 ≥ `--min-lines`（默认 **310** = 300 步 + 10 次评估）。
   ⚠️ 增量追加的文件**不许读最后一行 eval 判进度**——中间值会误导；行数才是判据。
-  批次模式下未跑满的档**跳过并标注**（不猜、不部分评估）。
+  批次模式下未跑满的 run**跳过并标注**（不猜、不部分评估）。
 
 跑法::
 
@@ -45,7 +45,7 @@
     PYTHONIOENCODING=utf-8 D:/anaconda/python.exe -m plcsp.m17_reeval \
         --run-dir D:/Temp/phase1/full --out D:/Temp/phase1/reeval-full.json
 
-⚠️ 本脚本按"一次一档"**串行**跑（同一进程、顺序循环）：机器上若有训练 run 在跑，
+⚠️ 本脚本按"一次一个 run"**串行**跑（同一进程、顺序循环）：机器上若有训练 run 在跑，
 再叠并发会让两边的墙钟读数都不可采信。
 """
 from __future__ import annotations
@@ -70,12 +70,12 @@ DEFAULT_EVAL_SEEDS = 5
 # 完成判据：300 步（每步一行）+ 10 次评估（`--eval-every 30`）== 310 行。
 COMPLETE_MIN_LINES = 310
 
-# ── 日志锚点（逐字取自 `m13_train_a.main` 的 print）──
+# ── 日志锚点（对齐 `m13_train_a.main` 的 print；正则兼容旧词「小电池档」的历史日志）──
 _SWITCH_MARKER = "[m13] 开关（训练=评估，同源）："
 _GROUP_MARKER = "[m13] 约束组="
 _META_MARKER = "[m13] inst="
-_BATTERY_MARKER = "小电池档：车队电池全换"
-_PM_MARKER = "短保养间隔档：pm_interval="
+_BATTERY_MARKER = r"(?:小电池档|小电池验证档)：车队电池全换"
+_PM_MARKER = r"(?:短保养间隔档|短保养间隔验证档)：pm_interval="
 
 # 开关行的九个键（顺序 = `m13.main` 的打印顺序）。**一个都不能少**：每一个都改变策略
 # 看到的输入或动作空间（`multi_drop` / `agv_failover` / `machine_age_failure` 改动力学，
@@ -86,7 +86,7 @@ _SWITCH_KEYS = ("route_zones", "geom_bias", "pm_head", "charge_head", "batch_hea
 
 @dataclass(frozen=True)
 class RunSpec:
-    """一档的**实跑口径**——全部字段来自该档日志，没有一个来自默认值。"""
+    """一个 run 的**实跑口径**——全部字段来自该 run 的日志，没有一个来自默认值。"""
     inst: str
     steps: int
     seed: int
@@ -164,8 +164,8 @@ def parse_switches(line: str) -> dict:
 def parse_constraint_group(line: str) -> tuple[str, str]:
     """`[m13] 约束组=Full｜优势口径=scalar（…）` → `("Full", "scalar")`。
 
-    ⚠️ 组名必须能在 `ABLATION_GROUPS` 里查到：查不到 = 这一档的约束口径无法重建 ⟹ 报错。
-    ⚠️ `优势口径` 只记录（评估不跑优势、不建优势），但它是该档身份的一部分。
+    ⚠️ 组名必须能在 `ABLATION_GROUPS` 里查到：查不到 = 这一个 run 的约束口径无法重建 ⟹ 报错。
+    ⚠️ `优势口径` 只记录（评估不跑优势、不建优势），但它是该 run 身份的一部分。
     """
     m = re.search(r"\[m13\] 约束组=(\S+?)｜优势口径=([A-Za-z_]+)", line)
     if m is None:
@@ -174,7 +174,7 @@ def parse_constraint_group(line: str) -> tuple[str, str]:
     if group not in ABLATION_GROUPS:
         raise ValueError(
             f"日志里的约束组 {group!r} 不在 ABLATION_GROUPS 里（已知：{tuple(ABLATION_GROUPS)}）"
-            "——无法重建这一档的约束口径。")
+            "——无法重建这一个 run 的约束口径。")
     return group, adv
 
 
@@ -202,7 +202,7 @@ def build_env(spec: RunSpec):
     """`(inst, lay, dm, cfg, ctx, pol, cons)`——与 `m13.main` 的构造顺序逐字一致。
 
     ⚠️ 车队电池的替换在**布局之后**做（电池是布局属性）；`battery_low` 在 `cfg` 里
-    （两者必须一起改，见 `m13.main` 的小电池档注释）。
+    （两者必须一起改，见 `m13.main` 的小电池验证档注释）。
     """
     inst, lay, dm, cfg, ctx, pol, cons = build_training_setup(
         spec.inst, cfg=spec.cfg(), constraints=ABLATION_GROUPS[spec.constraint_group])
@@ -214,7 +214,7 @@ def build_env(spec: RunSpec):
 
 
 def make_eval_fn(spec: RunSpec, inst, lay, dm, cfg, ctx, cons, seeds: int, rule: float):
-    """按该档解析出的口径建评估回调——**唯一**构造点（`reeval_arm` 与测试共用）。
+    """按该 run 解析出的口径建评估回调——**唯一**构造点（`reeval_arm` 与测试共用）。
 
     ⚠️ 这里就是"复用而不是另写一份"的落点：本函数只做**转调**，评估逻辑仍在
     `m13_train_a._make_eval_fn` 里。另写一份 ⟹ 两边口径静默分叉（本脚本要消灭的风险）。
@@ -245,18 +245,18 @@ def last_inline_eval(path: Path) -> dict | None:
 
 def reeval_arm(run_dir: Path, log_path: Path,
                seeds: int = DEFAULT_EVAL_SEEDS, device: str = "cpu") -> dict:
-    """重评一档：解析日志 → 建环境 → 载 ckpt → 调 `m13._make_eval_fn` → 记录。
+    """重评一个 run：解析日志 → 建环境 → 载 ckpt → 调 `m13._make_eval_fn` → 记录。
 
-    返回的记录含**口径块**（`spec`）、**逐种子原始值**（`metrics`）与该档的**内联评估快照**
+    返回的记录含**口径块**（`spec`）、**逐种子原始值**（`metrics`）与该 run 的**内联评估快照**
     （`inline_eval`，用于判断重评与训练内联评估差多少）。
 
-    `device` 默认 `"cpu"`（门禁解释器的唯一选项）。训练档跑在 CUDA 上 ⟹ 要与内联评估
+    `device` 默认 `"cpu"`（门禁解释器的唯一选项）。训练 run 跑在 CUDA 上 ⟹ 要与内联评估
     逐位一致时用 `"cuda"` + GPU 解释器（见模块 docstring 的"设备"条）。
     """
     spec = parse_run_spec(log_path.read_text(encoding="utf-8"))
     ckpt_path = run_dir / "ckpt.pt"
     if not ckpt_path.exists():
-        raise FileNotFoundError(f"{ckpt_path} 不存在——这一档没有可重评的最终策略。")
+        raise FileNotFoundError(f"{ckpt_path} 不存在——这一个 run 没有可重评的最终策略。")
     inst, lay, dm, cfg, ctx, pol, cons = build_env(spec)
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     pol.load_state_dict(ck["model"])
@@ -285,7 +285,7 @@ def _fmt_seed_values(values: list[float]) -> str:
 
 
 def format_table(records: list[dict]) -> str:
-    """逐档一行：三目标的均值 + **逐种子原始值**（配对检验用）。"""
+    """逐个 run 一行：三目标的均值 + **逐种子原始值**（配对检验用）。"""
     out = []
     for r in records:
         m = r["metrics"]
@@ -307,10 +307,10 @@ def _discover_arms(root: Path) -> list[str]:
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="事后重评：从 run 目录的 ckpt 重算 makespan / energy / TWT（不训练）")
-    ap.add_argument("--run-dir", default=None, help="单档模式：run 目录（内含 ckpt.pt）")
+    ap.add_argument("--run-dir", default=None, help="单 run 模式：run 目录（内含 ckpt.pt）")
     ap.add_argument("--root", default=None, help="批次模式：根目录（含 <arm>/ 与 logs/<arm>.log）")
-    ap.add_argument("--arms", default="", help="批次模式的档名（逗号分隔）；空 = 自动发现全部")
-    ap.add_argument("--log", default=None, help="覆盖日志路径（默认 <run_dir 父>/logs/<档名>.log）")
+    ap.add_argument("--arms", default="", help="批次模式的 run 名（逗号分隔）；空 = 自动发现全部")
+    ap.add_argument("--log", default=None, help="覆盖日志路径（默认 <run_dir 父>/logs/<run 名>.log）")
     ap.add_argument("--out", required=True, help="JSON 输出路径")
     ap.add_argument("--seeds", type=int, default=DEFAULT_EVAL_SEEDS,
                     help=f"评估种子数（默认 {DEFAULT_EVAL_SEEDS} = 期① 批次的 --eval-seeds；"
@@ -320,7 +320,7 @@ def main() -> None:
                          "300 步 + 10 次评估）。未达标者**跳过并标注**")
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="评估跑在哪个设备（默认 cpu = 门禁解释器）。训练内联评估跑在 "
-                         "`--device` 指定的那一台上；要与它逐位一致（尤其确定性的档，见模块 "
+                         "`--device` 指定的那一台上；要与它逐位一致（尤其确定性的 run，见模块 "
                          "docstring）就用同一设备——cuda 需 GPU 解释器")
     args = ap.parse_args()
     if bool(args.run_dir) == bool(args.root):
@@ -338,11 +338,11 @@ def main() -> None:
     print(f"[m17] 评估口径：EVAL_SEED_BASE={EVAL_SEED_BASE}、sample=False（argmax）、"
           f"seeds={args.seeds}、device={args.device}｜完成判据：metrics.ndjson 行数 ≥ "
           f"{args.min_lines}")
-    print("[m17] 口径来源 = 各档日志（不手写开关表）；评估逻辑 = 复用 m13._make_eval_fn"
+    print("[m17] 口径来源 = 各 run 日志（不手写开关表）；评估逻辑 = 复用 m13._make_eval_fn"
           "（DRY，两侧不会漂）")
-    print("[m17] ⚠️ 训练档跑在 CUDA 上：argmax 不消费采样流，但 CPU 与 CUDA 的浮点内核不同，"
+    print("[m17] ⚠️ 训练 run 跑在 CUDA 上：argmax 不消费采样流，但 CPU 与 CUDA 的浮点内核不同，"
           "个别决策可能翻转 ⟹ 与内联评估不保证逐位相同（见下方的 delta 列）；"
-          "确定性的档（约束全关）会把一次翻转整体平移，用 --device cuda 复现", flush=True)
+          "确定性的 run（约束全关）会把一次翻转整体平移，用 --device cuda 复现", flush=True)
 
     records, skipped = [], []
     for rd in run_dirs:
@@ -360,7 +360,7 @@ def main() -> None:
         n_lines = count_lines(metrics_path) if metrics_path.exists() else 0
         if n_lines < args.min_lines:
             print(f"[m17] 跳过 {arm}：metrics.ndjson 只有 {n_lines} 行（< {args.min_lines}）"
-                  "——这一档还没跑满，不部分评估", flush=True)
+                  "——这一个 run 还没跑满，不部分评估", flush=True)
             skipped.append({"arm": arm, "reason": f"incomplete: {n_lines} < {args.min_lines}",
                             "n_lines": n_lines})
             continue
@@ -373,16 +373,16 @@ def main() -> None:
               f"（内联 {rec['inline_eval']['makespan_mean']:.2f}，差 {d:+.4f}）", flush=True)
 
     if records:
-        print("\n逐档一行（三目标均值 + 逐种子原始值）；"
+        print("\n逐个 run 一行（三目标均值 + 逐种子原始值）；"
               f"逐种子顺序 = 评估种子 {records[0]['eval_seeds']}（配对检验用）")
         print(format_table(records))
-        print("\n档             规则基线   ckpt步  完成/hit")
+        print("\nrun            规则基线   ckpt步  完成/hit")
         for r in records:
             m = r["metrics"]
             print(f"{r['arm']:<15}{r['metrics']['rule_makespan']:>8.2f}{r['ckpt_step']:>8}"
                   f"   {int(m['jobs_done_min'])}/{r['n_jobs']}  hit={m['horizon_hit_frac']:.2f}")
     if skipped:
-        print("\n跳过的档（未跑满或缺失；**没有**部分评估）：")
+        print("\n跳过的 run（未跑满或缺失；**没有**部分评估）：")
         for s in skipped:
             print(f"  {s['arm']}: {s['reason']}")
 

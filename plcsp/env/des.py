@@ -8,7 +8,7 @@
 
 边界（诚实声明）：
 - AGV 有**空载段**（2026-10-02 补齐；此前 AGV 从上一卸货点瞬移到取货点）。
-- 机器故障/AGV 故障=泊松流；⑨ 的故障**腿间检出**（不打断正在进行的行驶）。
+- 机器故障/AGV 故障=泊松流；⑨ 的故障**段间检出**（不打断正在进行的行驶）。
 - ⑦ 模糊运输时间、⑥ 模糊加工时间**均已砍**（见 spec §3.3 的砍除记录）。
 - 完成时刻以**工件运抵装卸站**为准（P4-B Task 2b）：作业在装卸站入场、末工序完工后回站，
   `completes[j]` = 到站时刻 ⟹ makespan **含入场段与回站段的运输**（不是"末工序下机即完工"）。
@@ -82,21 +82,21 @@ class SimConfig:
     max_agv_capacity: int = 3     # ⑩ 车队载量上限 [件]（1 = 退化为单载）
     # ⑩ **multi-drop 行程模型开关**（2026-10-05，**模型变更**，不是加一个头）：
     # `True` 时一趟 = **一个取货点 + 多个卸货点**——AGV 在取货点装走若干件（同取货点、
-    # 不同卸货点），沿途逐站卸下；载货段 = **一串腿**（总时长/能耗 = 各腿之和，区段仍
-    # **逐腿**申请/释放，沿用 `_drive` 既有语义）。
+    # 不同卸货点），沿途逐站卸下；载货段 = **多段相连**（总时长/能耗 = **各段之和**，区段仍
+    # **逐段**申请/释放，沿用 `_drive` 既有语义）。
     # ⚠️ 为什么改模型：`max_agv_capacity`（默认 3）在单卸货点模型下是**死参数**——一次取货
     # 只有一个卸货点，容量永远用不上（审稿人会问"参数设了不用"）。打开本开关后它第一次
     # 真的起作用：在车件数 ≤ `capacity`（= ⑩ 异构车队给的载量，关 ⑩ 时恒 1）。
-    # ⚠️ **打开后与旧档读数不可比**：makespan / 能耗 / 趟数 / 行程都会变，这是**预期**的
+    # ⚠️ **打开后与旧配置读数不可比**：makespan / 能耗 / 趟数 / 行程都会变，这是**预期**的
     # （模型的定义变了）；默认 `False` ⟹ 与今日**逐位相同**（既有全部读数靠它）。
     multi_drop: bool = False
     agv_mtbf: float = 480.0       # ⑨ AGV 平均无故障时间 [min]（8 h）
     agv_mttr: float = 10.0        # ⑨ AGV 平均修复时间 [min]
     # ⑨ **故障 failover 开关**（2026-10-05）：`True` = 停机期间把该车**手上/队列里**的任务
-    # 退回队列（bound 档转交未停机的其它车，FIFO 档放回共享队列）——任务不再"车趴多久卡多久"。
+    # 退回队列（bound 配置转交未停机的其它车，FIFO 配置放回共享队列）——任务不再"车趴多久卡多久"。
     # ⚠️ **这是改动力学**：打开后 makespan / travel / requeue 都会变，是 ⑨ 的代价口径从
     # "仅停机时间"改为"停机 + 重新派车 + 队列重排"的**定义性后果**（此前是低估口径）。
-    # ⚠️ 时点不变：故障仍只在**腿间**（不持任何区段锁）生效——持锁停机 = 死锁，绝不做。
+    # ⚠️ 时点不变：故障仍只在**段间**（不持任何区段锁）生效——持锁停机 = 死锁，绝不做。
     # 默认 False ⟹ 与今日逐位相同（既有读数靠它）。
     agv_failover: bool = False
     # ③ **役龄故障率开关**（2026-10-05）：`True` 时 `fail_rate` 从常数变成**役龄的函数**
@@ -108,7 +108,7 @@ class SimConfig:
     # 默认 False ⟹ 与今日逐位相同（既有读数靠它）。
     machine_age_failure: bool = False
     # Weibull 形状参数 β（**assumed**，无核实出处；敏感性扫 1.5/2.0/3.0）。
-    # β = 1 退化回常数率（与关档同式）；β < 1（递减风险）不在讨论范围，显式报错。
+    # β = 1 退化回常数率（与关态同式）；β < 1（递减风险）不在讨论范围，显式报错。
     machine_age_beta: float = 2.0
     battery_low: float = 0.20     # ⑪ 低电阈值（占容量比）
     battery_high: float = 0.80    # ⑪ 充电目标（占容量比）
@@ -336,7 +336,7 @@ def batch_cands(n_same_frm: int, capacity: int) -> tuple[int, ...]:
     - 上限 `capacity − 1`：头件已占 1 个位置，**在车件数 ≤ `capacity`** 由构造保证；
     - `n_same_frm` = 队列里（头件已取走后）同取货点的任务数。
 
-    ⚠️ 只做**前缀**：同向组内的非前缀子集被支配（同一串载货腿、更差的 FIFO 顺序）。
+    ⚠️ 只做**前缀**：同向组内的非前缀子集被支配（同一串载货段、更差的 FIFO 顺序）。
     动作空间因此 ≤ `capacity`，链长上界 = 取货次数——不做"逐任务二值决策"（那会引入
     "同批内先判谁"这一层决策顺序，与既有"一组候选一次打分"的骨架不同构）。
     """
@@ -409,7 +409,7 @@ class MachineSim:
             else:
                 # ③ 役龄故障率（开关开；前置已由 SimWorld 校验）：**一次工序内 τ 不变**——
                 # `pm_clock` 只在工序完成后累加（见下），故在循环外算一次即可。
-                # 关档 `rate` 就是 `pad.fail_rate`（同一数值）⟹ 抽签序列逐位不变。
+                # 关态 `rate` 就是 `pad.fail_rate`（同一数值）⟹ 抽签序列逐位不变。
                 rate = float(self.pad.fail_rate)
                 if self.aging:
                     rate = machine_fail_rate(rate, self.pm_clock, self.cfg.machine_age_beta,
@@ -439,9 +439,9 @@ class MachineSim:
                     yield from self._pm_after_op()
 
     def _pm_after_op(self):
-        """⑫ 维护头（M）的**决策点**（策略档）：一道工序**加工完毕、下一件尚未上机**。
+        """⑫ 维护头（M）的**决策点**（策略配置）：一道工序**加工完毕、下一件尚未上机**。
 
-        ⚠️ 时点**就是规则档检查的那个时点**（`_process` 里主轴工时累加后、`run` 把工件交输出
+        ⚠️ 时点**就是规则配置检查的那个时点**（`_process` 里主轴工时累加后、`run` 把工件交输出
         缓冲前）：此刻工件仍占着加工槽、下一件进不来——"要停机才能保养"的唯一窗口。放在同一
         时点，使"规则 → 策略"只改**谁决定**，不改时点语义：
         - **逾期**（`pm_clock >= pm_interval`）→ 强制保养，且**不产生决策**：规则是硬底线，
@@ -541,10 +541,10 @@ def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
 
     - `node`：每个通道节点一个区段（最细；MK10 的 5×4 网格 → 30 个）
     - `row` / `col`：整行 / 整列算一个区段（像"一条长廊一个区段"）
-    - `all`：全图一个区段（极端档，用于下界）
+    - `all`：全图一个区段（极端参数，用于下界）
 
     ⚠️ 装卸站是**格点外**节点（号 = `grid.n_nodes`），`row`/`col` 没有它的行列号 ⟹
-    给它**独占**一个区段（`all` 档则并入唯一那一个）——它不是路口，不该与某一行共用区段。
+    给它**独占**一个区段（`all` 粒度则并入唯一那一个）——它不是路口，不该与某一行共用区段。
     """
     spec = layout.grid
     n = spec.n_nodes                      # 格点交叉口数（装卸站不在其中）
@@ -660,8 +660,8 @@ class AgvSim:
     **逐位等于"路线头从未存在"**（`route_logits` 当年随 ① 被砍、① 恢复后漏恢复，见
     `docs/progress-log.md` §27.3/§28）。
 
-    **充电决策（C，2026-10-04）**：`charge=None`（默认）= 规则档（低电 → 最近空闲桩），
-    逐位等于今日；非 None = 策略档，`_maybe_charge` 在每个空闲点问 {不去充} ∪ {各桩}
+    **充电决策（C，2026-10-04）**：`charge=None`（默认）= 规则配置（低电 → 最近空闲桩），
+    逐位等于今日；非 None = 策略配置，`_maybe_charge` 在每个空闲点问 {不去充} ∪ {各桩}
     （回调契约 `charge(aid, cands) -> 动作码`，见 `SimWorld._make_charge_fn`）。
     ⚠️ 与之配套的是**模型修复**：`battery <= 0` ⟹ 该车不可用（不接新任务），充到
     `battery_high × cap` 才恢复——没有它，"充电"是纯成本零收益，C 决策退化（见 `_depleted`）。
@@ -683,16 +683,16 @@ class AgvSim:
         # ⑩ **multi-drop 行程模型开关**（默认关 ⟹ 单卸货点路径逐位不变，见 `SimConfig.multi_drop`）
         self.multi_drop = bool(cfg.multi_drop)
         # ⑩ 拼批头（B）的入口：`SimWorld` 给的 `(aid, job, frm, to, oi, cands) -> 动作码` 回调。
-        # `None` = **规则档**（multi_drop 打开时：整条队列找同取货点任务，按队列序取到容量上限）；
-        # 非 None = **策略档**（在预构造的批次候选里选，候选集见 `batch_cands`）。
+        # `None` = **规则配置**（multi_drop 打开时：整条队列找同取货点任务，按队列序取到容量上限）；
+        # 非 None = **策略配置**（在预构造的批次候选里选，候选集见 `batch_cands`）。
         self.batch_policy = batch
         # 路线决策（R）的入口：`SimWorld` 给的 `(aid, src, dst, leg) -> 节点序列` 回调。
         # `None` = **不启用**——`_drive` 恒走 `shortest_node_path`，且不多取快照/不多抽随机数
         # ⟹ 逐位等于"路线头从未存在"的行为（既有全部读数立在这条上）。
         self.route = route
         # 充电决策（C）的入口：`SimWorld` 给的 `(aid, cands) -> 动作码` 回调。
-        # `None` = **规则档**（低电 → 最近空闲桩，今日行为逐位不变）；
-        # 非 None = 策略档，`_maybe_charge` 在**每个空闲点**问它 {不去充} ∪ {各桩}。
+        # `None` = **规则配置**（低电 → 最近空闲桩，今日行为逐位不变）；
+        # 非 None = 策略配置，`_maybe_charge` 在**每个空闲点**问它 {不去充} ∪ {各桩}。
         self.charge_policy = charge
         self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
         # ⑩ 异构车队：**开关关掉时倍率=1、载量=1**，即与"约束从未存在"逐位相同
@@ -731,7 +731,7 @@ class AgvSim:
         - 任一端点**没有矩阵对应项**（充电桩）⟹ 按 `transport.unmapped` 处置：`raise` 显式报错；
           `geometry` **声明式**降级为几何口径并计数（metrics 带出，供表里如实声明）。
         `count_unmapped=False` 供**排序**之类的查数用（只选一个桩却把候选全计一遍会虚高）。
-        ⚠️ 计数按**出发次数**记：区段争用失败而重试的腿会重复计一次（它确实又跑了一趟）。
+        ⚠️ 计数按**出发次数**记：区段争用失败而重试的段会重复计一次（它确实又跑了一趟）。
         """
         if self.transport.mode != MATRIX:
             return self._seg_min(src, dst)
@@ -759,12 +759,12 @@ class AgvSim:
     def _failures(self):
         """⑨ AGV 故障：按泊松流停机 `agv_mttr`，期间不接活。
 
-        **腿间检出**：故障不打断正在进行的行驶，在下一段行驶开始前的**腿间**生效。
+        **段间检出**：故障不打断正在进行的行驶，在下一段行驶开始前的**段间**生效。
         这是简化，但 MTBF(480 min) 远大于单段行驶时长，误差可忽略。
 
-        ⚠️ **`SimConfig.agv_failover=True`** 时语义加强：车在腿间停机期间，**手上与队列里的
+        ⚠️ **`SimConfig.agv_failover=True`** 时语义加强：车在段间停机期间，**手上与队列里的
         任务退回/转交别的车**（`_handoff_queued` / `_requeue_hand`），不再"车趴多久卡多久"。
-        时点**不变**——仍只在腿间、且车不持任何区段锁（持锁停机 = 同区段的车永久等待 = 死锁）。
+        时点**不变**——仍只在段间、且车不持任何区段锁（持锁停机 = 同区段的车永久等待 = 死锁）。
         默认关时本函数**逐字**是今日行为（只设 down/up）。
         """
         while True:
@@ -798,9 +798,9 @@ class AgvSim:
         return out
 
     def _handoff_queued(self):
-        """⑨ failover **检查点 1**（循环顶、腿间、不持锁）：把本车队列里的任务转交别的车。
+        """⑨ failover **检查点 1**（循环顶、段间、不持锁）：把本车队列里的任务转交别的车。
 
-        只在 `bound`（每车一 Store）且存在未停机的其它车时动作；FIFO 档的共享队列本来就
+        只在 `bound`（每车一 Store）且存在未停机的其它车时动作；FIFO 配置的共享队列本来就
         人人可取（无需动作），其它车全停机时也不动（留在本车队列，等任一车恢复后再转交）。
         """
         if not self.failover or not self.bound or not self.down:
@@ -818,7 +818,7 @@ class AgvSim:
             self.stats["agv_failover_tasks"] = self.stats.get("agv_failover_tasks", 0) + 1
 
     def _requeue_hand(self, items):
-        """⑨ failover **检查点 2/3**（腿间、不持锁）：把本车**手上**的任务退回/转交。
+        """⑨ failover **检查点 2/3**（段间、不持锁）：把本车**手上**的任务退回/转交。
 
         `bound`：转交未停机的其它车；其它车全停机 ⟹ 放回**本车队列**（车不再手拿任务，
         恢复后可跑）。FIFO：放回**共享队列队尾**（会改变 FIFO 相对顺序，如实记明）。
@@ -846,7 +846,7 @@ class AgvSim:
             self.stats["agv_failover_tasks"] = self.stats.get("agv_failover_tasks", 0) + 1
 
     def _wait_up_or_failover(self):
-        """⑨ 腿间停机等待。`failover` 关 ⟹ **逐字**等于 `_wait_up`（默认档逐位不变）。
+        """⑨ 段间停机等待。`failover` 关 ⟹ **逐字**等于 `_wait_up`（默认配置逐位不变）。
 
         `failover` 开：停机期间反复尝试转交本车队列里的任务（检查点 1）。轮询间隔 =
         `zone_hold`（确定性；停机是有界事件，轮询代价可忽略）。**只等待、不行驶**——
@@ -866,8 +866,8 @@ class AgvSim:
         该值，而该值 > 0（`battery_high` 默认 0.8），故"充到目标"与"谓词转假"是同一件事——
         不存在"充了一点就又能接活"的中间态。
         ⚠️ **⑪ 关闭时本谓词恒 False**：电池只在 ⑪ 开时增减（`_drain` / `_drain_idle` /
-        `_maybe_charge` 三处都先查 `self.con.charging`），关闭档电池恒 = `battery_cap > 0`。
-        这是"⑪ 关档读数不受本修复影响"的**结构性理由**（由改造前捕获的摘要钉死）。
+        `_maybe_charge` 三处都先查 `self.con.charging`），关态电池恒 = `battery_cap > 0`。
+        这是"⑪ 关态读数不受本修复影响"的**结构性理由**（由改造前捕获的摘要钉死）。
         ⚠️ 判定只在**任务边界**调用（见 `run` 与 `_recover_from_depletion`）：`_drive` 持区段锁
         行驶，车若死在持锁状态会把走廊堵死（死锁）——车必须能跑完**已开始**的行程。
         """
@@ -876,8 +876,8 @@ class AgvSim:
     def _recover_from_depletion(self):
         """⑪ 耗尽后**不可用**：反复补电，直到电量回到 `battery_high × battery_cap` 才放行。
 
-        ⚠️ 规则档一次就能充上：`battery <= 0` 必满足 `battery <= battery_low × cap`
-        （`battery_low >= 0`），故 `_maybe_charge` 必定动手。C 决策档可能选"不去充"
+        ⚠️ 规则配置一次就能充上：`battery <= 0` 必满足 `battery <= battery_low × cap`
+        （`battery_low >= 0`），故 `_maybe_charge` 必定动手。C 决策配置可能选"不去充"
         （那是它的权利，代价是这台车继续不可用）——此时退避 `zone_hold` 再问，不空转。
         若充电始终无法完成（桩全被占 / 策略一直不充），时间照常推进，episode 由 horizon
         如实截断（`horizon_hit`）——不静默放行，也不死循环。
@@ -890,12 +890,12 @@ class AgvSim:
     def _charge_at(self, src: int, ch):
         """把车从 `src` 开进 `ch` 桩、排队、充到 `battery_high × battery_cap`。
 
-        规则档与 C 决策档**共用这一处**（两份拷贝必然漂）。⚠️ 排队语义按档不同：规则档进来前
-        已判过"桩空闲"（`res.count < capacity`），故 `yield req` 立即通过；C 决策档由策略选桩，
+        规则配置与 C 决策配置**共用这一处**（两份拷贝必然漂）。⚠️ 排队语义按配置不同：规则配置进来前
+        已判过"桩空闲"（`res.count < capacity`），故 `yield req` 立即通过；C 决策配置由策略选桩，
         桩忙时**排队等待**（候选特征带了占用/排队，策略有条件避开忙桩）。
         ⚠️ `need <= 0`（电量已不低于目标）⟹ 不充、不计 `charge_events`：SimPy 的 `timeout`
-        拒收负数，且"充到 0.8×cap"不该把更高的电量**拉低**。规则档的 `need` 恒 > 0
-        （`battery_low < battery_high` 时），故该分支只对 C 决策档有影响。
+        拒收负数，且"充到 0.8×cap"不该把更高的电量**拉低**。规则配置的 `need` 恒 > 0
+        （`battery_low < battery_high` 时），故该分支只对 C 决策配置有影响。
         """
         res = self.charger_res[ch.id]
         with res.request() as req:
@@ -911,20 +911,20 @@ class AgvSim:
             self.stats["charge_events"] += 1
 
     def _maybe_charge(self):
-        """⑪ 待命补电——**规则档**（`charge_policy is None`）或 **C 决策档**。
+        """⑪ 待命补电——**规则配置**（`charge_policy is None`）或 **C 决策配置**。
 
-        - **规则档**（默认，逐位等于今日）：低电（`battery <= battery_low × cap`）→ 按**最近**
+        - **规则配置**（默认，逐位等于今日）：低电（`battery <= battery_low × cap`）→ 按**最近**
           选一个**空闲**桩，充到 `battery_high × cap`。桩被占则试下一个（不排队干等）。
-        - **C 决策档**：规则换成策略决策——候选 = {不去充} ∪ {各充电桩}（动作码见
+        - **C 决策配置**：规则换成策略决策——候选 = {不去充} ∪ {各充电桩}（动作码见
           `charge_cands`），在**每个空闲点**都问（"早充 vs 晚充"的权衡要求电池还够时也能充，
           否则规则被写死回来，决策退化）。策略选的桩若忙则排队等待。
         只在**待命时**充电，不在取货/送货途中中断——中断会把在途工件撂在半路。
         """
         if not self.con.charging or not self.chargers:
             return
-        # ⚠️ `pos_node is None`（尚未出车）时以 **0 号桩的节点**为参照起点——规则档的既有简化
-        # （AGV 的初始停位不在仿真状态里，`layout` 也不给）。规则档只在低电时动手，默认电池
-        # 永远到不了那一档，故这条一直不可见；C 决策档**在 t=0 的第一个空闲点就可能撞上**
+        # ⚠️ `pos_node is None`（尚未出车）时以 **0 号桩的节点**为参照起点——规则配置的既有简化
+        # （AGV 的初始停位不在仿真状态里，`layout` 也不给）。规则配置只在低电时动手，默认电池
+        # 永远到不了那一水平，故这条一直不可见；C 决策配置**在 t=0 的第一个空闲点就可能撞上**
         # （快照里该车 `node = -1`，候选特征的行驶时长取哨兵 −1.0）。本次**不改**这个口径
         # （改了会动既有动力学），只如实标注。
         src = self.pos_node if self.pos_node is not None else self.chargers[0].node
@@ -939,7 +939,7 @@ class AgvSim:
                 return
             yield from self._charge_at(src, self.chargers[choice - 1])
             return
-        # ── 规则档（今日行为，逐位不变）──
+        # ── 规则配置（今日行为，逐位不变）──
         if self.battery > self.cfg.battery_low * self.battery_cap:
             return
         for ch in sorted(self.chargers, key=lambda c: self._leg_min(src, c.node, count_unmapped=False)):
@@ -988,7 +988,7 @@ class AgvSim:
         return out
 
     def _collect_multi(self, q, frm: int, first: tuple) -> list:
-        """⑩ multi-drop **规则档**（multi_drop 开、批次策略关）：取走队列里**所有**同取货点
+        """⑩ multi-drop **规则配置**（multi_drop 开、批次策略关）：取走队列里**所有**同取货点
         任务，最多 `capacity` 件（**头件已占 1 位**）；卸货序 = 队列序（`drop_stops`）。
 
         ⚠️ 放宽到**全队列**（不再只看队首连续段）会跳过中间其它取货点的任务——那些任务被本趟
@@ -1003,7 +1003,7 @@ class AgvSim:
         return batch
 
     def _count_batch(self, batch: list) -> None:
-        """⑩ 拼批读数（**只在 multi-drop 档计数**，默认档恒 0 ⟹ 既有读数零影响）：
+        """⑩ 拼批读数（**只在 multi-drop 配置计数**，默认配置恒 0 ⟹ 既有读数零影响）：
 
         - `batch_trips`：取货次数（= 批次数，一趟一记）；
         - `batch_items`：Σ 批大小（**装走**的件数，含后来被退回重跑的）；
@@ -1019,7 +1019,7 @@ class AgvSim:
 
     def _collect_batch(self, q, frm: int, to: int, first: tuple,
                        job: int, oi: int) -> list:
-        """⑩ 拼批头（策略档）：在**预构造的批次候选**（`batch_cands`）里问策略选一个。
+        """⑩ 拼批头（策略配置）：在**预构造的批次候选**（`batch_cands`）里问策略选一个。
 
         候选 `s` = 头件 + 队列里同取货点的前 `s` 件（队列序）。候选 < 2（队列里没有同取货点
         任务 ⟹ 只有 `s=0`）时**不记决策、直接返回单件**——同 R 头的"候选 < 2 不记决策"
@@ -1030,7 +1030,7 @@ class AgvSim:
         idxs = self._same_frm_indices(q, frm)
         cands = batch_cands(len(idxs), self.capacity)
         if len(cands) < 2:
-            self._count_batch([first])          # 不构成决策；读数口径与规则档一致（记一趟 1 件）
+            self._count_batch([first])          # 不构成决策；读数口径与规则配置一致（记一趟 1 件）
             return [first]
         code = int(self.batch_policy(self.aid, int(job), int(frm), int(to), int(oi), cands))
         if code not in cands:
@@ -1046,14 +1046,14 @@ class AgvSim:
     def _deliver_multi(self, q, batch: list):
         """⑩ multi-drop 的**负载段**：一趟停多个卸货点，逐站卸下该站的件（卸货序 = 队列序）。
 
-        - **载货段 = 一串腿**：`frm → to₁ → to₂ → …`，逐腿走 `_drive(..., "loaded")`——
-          沿用既有的**逐段申请/释放区段**语义（不另造）；总时长/能耗 = 各腿之和
-          （`_drive` 逐腿累 `agv_loaded_min` 与耗电）。
+        - **载货段 = 多段相连**：`frm → to₁ → to₂ → …`，逐段走 `_drive(..., "loaded")`——
+          沿用既有的**逐段申请/释放区段**语义（不另造）；总时长/能耗 = **各段之和**
+          （`_drive` 逐段累 `agv_loaded_min` 与耗电）。
         - **记账逐件正确**：每站卸完即 `set_load(剩余在车件数)`、逐件清 `job_agv` ⟹
           `agv_load_n` / `in_flight` / `JobState.on_agv` 在多件在车时仍逐件准。
-        - **失败回退**：某腿失败（区段争用超时/等待环）⟹ 把**仍在车上**的件（本站与后续站，
-          已卸下的不动）退回队列——与单卸货点档的"整批退回"同语义（此处的"批" = 未交付部分）。
-        - `trips` 在**开始负载段时** +1（一趟一记；1 件档同样记 1）。
+        - **失败回退**：某段失败（区段争用超时/等待环）⟹ 把**仍在车上**的件（本站与后续站，
+          已卸下的不动）退回队列——与单卸货点配置的"整批退回"同语义（此处的"批" = 未交付部分）。
+        - `trips` 在**开始负载段时** +1（一趟一记；1 件时同样记 1）。
         """
         if self.failover and self.down:
             self.track.set_load(self.aid, 0)
@@ -1105,7 +1105,7 @@ class AgvSim:
 
         ⚠️ **路线（R）在此处决断**（2026-10-04 恢复）：`self.route` 非空时路径由策略在 k 条
         候选里选（`route(aid, src, dst, leg) -> 节点序列`）；为空时走 `shortest_node_path`，
-        **不多取快照、不多抽随机数** ⟹ 关闭档逐位等于今日（硬要求）。
+        **不多取快照、不多抽随机数** ⟹ 关态逐位等于今日（硬要求）。
         ⚠️ 矩阵口径**不需要为绕行改公式**：整段时长 `total`（矩阵查表）按几何占比分摊到各段
         （`seg = total * seg / leg_geo`），故绕行的总时长自动按"几何长度比"变长，而最短路
         那条的数值与今日逐位相同。
@@ -1162,11 +1162,11 @@ class AgvSim:
         if self.con.agv_failure:
             self.env.process(self._failures())       # ⑨ 关掉时不启进程 → 不抽随机数
         while True:
-            yield from self._wait_up_or_failover()   # ⑨ 停机中不接活（failover 档含转交）
+            yield from self._wait_up_or_failover()   # ⑨ 停机中不接活（failover 打开时含转交）
             # ⚠️ ⑪ **耗尽门（模型修复）**：`battery <= 0` ⟹ 该车不可用，**不接新任务**，
             # 直到充到 `battery_high × cap` 才恢复（`_recover_from_depletion`）。
             # 判定在**任务边界**：此刻车空闲待命、不在行驶中、**不持任何区段锁**（`_drive`
-            # 才持锁）。刻意不放腿中/持锁时：死在持锁状态会让同区段的所有车永久等待（死锁）
+            # 才持锁）。刻意不放段中/持锁时：死在持锁状态会让同区段的所有车永久等待（死锁）
             # ——车必须能跑完已开始的行程。⑪ 关时 `_depleted()` 恒 False，本门不生效。
             if self._depleted():
                 self.stats["agv_dry_events"] = self.stats.get("agv_dry_events", 0) + 1
@@ -1179,7 +1179,7 @@ class AgvSim:
                 self._drain_idle(self.env.now - t0, AGV_IDLE_KW)
             self.stats["tasks_get"] += 1
             if self.failover and self.down:
-                # ⑨ failover **检查点 2**（腿间、不持锁）：等任务期间趴窝 ⟹ 刚取到的任务
+                # ⑨ failover **检查点 2**（段间、不持锁）：等任务期间趴窝 ⟹ 刚取到的任务
                 # 不留在车上（今日行为是"带着货跑完整趟"，不真实）。
                 yield from self._requeue_hand([(frm, to, item, path)])
                 continue
@@ -1195,8 +1195,8 @@ class AgvSim:
                     self.track.job_agv[item[0]] = -1
                     self.track.set_load(self.aid, 0)
                     continue
-            # ⑩ 拼车/拼批：默认档 = 队首连续段同 (取货点, 卸货点)；multi-drop 档 = 全队列同取货点
-            # （规则档），或策略在预构造的批次候选里选（`batch_policy` 非空 = 拼批头，见 `_collect_batch`）。
+            # ⑩ 拼车/拼批：默认配置 = 队首连续段同 (取货点, 卸货点)；multi-drop 配置 = 全队列同取货点
+            # （规则配置），或策略在预构造的批次候选里选（`batch_policy` 非空 = 拼批头，见 `_collect_batch`）。
             if not self.multi_drop:
                 batch = yield from self._collect(q, frm, to, (frm, to, item, path))
             elif self.batch_policy is None:
@@ -1215,7 +1215,7 @@ class AgvSim:
             # ── 负载段：取货点 → 卸货点（整批一趟，**单卸货点**：逐位不变）──
             # 快照跟踪（P2 Task 1）：取货后负载行驶，本趟在运件数 = 批次大小（F5：in_flight 的"车上"部分）
             if self.failover and self.down:
-                # ⑨ failover **检查点 3**（腿间、不持锁）：空载段期间趴窝 ⟹ 整批退回，
+                # ⑨ failover **检查点 3**（段间、不持锁）：空载段期间趴窝 ⟹ 整批退回，
                 # 不带货趴窝（今日行为是照跑负载段）。
                 self.track.set_load(self.aid, 0)
                 yield from self._requeue_hand(batch)
@@ -1238,8 +1238,8 @@ class AgvSim:
                 self.stats["agv_pos"][self.aid] = t2
                 # 有界输入缓冲投递：满则让步超时重试（防缓冲满阻塞拖累运输环）。
                 # ⚠️ T3 ② 的激活量 = **被迫等待时长 [min]**（本循环累计）。它与
-                # `_deliver_multi` 的同名循环是**两处独立落点**——本处走单卸货点档，那处走
-                # multi-drop 档；少记一处 = 该档的 ② 激活量恒 0（静默低估）。
+                # `_deliver_multi` 的同名循环是**两处独立落点**——本处走单卸货点配置，那处走
+                # multi-drop 配置；少记一处 = 该配置的 ② 激活量恒 0（静默低估）。
                 _t_block = self.env.now
                 while len(self.machines[t2].in_q.items) >= self.machines[t2].in_q.capacity:
                     yield self.env.timeout(self.cfg.zone_hold)
@@ -1331,7 +1331,7 @@ class SimWorld:
         返回值。透传给每台 `MachineSim`，`_pm_after_op` 消费。
         ⚠️ `charge`（⑪ 充电头）：同上，`None` = 规则驱动（低电 → 最近空闲桩）；`run_gated`
         传 `_make_charge_fn(...)` 的返回值。透传给每台 `AgvSim`，`_maybe_charge` 消费。
-        ⚠️ `batch`（⑩ 拼批头，B）：同上，`None` = **规则档**（`multi_drop=True` 时 `_collect_multi`
+        ⚠️ `batch`（⑩ 拼批头，B）：同上，`None` = **规则配置**（`multi_drop=True` 时 `_collect_multi`
         按队列序取满容量；`multi_drop=False` 时该开关无意义）；`run_gated` 传 `_make_batch_fn(...)`
         的返回值。透传给每台 `AgvSim`，`_collect_batch` 消费。
         ⚠️ `charger_res` 存成活引用（`self.charger_res`）：`snapshot()` 要按它报**当时**的桩占用
@@ -1677,7 +1677,7 @@ class SimWorld:
                 "agv_dry_events": stats["agv_dry_events"],
                 # ⑨ failover：故障期间退回/转交的任务件数（默认关 ⟹ 恒 0）
                 "agv_failover_tasks": stats["agv_failover_tasks"],
-                # ⑩ multi-drop / 拼批读数（**只在 multi_drop 档非零**，默认档恒 0）：
+                # ⑩ multi-drop / 拼批读数（**只在 multi_drop 配置非零**，默认配置恒 0）：
                 # 取货次数 / Σ 批大小 / 批大小 ≥2 的次数（存在性判据的直接读数）
                 "batch_trips": stats.get("batch_trips", 0),
                 "batch_items": stats.get("batch_items", 0),
@@ -1699,7 +1699,7 @@ class SimWorld:
                 "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
                               "max": float(max(zm.waits)) if zm.waits else 0.0},
                 "n_zones": zm.n,
-                # 口径**随结果自报**（P4-A Review Focus #1 同型）：两档的数并排放时靠这两行分辨
+                # 口径**随结果自报**（P4-A Review Focus #1 同型）：两种口径的数并排放时靠这两行分辨
                 "transport": self.inst.transport,
                 "unmapped_legs": stats.get("unmapped_legs", 0),
                 "unmapped_min": float(stats.get("unmapped_min", 0.0))}
@@ -1748,7 +1748,7 @@ class SimWorld:
         ⚠️ `policy_c` 非空但 ⑪ `charging` 关闭 → **显式报错**：⑪ 关时电池从不增减、
         充电桩机制根本不存在（决策点不存在），给策略一个死动作只会污染链 logp。
 
-        ⚠️ **`policy_b`（⑩ 拼批头，B）**：`None`（默认）= **规则档**——`SimConfig.multi_drop`
+        ⚠️ **`policy_b`（⑩ 拼批头，B）**：`None`（默认）= **规则配置**——`SimConfig.multi_drop`
         打开时 `AgvSim._collect_multi` 按"全队列同取货点、队列序、取满容量"拼批；
         非空 = **策略驱动**：AGV 在取货点、头件已取走后，在**预构造的批次候选**
         （`batch_cands`：s = 0..min(capacity−1, 同取货点任务数)）里选一个。契约与五头对称：
@@ -1874,7 +1874,7 @@ class SimWorld:
                 "rework_events": stats["rework_events"],
                 "pm_events": stats["pm_events"],
                 # ⑫ 拆键（T3）：forced = 被阈值强制触发（T3 的激活量）、chosen = 策略主动选。
-                # 规则档 forced == pm_events、chosen == 0（规则不会主动提前保养）。
+                # 规则配置 forced == pm_events、chosen == 0（规则不会主动提前保养）。
                 "pm_events_forced": stats["pm_events_forced"],
                 "pm_events_chosen": stats["pm_events_chosen"],
                 # ② 有限缓冲：被迫等待时长 [min]（T3 ② 的激活量；两处投递路径都计）
@@ -1886,7 +1886,7 @@ class SimWorld:
                 "agv_dry_events": stats["agv_dry_events"],
                 # ⑨ failover：故障期间退回/转交的任务件数（默认关 ⟹ 恒 0）
                 "agv_failover_tasks": stats["agv_failover_tasks"],
-                # ⑩ multi-drop / 拼批读数（同 run()：只在 multi_drop 档非零）
+                # ⑩ multi-drop / 拼批读数（同 run()：只在 multi_drop 配置非零）
                 "batch_trips": stats.get("batch_trips", 0),
                 "batch_items": stats.get("batch_items", 0),
                 "batch_ge2": stats.get("batch_ge2", 0),
@@ -1947,7 +1947,7 @@ class SimWorld:
         从快照与候选自造（见 `group_rel._route_cand_feat`）。
 
         三件事在这里一次做掉：
-        1. **候选缓存**：`k_shortest_paths` 是逐次枚举的生成器，而 `_drive` **每条腿**都要问；
+        1. **候选缓存**：`k_shortest_paths` 是逐次枚举的生成器，而 `_drive` **每一段**都要问；
            缓存键 `(src, dst)`（候选只取决于图，一局内图不变）。缓存随本闭包**每局新建**——
            图对象每局重建，跨局复用会串味。
         2. **候选 < 2 不记决策**：装卸站那条**桥**边、相邻节点直连只有一条简单路径，
@@ -1955,7 +1955,7 @@ class SimWorld:
         3. **非候选显式报错**（同 `policy_s` / `policy_l`）：静默回退会掩盖策略/候选集不一致，
            让整条链的 logp 与动作错位而无人察觉。
 
-        ⚠️ 快照只在**真的要决策**时取（候选 < 2 不取）——`snapshot()` 有成本，且关闭档
+        ⚠️ 快照只在**真的要决策**时取（候选 < 2 不取）——`snapshot()` 有成本，且关态
         （`route=None`）连本函数都不会被调用，逐位保持今日行为。
         """
         cache: dict[tuple[int, int], tuple[tuple[int, ...], ...]] = {}

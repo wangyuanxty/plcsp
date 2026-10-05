@@ -200,7 +200,7 @@ def test_feature_order_matches_feature_names():
 def test_setup_flag_reads_constraint_switch():
     """⚠️ F2（评审裁定）：⑤ 关闭时 `setup_flag` 必须恒 0——仿真里换型时长就是 0。
 
-    旧实现只看 `prev_job != job`，从不读 `ConstraintConfig.setup_time` ⟹ 消融档（−生产 /
+    旧实现只看 `prev_job != job`，从不读 `ConstraintConfig.setup_time` ⟹ 消融 run（−生产 /
     None）下特征**照样报 1.0**，给策略一个"这里要换型"的假信号（真阴性变假阳性）。
     """
     inst, _lay, _w, _ctx = _ctx_and_snap()
@@ -245,7 +245,7 @@ def test_capacity_feature_degenerates_when_hetero_off():
 def test_pm_interval_scale_comes_from_cfg():
     """⚠️ F3（评审裁定）：`norm_context` 的 `pm_interval` 必须来自 `SimConfig`，不得硬编码 120。
 
-    可达路径：`m11_constraint_binding` 的极端档探针正是 `cfg.pm_interval /= 10` → 12.0；
+    可达路径：`m11_constraint_binding` 的极端参数探针正是 `cfg.pm_interval /= 10` → 12.0；
     那里 `pm_left = 1 − pm_clock/120` 而真实间隔是 12，`pm_clock` 一过 120 就被 clip 到 0，
     该维**静默死掉**（spec §9.2 还把 pm_interval 列在 assumed 参数栏要求做敏感性分析）。
     """
@@ -258,7 +258,7 @@ def test_pm_interval_scale_comes_from_cfg():
         snap, norm_context(inst, _lay, m_ref=100.0, cfg=cfg))[0, 5]
     assert pm_col(SimConfig(pm_interval=120.0)) == pytest.approx(1.0 - 6.0 / 120.0)
     assert pm_col(SimConfig(pm_interval=12.0)) == pytest.approx(1.0 - 6.0 / 12.0), \
-        "pm_left 没接 cfg.pm_interval——极端档（12 min）下该维静默死掉"
+        "pm_left 没接 cfg.pm_interval——极端参数（12 min）下该维静默死掉"
 
 
 @pytest.mark.unit
@@ -299,7 +299,7 @@ def test_fail_rate_feature_is_silent_when_machine_failure_off():
     仿真侧：`MachineSim._process` 在 ③ 关时直接一次跑完（`fail_events` 恒 0）；特征侧此前
     照报 `pad.fail_rate / max_fail_rate` ⟹ 策略读到一个**动力学里不存在**的量（真阴性变假阳性，
     与 ⑤/⑩ 已修的 F2 同型）。
-    判据双向：全开档必须非零（否则"关时恒 0"恒真、抓不住任何东西），关掉档必须全 0。
+    判据双向：全开配置必须非零（否则"关时恒 0"恒真、抓不住任何东西），关态必须全 0。
     """
     inst = load_mk("mk01")
     cfg = SimConfig()
@@ -312,7 +312,7 @@ def test_fail_rate_feature_is_silent_when_machine_failure_off():
     off = full.with_off("machine_failure")
     col = lambda cons: machine_features(                            # noqa: E731
         snap, build_ctx_for_unit_test(inst, lay, constraints=cons))[:, 6]
-    assert col(full).max() > 0.0, "全开档 fail_rate 维恒 0——判据失去意义"
+    assert col(full).max() > 0.0, "全开配置 fail_rate 维恒 0——判据失去意义"
     assert np.all(col(off) == 0.0), (
         f"③ 关时 fail_rate 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
 
@@ -338,7 +338,7 @@ def test_due_margin_feature_is_silent_when_due_dates_off():
     off = full.with_off("due_dates")
     col = lambda cons: job_features(                                # noqa: E731
         snap, build_ctx_for_unit_test(inst, lay, m_ref, constraints=cons))[:, 2]
-    assert col(full).max() > 0.0, "全开档 due_margin 维恒 0——判据失去意义"
+    assert col(full).max() > 0.0, "全开配置 due_margin 维恒 0——判据失去意义"
     assert np.all(col(off) == 0.0), (
         f"⑧ 关时 due_margin 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
 
@@ -354,7 +354,7 @@ def test_zone_wait_feature_is_silent_when_congestion_off():
 
     仿真侧：① 关时 `_drive` 根本不申请区段（直行分支），等待状态永不存在；特征侧仍须读
     `ctx.constraints.congestion` 静默——快照里带着值也**不得**外泄给策略。
-    判据双向：全开档必须非零（否则"关时恒 0"恒真、抓不住任何东西），关掉档必须全 0。
+    判据双向：全开配置必须非零（否则"关时恒 0"恒真、抓不住任何东西），关态必须全 0。
     """
     inst = load_mk("mk01")
     cfg = SimConfig()
@@ -366,7 +366,7 @@ def test_zone_wait_feature_is_silent_when_congestion_off():
     off = full.with_off("congestion")
     col = lambda cons: vehicle_features(                                    # noqa: E731
         snap, build_ctx_for_unit_test(inst, lay, constraints=cons))[:, 10]
-    assert col(full).max() > 0.0, "全开档 zone_wait 维恒 0——判据失去意义"
+    assert col(full).max() > 0.0, "全开配置 zone_wait 维恒 0——判据失去意义"
     assert np.all(col(off) == 0.0), (
         f"① 关时 zone_wait 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
 
@@ -377,7 +377,7 @@ def test_rework_cnt_feature_is_silent_when_rework_off():
 
     仿真侧：④ 关时 `MachineSim.run` 的重做环一次不进（`rework_events` 恒 0）、逐作业计数恒 0；
     特征侧仍须读 `ctx.constraints.rework` 静默——快照里带着值也不得外泄。
-    判据双向：全开档必须非零，关掉档必须全 0。
+    判据双向：全开配置必须非零，关态必须全 0。
     """
     inst = load_mk("mk01")
     cfg = SimConfig()
@@ -390,7 +390,7 @@ def test_rework_cnt_feature_is_silent_when_rework_off():
     off = full.with_off("rework")
     col = lambda cons: job_features(                                        # noqa: E731
         snap, build_ctx_for_unit_test(inst, lay, m_ref, constraints=cons))[:, 8]
-    assert col(full).max() > 0.0, "全开档 rework_cnt 维恒 0——判据失去意义"
+    assert col(full).max() > 0.0, "全开配置 rework_cnt 维恒 0——判据失去意义"
     assert np.all(col(off) == 0.0), (
         f"④ 关时 rework_cnt 维仍报 {col(off).max()}——特征层没读约束开关（假信号）")
 

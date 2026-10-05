@@ -29,10 +29,10 @@ SimPy + 每条链独立的 numpy 流亦然）。**两个例外**：
 ⚠️ **`--device`（2026-10-04，GPU 批次）默认 `cpu`**：CUDA 只影响**算在哪**，不影响任何公式。
 本仓测试环境是 CPU-only torch（`cuda.is_available()=False`）；GPU 训练用
 `D:/anaconda/envs/py312/python.exe`（torch 2.13.0+cu126，RTX 4060 8 GB）。本机实测（MK01、
-`route_k=2`、G=1/G=4、预热后中位 3 次）：批重算的批量是 Σn_g（数百到数千），GPU 在这一档
-有优势；但**在线前向是 batch 1，GPU eager 在那一档更慢**（kernel 启动开销，见
+`route_k=2`、G=1/G=4、预热后中位 3 次）：批重算的批量是 Σn_g（数百到数千），GPU 在这一情形
+有优势；但**在线前向是 batch 1，GPU eager 在那一情形更慢**（kernel 启动开销，见
 `progress-log` §36.3）⟹ "整策略上 GPU" 只与 CPU 批量化打平（G=1 1.68 vs 1.55 s/步），
-**不是最优**；把两段分设备的"分工"档（roll 在 CPU、重算在 GPU）实测约 **2.6×**（G=1 1.17、
+**不是最优**；把两段分设备的"分工"方案（roll 在 CPU、重算在 GPU）实测约 **2.6×**（G=1 1.17、
 G=4 5.00 s/步，基准 3.00/12.75），**本批未实现为开关**（需两模型或逐步搬模型的机制，
 如实声明）。本节数字与 `progress-log` §36 的三段成本表可互相对照。
 
@@ -51,11 +51,11 @@ G=4 5.00 s/步，基准 3.00/12.75），**本批未实现为开关**（需两模
 候选路径里由策略选（① 拥堵必须开，否则入口显式报错）。它同时透传进**评估**：训练开、
 评估关 = 用另一个策略评估，且**静默**（同 `constraints` 的 R2 理由）。
 
-⚠️ **`--prefs`（A 主对比的单目标档，2026-10-05）默认 `None` = 用 f^ref 派生的 `w`（逐位不变）**：
+⚠️ **`--prefs`（A 主对比的单目标配置，2026-10-05）默认 `None` = 用 f^ref 派生的 `w`（逐位不变）**：
 给定时**取代** `w`（不是相乘），表达 spec §6.1 第 ② 层的"N 组权重"——用户裁定 N=3，即
 one-hot `(1,0,0)` / `(0,1,0)` / `(0,0,1)` = 纯 makespan / 纯 energy / 纯 TWT 的单目标 GRPO。
 组内 z 化把总尺度消掉 ⟹ one-hot 的原始量纲（makespan ~10²、energy ~10¹、TWT ~10¹）不进优势，
-prefs 只改目标的相对权重。⚠️ 档 A（⑧ 交期关）的 TWT ≡ 0 ⟹ 纯 TWT 档的奖励恒 0、
+prefs 只改目标的相对权重。⚠️ 报告档 A（⑧ 交期关）的 TWT ≡ 0 ⟹ 纯 TWT 配置的奖励恒 0、
 优势恒 0（**空转**）——开跑前先看 2 步的 `r_std`/`grad_norm`，退化就跑不出有意义的数。
 
 ⚠️ `--resume` 只在 `run_dir/ckpt.pt` **已存在**时生效（`runner.resume_training` 的既有语义）：
@@ -149,7 +149,7 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     ⚠️ `route_k` 同理（R 头恢复后）：训练开路线头（`route_k=2`）而评估关着 = 用**另一个策略**
     评估（恒走最短路的那一个），读数与训练不对应，且**静默**——故与 `constraints` 一样必须透传。
     ⚠️ **`route_zones` / `geom_bias` / `pm_head` / `charge_head` / `batch_head` 同型**
-    （2026-10-05 基线档接线；`batch_head` 随 ⑩ 拼批头加入）：
+    （2026-10-05 全开配置接线；`batch_head` 随 ⑩ 拼批头加入）：
     它们每一个都改变**策略看到的输入或动作空间**——训练开、评估关 = 用**另一个策略**评估。
     `cfg` 里的 `agv_failover` / `machine_age_failure` 是**动力学**开关，随 `cfg` 一并到达，同理必须同源。
     **本函数的每个开关都要与 `main` 传给 `joint_chain_step` 的那一份逐字相同。**
@@ -163,7 +163,7 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     - `rule_makespan_same_constraints` = **同约束集**的规则 rollout（`constraints=` 与训练
       同一份）。约束组消融（B）里 policy 跑的是"关掉几条"的问题，拿"全开"的规则当基线
       是**易问题比难问题**（`progress-log.md` §52.2 第 2 条）——本栏补上同口径的对照。
-      档 B（全开）两栏相等；档 A（全关）两栏差很大（mk01：117.8 vs 73.0）。
+      报告档 B（全开）两栏相等；报告档 A（全关）两栏差很大（mk01：117.8 vs 73.0）。
     ⚠️ 两栏都**必须**报：删掉 `rule_makespan` 会切断 f^ref 的锚，删掉同约束栏则消融对照失真。
     """
     # 同约束集规则的惰性缓存：一次 rollout、全部评估轮次复用（规则是确定性的，不需重算）。
@@ -172,7 +172,7 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     def _rule_same_constraints() -> float:
         """同约束集的规则基线 makespan（`rollout`，seed_chain=0，**与训练同一份 constraints**）。
 
-        ⚠️ 与 `rule` 形参（全约束锚）是两个不同的量：只在档 B（全开）下两者相等。
+        ⚠️ 与 `rule` 形参（全约束锚）是两个不同的量：只在报告档 B（全开）下两者相等。
         用 `seed_chain=0` 与 `rule` 同一条随机链——两栏的差只来自约束集。
         """
         if not rule_same:
@@ -209,7 +209,7 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
             #（`max(completes)`），单看它会读出"小得多的 makespan"这种假改进。
             jobs.append(int(met["jobs_done"]))
             hits.append(bool(met["horizon_hit"]))
-            if t3:      # 退化守卫（上界）的动作分布读数：只在 T3 档报
+            if t3:      # 退化守卫（上界）的动作分布读数：只在 T3 打开时报
                 charge_use.append(action_usage(dec, "C",
                                                lambda a: a != CHARGE_CAND_SKIP))
                 pm_now.append(action_usage(dec, "M", lambda a: a == PM_CAND_NOW))
@@ -260,7 +260,7 @@ def main() -> None:
     #    的 prefs 缺省路径与今日同一表达式）。
     ap.add_argument("--prefs", type=float, nargs=3, default=None, metavar=("P1", "P2", "P3"),
                     help="固定偏好权重（三个浮点，顺序 = makespan/energy/TWT）：给定时"
-                         "**取代** f^ref 派生的 w（**不是相乘**）。单目标档用 one-hot，如 "
+                         "**取代** f^ref 派生的 w（**不是相乘**）。单目标配置用 one-hot，如 "
                          "`--prefs 1 0 0` = 纯 makespan、`--prefs 0 1 0` = 纯 energy、"
                          "`--prefs 0 0 1` = 纯 TWT。默认 None = 用 w（逐位不变）。"
                          "⚠️ 组内 z 化把总尺度消掉 ⟹ one-hot 的原始量纲不进优势；"
@@ -282,8 +282,8 @@ def main() -> None:
     ap.add_argument("--pm-head", action="store_true",
                     help="⑫ 维护头（M）：默认关（规则自动保养，逐位等于既有读数）；"
                          "开启后机台在两件之间由策略选 {现在保养, 不保养}（要求 ⑫ 维护开启；"
-                         "MK01 默认 pm_interval=120 从不逾期，机制验证请配短间隔档）")
-    # ── 基线档接线（2026-10-05）：以下五个开关都是**默认关 ⟹ 逐位不变** ──
+                         "MK01 默认 pm_interval=120 从不逾期，机制验证请配短间隔验证档）")
+    # ── 全开配置接线（2026-10-05）：以下五个开关都是**默认关 ⟹ 逐位不变** ──
     # ⚠️ 它们每一个都改变**策略看到的输入或动作空间**，所以训练与评估**必须逐字同源**
     #（`_make_eval_fn` 的 docstring 已写）——训练开、评估关 = 用另一个策略评估。
     ap.add_argument("--route-zones", action="store_true",
@@ -300,13 +300,13 @@ def main() -> None:
                          "（要求 ⑪ 充电开启）")
     ap.add_argument("--multi-drop", action="store_true",
                     help="⑩ multi-drop 行程模型（一趟 = 一个取货点 + 多个卸货点）；"
-                         "⚠️ 模型变更：打开后与旧档读数不可比")
+                         "⚠️ 模型变更：打开后与旧配置读数不可比")
     ap.add_argument("--batch-head", action="store_true",
                     help="⑩ 拼批头（在预构造的批次候选里选；需 --multi-drop）；默认关")
     ap.add_argument("--agv-failover", action="store_true",
                     help="⑨ 故障 failover：默认关（在途任务滞留在车上）。开启后停机期间把"
                          "车上/队列里的任务退回、交**未停机**的别的车。**改动力学**，"
-                         "makespan 会变（高频档实测 139.09→128.40，见 progress-log §43）")
+                         "makespan 会变（高频验证档实测 139.09→128.40，见 progress-log §43）")
     ap.add_argument("--machine-age-failure", action="store_true",
                     help="③ 役龄故障率：默认关（`fail_rate` 常数、无记忆）。开启后故障率随"
                          "`pm_clock`（主轴工时、保养归零）按 Weibull 递增风险上升 ⟹ ③ 有记忆、"
@@ -334,43 +334,43 @@ def main() -> None:
     ap.add_argument("--recompute-chunk", type=int, default=0, metavar="N",
                     help="重算的**分段+梯度检查点**（2026-10-05，mk10 显存闸）：0 = 关（默认，"
                          "一次整批前向，逐位不变）。**批大到被显存挡住时**才需要它——例如 mk10 "
-                         "全开档（`route_k=2`+R2）批 ≈ 8 链 × 440 决策 ≈ 3520，实测峰值 49.58 GB"
+                         "全开配置（`route_k=2`+R2）批 ≈ 8 链 × 440 决策 ≈ 3520，实测峰值 49.58 GB"
                          "（8 GB 卡）。⚠️ 分段**必须配检查点**才降峰值（单分段不降：图与整批相同）。"
-                         "实测 mk10 全开档：**128 → 峰值 1.32 GB、步时 126 s**（未分段 49.58 GB / "
+                         "实测 mk10 全开配置：**128 → 峰值 1.32 GB、步时 126 s**（未分段 49.58 GB / "
                          "171 s——省显存与提速同时发生，因为未分段那一路在撞分配器重试）。"
                          "但**显存够用时它更慢**（反向要按段重算）：**它是换显存的手段，不是提速的**")
     ap.add_argument("--pm-interval", type=float, default=None, metavar="MIN",
                     help="⑫ 的保养间隔 [主轴分钟]（**机制验证档**）。默认 None = SimConfig 的 "
                          "120——MK01 每机负载 ~25.5 主轴分钟 ⟹ **从不逾期**，⑫ 的被迫激活量"
                          "（`pm_events_forced`）恒 0、T3 的 ⑫ 罚项不被激活（这是 T3 标定用"
-                         "短间隔档的理由，见 env/t3_budget.py）。改它 = 改动力学，读数与默认档不可比")
+                         "短间隔验证档的理由，见 env/t3_budget.py）。改它 = 改动力学，读数与默认配置不可比")
     ap.add_argument("--agv-battery-kwh", type=float, default=None, metavar="KWH",
                     help="把车队电池全换成该容量 [kWh]（**机制验证档**，同 test_charge_head 的"
                          "小电池口径：0.10 + `battery_low=0`）。默认 None = 布局默认 2–4 kWh——"
                          "一个 episode 放不空 ⟹ ⑪ 的耗尽激活量（`agv_dry_events`）恒 0，"
-                         "T3 的 ⑪ 罚项无从生效。**改布局 ⟹ 读数与默认档不可比**（电池是布局属性）")
+                         "T3 的 ⑪ 罚项无从生效。**改布局 ⟹ 读数与默认配置不可比**（电池是布局属性）")
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="策略所在设备：默认 cpu（本仓测试环境是 CPU-only torch）。"
                          "cuda = 整步（在线前向 + 批重算）都在 GPU 上——重算的批大小是 "
-                         "Σn_g（数百到数千），GPU 在这一档对 CPU 有优势；但**在线前向是 "
-                         "batch 1**，GPU eager 在那一档反而慢（kernel 启动开销，"
+                         "Σn_g（数百到数千），GPU 在这一情形对 CPU 有优势；但**在线前向是 "
+                         "batch 1**，GPU eager 在那一情形反而慢（kernel 启动开销，"
                          "见 progress-log §36.3）⟹ 本开关是「整策略」粒度，"
                          "不是最优分工；分工方案（roll 在 CPU、重算在 GPU）见 §36")
     ap.add_argument("--parallel", action="store_true",
                     help="链级多进程（2026-10-04 并行批次）：G 条链铺到 worker 进程，worker "
                          "只跑 CPU（仿真 + 在线前向），主进程继续用 --device 做重算/反向。"
                          "默认关（原串行路径，读数逐位不变）。⚠️ 开启后采样流改为**逐链"
-                         "独立**（否则消费次序不确定）⟹ 与串行档同 seed 的数值不同"
+                         "独立**（否则消费次序不确定）⟹ 与串行配置同 seed 的数值不同"
                          "（第九次读数作废，见 progress-log §39）")
     ap.add_argument("--worker-device", default="cpu", choices=("cpu", "cuda"),
-                    help="并行档 worker 的策略设备（2026-10-04 worker 设备批次）："
-                         "cpu = 默认档（worker 直接读共享内存镜像，每步零参数 IPC）；"
+                    help="并行配置 worker 的策略设备（2026-10-04 worker 设备批次）："
+                         "cpu = 默认配置（worker 直接读共享内存镜像，每步零参数 IPC）；"
                          "cuda = worker 在自己的进程里建 CUDA 上下文 + GPU 副本，在线前向"
                          "走 CUDA 图（8 个上下文要显存，失败显式报错、不退回 CPU worker）")
     ap.add_argument("--workers", type=int, default=None,
-                    help="并行档的 worker 进程数（默认 min(核数, G)）")
+                    help="并行配置的 worker 进程数（默认 min(核数, G)）")
     args = ap.parse_args()
-    # `--prefs`（A 主对比的单目标档）：默认 None ⟹ 用 f^ref 派生的 w，逐位不变。
+    # `--prefs`（A 主对比的单目标配置）：默认 None ⟹ 用 f^ref 派生的 w，逐位不变。
     # ⚠️ 开工前就校验（守卫在 `group_rel.check_prefs`，与 `joint_chain_step` 入口同一份）——
     #    非法 prefs 的代价不该是"跑完 20 分钟参考运行才报错"。
     prefs = None if args.prefs is None else check_prefs(args.prefs)
@@ -400,8 +400,8 @@ def main() -> None:
     cfg = SimConfig(agv_failover=args.agv_failover,
                     machine_age_failure=args.machine_age_failure,
                     multi_drop=args.multi_drop)
-    # ⚠️ 小电池档（可选）：电池是**布局**属性、`battery_low` 是 **cfg** 属性，两者必须一起改
-    #    （同 `test_charge_head` 的口径：只改电池不改 `battery_low`，规则档会在低电就补电、
+    # ⚠️ 小电池验证档（可选）：电池是**布局**属性、`battery_low` 是 **cfg** 属性，两者必须一起改
+    #    （同 `test_charge_head` 的口径：只改电池不改 `battery_low`，规则配置会在低电就补电、
     #    **到不了耗尽**）。`battery_low` 必须在 `build_training_setup` **之前**进 cfg——
     #    否则 `ctx` 与 `ReferenceObjectives.of` 会按两份 cfg 取参考运行（m_ref 与 f^ref
     #    不同源，静默错位）。车队的电池替换在布局采样之后做（布局是 `build_training_setup` 产的）。
@@ -430,7 +430,7 @@ def main() -> None:
           f"｜route_k={args.route_k}｜pm_head={args.pm_head}｜device={pol.device}"
           f"｜parallel={args.parallel}(workers={args.workers or 'auto'},"
           f"worker_device={args.worker_device})")
-    # 基线档的开关逐个打印——**训练与评估是否同源**只看这一行就能核（见 `_make_eval_fn`）
+    # 全开配置的开关逐个打印——**训练与评估是否同源**只看这一行就能核（见 `_make_eval_fn`）
     print(f"[m13] 开关（训练=评估，同源）：route_zones={args.route_zones} "
           f"geom_bias={args.geom_bias} pm_head={args.pm_head} "
           f"charge_head={args.charge_head} batch_head={args.batch_head} "
@@ -441,13 +441,13 @@ def main() -> None:
     print(f"[m13] 约束组={args.constraints}｜优势口径={args.adv_mode}"
           f"（这两项不在上面的同源清单里——评估不跑优势，约束组由 build_training_setup 三处同源）")
     if args.agv_battery_kwh is not None:
-        print(f"[m13] ⚠️ 小电池档：车队电池全换 {args.agv_battery_kwh} kWh、battery_low=0 "
-              f"（电池是**布局**属性 ⟹ 改动力学，与默认档读数不可比；⑪ 这才可能跑到耗尽）")
+        print(f"[m13] ⚠️ 小电池验证档：车队电池全换 {args.agv_battery_kwh} kWh、battery_low=0 "
+              f"（电池是**布局**属性 ⟹ 改动力学，与默认配置读数不可比；⑪ 这才可能跑到耗尽）")
     if args.pm_interval is not None:
-        print(f"[m13] ⚠️ 短保养间隔档：pm_interval={args.pm_interval}（改动力学；⑫ 的被迫激活量"
+        print(f"[m13] ⚠️ 短保养间隔验证档：pm_interval={args.pm_interval}（改动力学；⑫ 的被迫激活量"
               f" `pm_events_forced` 这才可能非零）")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
-    print(f"[m13] prefs={prefs}（None = 用 w；给定时**取代** w——A 主对比的单目标档："
+    print(f"[m13] prefs={prefs}（None = 用 w；给定时**取代** w——A 主对比的单目标配置："
           f"one-hot (1,0,0)/(0,1,0)/(0,0,1) = 纯 makespan/energy/TWT）")
     # T3：预算表查不到实例 ⟹ `T3Budget` 显式报错（未标定实例不得静默无罚项）。
     # ⚠️ 可控性守卫在**开工前**查（同一个函数也守在 `joint_chain_step` 入口）——

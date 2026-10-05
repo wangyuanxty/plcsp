@@ -1,6 +1,6 @@
 """链级多进程池（2026-10-04 并行批次）：把 G 条独立链铺到 worker 进程上跑。
 
-**为什么**：MK01、G=8、route_k=1 实测（`docs/progress-log.md` §36–§38）——CUDA 档整步
+**为什么**：MK01、G=8、route_k=1 实测（`docs/progress-log.md` §36–§38）——CUDA 配置整步
 1.78 s 里约 **1.4 s（79%）是每条链各自的在线部分**：SimPy 事件循环 660 ms + 在线打分头
 330 ms + 采样前向 300 ms + build_tok 80 ms + snapshot 53 ms。这些量与其它链无关
 （第 g 条链的扰动种子 = `seed*SEED_STRIDE + g`），却挤在 `joint_chain_step` 的串行循环里。
@@ -17,10 +17,10 @@
      之后的共享内存模块；主进程每步用 `mirror.load_state_dict(policy.state_dict())`
      **原地**刷新（`copy_`，不换 storage），worker 直接读同一块内存 ⟹ **每步零参数 IPC**
      （不是每步复制 4.3 MB × G）。
-   - `"cuda"`（新增可选档）：worker **在自己的进程里**建 CUDA 上下文与 GPU 副本（spawn 的
+   - `"cuda"`（新增可选值）：worker **在自己的进程里**建 CUDA 上下文与 GPU 副本（spawn 的
      子进程不继承父进程的 CUDA 上下文），每步把共享镜像 H2D 刷进 GPU 副本；在线前向走
      `LayoutEncoder` 的 CUDA 图快路（batch=1、无梯度）。采样流随之用 CUDA generator
-     ——**与 CPU 档不是同一条流，数值会变**（如实记录；默认档不受影响）。
+     ——**与 CPU 配置不是同一条流，数值会变**（如实记录；默认配置不受影响）。
      worker 建上下文 / 显存不足 / 建图失败一律**显式报错**，绝不悄悄退回 CPU worker。
 2. **不用 `fork`。** 用 `torch.multiprocessing` 的 **spawn** 上下文（Windows 默认即 spawn；
    torch 线程 + fork 不安全）。
@@ -30,14 +30,14 @@
 4. **不静默退回串行。** worker 起不来 / 数量不对 / 任务抛异常 / 超时 → `RuntimeError`，
    且池被显式终止，绝不改跑串行——那会让"并行没接上"变成看不见的性能回归。
 
-⚠️ **采样流的口径变了**（本批的数值代价，**第九次读数作废**）：串行档 G 条链**共用一条**
-`torch.Generator`、按链序消费；并行档每条链必须有自己的流（否则消费次序不确定），种子取
-`torch.Generator().manual_seed(seed*SEED_STRIDE + g)`——逐链独立且确定，但**与串行档同
+⚠️ **采样流的口径变了**（本批的数值代价，**第九次读数作废**）：串行配置 G 条链**共用一条**
+`torch.Generator`、按链序消费；并行配置每条链必须有自己的流（否则消费次序不确定），种子取
+`torch.Generator().manual_seed(seed*SEED_STRIDE + g)`——逐链独立且确定，但**与串行配置同
 seed 的数值不同**。`joint_chain_step(parallel=False)`（默认）走原串行路径，**逐位不变**。
 
-⚠️ **`worker_device="cuda"` 时另有一层设备差**：主进程在 CPU 时，并行档的在线前向浮点路径
-与采样流设备仍与串行 CPU 档不同（CPU 与 CUDA 的 generator 是两条流，§36.9）。跨档读数
-不可逐位互比；**同档同 seed 同 worker 数逐位可复现**（由测试钉住）。
+⚠️ **`worker_device="cuda"` 时另有一层设备差**：主进程在 CPU 时，并行配置的在线前向浮点路径
+与采样流设备仍与串行 CPU 配置不同（CPU 与 CUDA 的 generator 是两条流，§36.9）。跨配置读数
+不可逐位互比；**同配置同 seed 同 worker 数逐位可复现**（由测试钉住）。
 """
 from __future__ import annotations
 
@@ -61,8 +61,8 @@ from .group_rel import SEED_STRIDE, Decision, roll_chain
 from .policy import PolicyNet
 
 # worker 进程的全局状态——由 `_worker_init` 写入。spawn 的子进程不继承父进程内存，
-# 这里存的就是**本进程**从共享内存映射进来的策略镜像（CPU 档）或它在本进程 GPU 上的副本
-# （CUDA 档；CUDA 上下文必须在 worker 进程内建，见模块 docstring 硬口径 1）。
+# 这里存的就是**本进程**从共享内存映射进来的策略镜像（CPU 配置）或它在本进程 GPU 上的副本
+# （CUDA 配置；CUDA 上下文必须在 worker 进程内建，见模块 docstring 硬口径 1）。
 _WORKER: dict[str, Any] = {}
 
 # 允许的 worker 设备——**白名单**：写错名字当场报错，不静默按 CPU 跑。
@@ -117,7 +117,7 @@ def _worker_init(mirror: PolicyNet, started: Any = None, failed: Any = None,
             "父进程只传 CPU 共享镜像；CUDA 副本由 worker 在本进程内自建。")
     try:
         if worker_device == "cpu":
-            # 默认档：直接读同一块共享内存，每步**零参数 IPC**（与上一批逐位相同）。
+            # 默认配置：直接读同一块共享内存，每步**零参数 IPC**（与上一批逐位相同）。
             _WORKER["policy"] = mirror
             _WORKER["mirror"] = None
         elif worker_device == "cuda":
@@ -153,7 +153,7 @@ def _worker_init(mirror: PolicyNet, started: Any = None, failed: Any = None,
 
 def _worker_ping(_: int) -> tuple[int, str]:
     """启动探针：返回 (本 worker 的 pid, 策略设备)——父进程据此核对池真的能执行任务，
-    且**设备真的是请求的那一档**（CUDA 档若静默落回 CPU，这里当场露馅）。"""
+    且**设备真的是请求的那一种**（CUDA 配置若静默落回 CPU，这里当场露馅）。"""
     pol = _WORKER.get("policy")
     if pol is None:
         raise RuntimeError("worker 未初始化（`_worker_init` 没跑）——这是实现错误，"
@@ -190,12 +190,12 @@ def _sync_worker_policy() -> None:
 def _worker_run_chain(task: _Task) -> tuple[list[Decision], dict]:
     """worker 任务：跑**一条**链（`roll_chain` 原样调用，语义一位不改），返回决策 + 指标。
 
-    ⚠️ 采样流**逐链独立**：`seed_chain = seed*SEED_STRIDE + g`（与串行档的仿真扰动种子
-    同一个数）。串行档是 G 条链共用一条流、按链序消费——并行档做不到（消费次序不确定），
+    ⚠️ 采样流**逐链独立**：`seed_chain = seed*SEED_STRIDE + g`（与串行配置的仿真扰动种子
+    同一个数）。串行配置是 G 条链共用一条流、按链序消费——并行配置做不到（消费次序不确定），
     故口径改为逐链独立。这是本批**有意的数值变化**，见模块 docstring。
     ⚠️ 采样流的**设备跟随 worker 的策略设备**（CUDA 上 `torch.multinomial` 不接受 CPU
-    generator）——故 `worker_device="cuda"` 档用的是 CUDA generator，**与 CPU 档不是同一
-    条流**，数值会变（默认档不受影响）。
+    generator）——故 `worker_device="cuda"` 用的是 CUDA generator，**与 CPU 配置不是同一
+    条流**，数值会变（默认配置不受影响）。
     """
     (_g, seed_chain, inst, layout, dm, cfg, ctx, constraints,
      route_k, route_zones, geom_bias, pm_head, charge_head, batch_head) = task
@@ -229,16 +229,16 @@ class ChainWorkerPool:
                  start_timeout_s: float = 180.0, task_timeout_s: float = 900.0,
                  measure_ipc: bool = False) -> None:
         if policy.enc is None:
-            raise ValueError("并行档要求策略带编码器（enc）——无编码器的策略连打分头都没有，"
+            raise ValueError("并行配置要求策略带编码器（enc）——无编码器的策略连打分头都没有，"
                              "joint_chain_step 本就走不通。")
         if int(n_workers) < 1:
             raise ValueError(f"n_workers={n_workers} 非法：至少 1 个 worker。")
         if worker_device not in _WORKER_DEVICES:
             raise ValueError(f"worker_device={worker_device!r} 非法：只接受 {_WORKER_DEVICES}。")
         self._worker_device = str(worker_device)
-        # ⚠️ 先清编码器缓存再深拷贝：CUDA 档的 `enc._graphs` 里是 `torch.cuda.CUDAGraph`
+        # ⚠️ 先清编码器缓存再深拷贝：CUDA 配置的 `enc._graphs` 里是 `torch.cuda.CUDAGraph`
         #    对象（不可深拷贝、不可 pickle）。它们只是**缓存**，清掉与 `LayoutEncoder._apply`
-        #    的既有清法同义，下一次前向按需重建——不清则"CUDA 串行档之后转并行"会当场报错。
+        #    的既有清法同义，下一次前向按需重建——不清则"CUDA 串行配置之后转并行"会当场报错。
         if policy.enc is not None:
             policy.enc._graphs.clear()
             policy.enc._tid_cache.clear()
@@ -259,7 +259,7 @@ class ChainWorkerPool:
         self.last_return_bytes: int | None = None
         self.last_task_bytes: int | None = None
         self.last_sync_s: float | None = None       # 上一轮 run_chains 里单 worker 的最大同步耗时
-        # 上一轮里每个 worker 的健康度：ping 回来的 (pid, 设备) 里设备是否等于请求档
+        # 上一轮里每个 worker 的健康度：ping 回来的 (pid, 设备) 里设备是否等于请求值
         self.worker_devices: list[str] = []
         ctx = tmp.get_context("spawn")          # ⚠️ spawn，不是 fork（硬要求 2）
         t0 = time.perf_counter()
@@ -309,7 +309,7 @@ class ChainWorkerPool:
                 f"worker 数量不对：请求 {self._n_workers} 个，探针只回了 {len(pings)} 条"
                 "——显式报错，不退回串行。")
         self.worker_devices = [str(dev) for _pid, dev in pings]
-        # ⚠️ 设备核对：CUDA 档若哪个 worker 静默落回 CPU，这里当场报错（不静默收下）。
+        # ⚠️ 设备核对：CUDA 配置若哪个 worker 静默落回 CPU，这里当场报错（不静默收下）。
         wrong = [i for i, dev in enumerate(self.worker_devices)
                  if not dev.startswith(self._worker_device)]
         if wrong:
@@ -344,13 +344,13 @@ class ChainWorkerPool:
 
     @property
     def worker_device(self) -> str:
-        """worker 的策略设备档（`"cpu"` / `"cuda"`）——建池时请求的那一档。"""
+        """worker 的策略设备（`"cpu"` / `"cuda"`）——建池时请求的那一个值。"""
         return self._worker_device
 
     def _require_open(self, what: str) -> None:
         if self._closed or self._pool is None:
             raise RuntimeError(
-                f"进程池已关闭/终止，不能再调用 {what}——并行档不得静默回退串行"
+                f"进程池已关闭/终止，不能再调用 {what}——并行配置不得静默回退串行"
                 "（请新建 ChainWorkerPool）。")
 
     def sync_policy(self, policy: PolicyNet) -> None:
@@ -424,7 +424,7 @@ class ChainWorkerPool:
             # 注意：measure_ipc=True 时这两次 pickle 计入当步墙钟（约几 ms）。
             self.last_task_bytes = int(G) * len(pickle.dumps(tasks[0], protocol=pickle.HIGHEST_PROTOCOL))
             self.last_return_bytes = len(pickle.dumps(res, protocol=pickle.HIGHEST_PROTOCOL))
-        # 上一轮的每 worker 参数同步耗时（CUDA 档才有；CPU 档恒 0）。取**最大**值 = 该步
+        # 上一轮的每 worker 参数同步耗时（CUDA 配置才有；CPU 配置恒 0）。取**最大**值 = 该步
         # 关键路径上多付的同步钱（8 个 worker 各付各的，看最大值比看均值更贴近天花板）。
         with self._sync_times.get_lock():
             self.last_sync_s = max(self._sync_times[i] for i in range(self._n_workers))

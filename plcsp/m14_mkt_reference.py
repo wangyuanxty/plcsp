@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""MKT 上跑我们的参考调度，与已发表数字并列（P4-A Task 3；P4-B Task 4 改为**两档**）。
+"""MKT 上跑我们的参考调度，与已发表数字并列（P4-A Task 3；P4-B Task 4 改为**两个报告档**）。
 
 ⚠️ **P4-B 起运输走 MKT 行程时间矩阵**（`load_mkt` 造的实例自带 matrix 口径）——本表的 `ours`
 与对照列**共用同一份行程时间来源**（都是矩阵；P4-A 的「ours 跑在原始 MK 几何上」告诫**已作废**）。
@@ -9,16 +9,16 @@
 ③ HGS 原文的车队是 `U(0.8m, 1.2m)` 采样，本表 `v=m` 是**重建**（HA-DQN 表 8）。
 ⟹ 本表只可用于**量级 / 链路**核查；写成"我们 vs 已发表"的结论前，三条必须逐一声明。
 
-**两档（用户裁定 2026-10-03）**：每一 (实例 × 档) 一行。
+**两个报告档（用户裁定 2026-10-03）**：每一 (实例 × 报告档) 一行。
 
-- 档 A `A-MKT` = `ABLATION_GROUPS["None"]`——MKT（FJSP + 运输）**没有对应项**的机制全关，
+- 报告档 A `A-MKT` = `ABLATION_GROUPS["None"]`——MKT（FJSP + 运输）**没有对应项**的机制全关，
   是**退化特例**，用于与已发表数字对齐（⚠️ 只对齐**机制**维度——运输边界与仿真器仍不同，见上）；
-- 档 B `B-Full` = `ABLATION_GROUPS["Full"]`——机制全开。
-  两档的差别**只在机制**，运输口径相同（都是矩阵）。
+- 报告档 B `B-Full` = `ABLATION_GROUPS["Full"]`——机制全开。
+  两个报告档的差别**只在机制**，运输口径相同（都是矩阵）。
 
-⚠️ 档 B 开着 ⑪ 充电，而充电桩在矩阵里**没有对应项** ⟹ 显式选 `transport_unmapped="geometry"`
+⚠️ 报告档 B 开着 ⑪ 充电，而充电桩在矩阵里**没有对应项** ⟹ 显式选 `transport_unmapped="geometry"`
 （**声明式**几何降级），并把未映射路段的**段数与分钟数逐行带出**——论文必须如实声明
-「这一档里有 x% 的行程是几何口径补的」，不得说成「运输全部来自矩阵」。
+「本报告档里有 x% 的行程是几何口径补的」，不得说成「运输全部来自矩阵」。
 ⚠️ `horizon_hit` 逐行带出：矩阵口径下 makespan 大数倍，掐表会伪装成「更慢」。
 
 ⚠️ 术语：本模块描述自己的行为用平实说法——「与已发表数字并列」「复现保真度」，
@@ -59,7 +59,7 @@ def _same_fleet(spec: str | int, v: int, m: int) -> bool:
 
 def reference_table(names: tuple[str, ...], n_agv: int | None = None, seeds: int = 3,
                     tiers: tuple[str, ...] = ("A-MKT", "B-Full")) -> list[dict]:
-    """每 (实例 × 档) 一行：我们（参考调度）+ 已发表数字。
+    """每 (实例 × 报告档) 一行：我们（参考调度）+ 已发表数字。
 
     `n_agv=None` → 该实例的 **v = m**（HGS/HA-DQN 口径）。表里**必带车辆数列**，
     且 `benchmark` 自报对照列是 MKT、`ours_benchmark` 自报我们那列的口径——防与原始 MK 混表。
@@ -67,7 +67,7 @@ def reference_table(names: tuple[str, ...], n_agv: int | None = None, seeds: int
     HF2021 是异类，切到 `--n-agv 2` 后异类变成 HGS/HA-DQN——写死的脚注会**恰好说反**。
 
     ⚠️ 行程时间**一律来自矩阵**（`load_mkt` 造的实例自带 matrix 口径）。
-    ⚠️ 档 B 开着 ⑪ 充电，而充电桩在矩阵里**没有对应项** ⟹ 显式选
+    ⚠️ 报告档 B 开着 ⑪ 充电，而充电桩在矩阵里**没有对应项** ⟹ 显式选
        `transport_unmapped='geometry'` 并把段数/分钟数带进行里（**声明式**降级，不静默）。
     ⚠️ `horizon_hit` 必须随行带出：矩阵口径下 makespan 大数倍，掐表会伪装成「更慢」。
     ⚠️ 参考调度 = `rollout` 的默认口径（每工序取最短候选 + AGV 轮询派车），**未训练**；
@@ -86,7 +86,7 @@ def reference_table(names: tuple[str, ...], n_agv: int | None = None, seeds: int
                          "transport": got[0]["transport"],      # ⚠️ 取自仿真自报，不写死
                          "n_agv": v, "layout_m": m,
                          "ours": float(st.mean(ms)), "ours_benchmark": OURS_BENCHMARK,
-                         # 三目标里的能耗（kWh）逐行带出——两档的运输/约束差别必须看得到
+                         # 三目标里的能耗（kWh）逐行带出——两个报告档的运输/约束差别必须看得到
                          "energy": float(st.mean([r["energy"] for r in got])),
                          "unmapped_legs": sum(r["unmapped_legs"] for r in got),
                          "unmapped_min": sum(r["unmapped_min"] for r in got),
@@ -107,15 +107,15 @@ def main() -> None:
     args = ap.parse_args()
     v = None if args.n_agv == "default" else int(args.n_agv)
     rows = reference_table(tuple(args.instances.split(",")), n_agv=v, seeds=args.seeds)
-    print(f"⚠️ 口径声明：本表两档都跑在**行程时间矩阵**（MKT）上；ours 的行程来源 = {OURS_BENCHMARK}，"
+    print(f"⚠️ 口径声明：本表两个报告档都跑在**行程时间矩阵**（MKT）上；ours 的行程来源 = {OURS_BENCHMARK}，"
           f"与对照列相同（P4-A 的「ours 跑在几何上」告诫已作废）")
     print("⚠️ 但不可直接并列：本仓 makespan 含装卸站**入场段 + 回站段**（到站记完工），"
           "已发表 Cmax 止于末工序且丢 LU；仿真器也不同。本表只作量级 / 链路核查。")
-    print("档 A-MKT = ABLATION_GROUPS['None']（MKT 没有对应项的机制全关，退化特例）；"
-          "档 B-Full = 机制全开。两档的差别**只在机制**，行程来源相同。")
-    print("⚠️ 未映射路段：档 B 的充电桩在矩阵里没有对应项 ⟹ 那些腿用**几何口径**补"
+    print("报告档 A-MKT = ABLATION_GROUPS['None']（MKT 没有对应项的机制全关，退化特例）；"
+          "报告档 B-Full = 机制全开。两个报告档的差别**只在机制**，行程来源相同。")
+    print("⚠️ 未映射路段：报告档 B 的充电桩在矩阵里没有对应项 ⟹ 那些段用**几何口径**补"
           "（声明式降级）。下表逐行给段数与分钟数——论文须如实声明其占比。")
-    print(f"{'实例':<7}{'档':<8}{'基准':<6}{'车辆数':>7}{'我们(参考)':>12}"
+    print(f"{'实例':<7}{'报告档':<8}{'基准':<6}{'车辆数':>7}{'我们(参考)':>12}"
           f"{'未映射(段/min)':>16}{'掐表':>6}{'HGS':>9}{'HA-DQN':>9}{'HF2021':>10}")
     for r in rows:
         print(f"{r['inst']:<7}{r['tier']:<8}{r['benchmark']:<6}{r['n_agv']:>7}{r['ours']:>12.1f}"
