@@ -234,9 +234,15 @@ F 敏感性  ·  G HGS  ·  E O3b（需要先做 O1 的加长实验）
 | `charge_head`（⑪） | `joint_chain_step` | **True** |
 | `agv_failover`（⑨） | `SimConfig` | **True** |
 | `machine_age_failure`（③） | `SimConfig` | **True** |
+| **`multi_drop`（⑩ 行程模型）** | `SimConfig` | **True**（2026-10-05 用户裁定，见下） |
+| **`batch_head`（⑩ 拼批头）** | `joint_chain_step` | **True**（同上） |
 | **`recompute_chunk`** | `joint_chain_step` | **128**（⚠️ 见下） |
-| `batch_head`（⑩） | — | ⛔ **未实现**（见 §9.5） |
 | T3 | — | ⛔ **未实现** |
+
+⚠️ **`multi_drop = True` 是模型补完，不是加开关**：`max_agv_capacity` 此前是**死参数**
+（模型给了容量、任务结构永远用不上）。**打开后与单卸货点的旧读数断链**——
+但旧读数**已作废九次**，这条不构成理由。
+**且它真的改变结果**：规则档下 mk07 makespan **−4.8%**、mk10 **−2.3%**（`progress-log` §48）。
 
 ⚠️ **`recompute_chunk` 是唯一"不改数值语义"的开关**（它只改"分几次算"）——
 **实测 mk10 全开档：0 → 峰值 49.58 GB；128 → 1.32 GB、步时还快 1.36×**（`progress-log` §47）。
