@@ -74,16 +74,28 @@ OBJECTIVE_NAMES = ("makespan", "energy_kwh", "twt")
 
 @dataclass(frozen=True)
 class EvalSpec:
-    """一轮 NSGA-II 的**评价口径**。口径是问题的属性，必须随结果一起报出。"""
+    """一轮 NSGA-II 的**评价口径**。口径是问题的属性，必须随结果一起报出。
+
+    ⚠️ **三个 `SimConfig` 级开关（2026-10-05，A 主对比）默认全 `False` = 逐位等于既有读数**：
+    DRL 的两档（`m13 --constraints None/Full`）跑在 `SimConfig(multi_drop=True,
+    agv_failover=True, machine_age_failure=…)` 上（`experiment-plan.md` §9.7），基线必须
+    **同一套动力学**才可比——`multi_drop` 改交付模型、`agv_failover` 改 ⑨ 停机期间的任务
+    归属、`machine_age_failure` 改 ③ 的故障率。缺一个就是"两个问题各跑各的"。
+    """
 
     tier: str = "A-MKT"
     seed_chain: int = 0
     n_agv: int = 3
     transport_unmapped: str = "geometry"
     agv_genes: bool = False
+    multi_drop: bool = False
+    agv_failover: bool = False
+    machine_age_failure: bool = False
 
     def cfg(self) -> SimConfig:
-        return SimConfig(n_agv=self.n_agv, transport_unmapped=self.transport_unmapped)
+        return SimConfig(n_agv=self.n_agv, transport_unmapped=self.transport_unmapped,
+                         multi_drop=self.multi_drop, agv_failover=self.agv_failover,
+                         machine_age_failure=self.machine_age_failure)
 
 
 def transport_task_count(inst: Instance) -> int:
@@ -202,6 +214,10 @@ class Nsga2Result:
     horizon_hits: int
     unmapped_legs: int
     agv_genes: bool
+    # 评价的 `SimConfig` 级开关（`EvalSpec` 的三个）——随结果一起报，别让口径只活在调用参数里
+    multi_drop: bool = False
+    agv_failover: bool = False
+    machine_age_failure: bool = False
 
     def summary(self) -> str:
         """一段可粘进报告的文本（口径 + 前沿 + 代价）。"""
@@ -210,6 +226,8 @@ class Nsga2Result:
             f"NSGA-II（pymoo {PYMOO_VERSION}，Apache-2.0）｜档 {self.tier}"
             f"｜seed={self.seed}｜sim_seed_chain={self.seed_chain}"
             f"｜pop={self.pop_size}×gen={self.n_gen}｜车号块={self.agv_genes}",
+            f"cfg：n_agv={self.n_agv}｜multi_drop={self.multi_drop}"
+            f"｜agv_failover={self.agv_failover}｜machine_age_failure={self.machine_age_failure}",
             f"目标 = {OBJECTIVE_NAMES[0]} / {OBJECTIVE_NAMES[1]} / {OBJECTIVE_NAMES[2]}"
             f"（本仓 DES，rollout 规则派车）",
             f"代价：理论仿真次数 = pop×(gen+1) = {theory}；实测 = {self.n_eval}"
@@ -255,7 +273,9 @@ def run_nsga2(inst: Instance, spec: EvalSpec, *, pop_size: int = 8, n_gen: int =
                        seed_chain=spec.seed_chain, pop_size=pop_size, n_gen=n_gen,
                        n_eval=problem.n_eval, wall_s=wall, sim_s=problem.sim_s,
                        horizon_hits=problem.horizon_hits, unmapped_legs=problem.unmapped_legs,
-                       agv_genes=spec.agv_genes)
+                       agv_genes=spec.agv_genes, multi_drop=spec.multi_drop,
+                       agv_failover=spec.agv_failover,
+                       machine_age_failure=spec.machine_age_failure)
 
 
 def main() -> None:
@@ -271,6 +291,14 @@ def main() -> None:
     ap.add_argument("--n-agv", default="default",
                     help='"default" = 该实例的车数设定（MKT: v=m；几何: 3）')
     ap.add_argument("--agv-genes", action="store_true", help="额外编码每趟任务的车号")
+    # ⚠️ 三个 `SimConfig` 级开关（2026-10-05，A 主对比）默认全关 ⟹ 既有读数逐位不变。
+    #    DRL 两档跑在它们上面（§9.3/§9.7），基线要同口径时打开对应的那几个。
+    ap.add_argument("--multi-drop", action="store_true",
+                    help="⑩ multi-drop 行程模型（DRL 两档都开；缺它就是另一个交付模型）")
+    ap.add_argument("--agv-failover", action="store_true",
+                    help="⑨ 故障 failover（⑨ 关时惰性）")
+    ap.add_argument("--machine-age-failure", action="store_true",
+                    help="③ 役龄故障率（档 B 开、档 A 关）")
     args = ap.parse_args()
 
     if args.geometry:
@@ -283,7 +311,9 @@ def main() -> None:
         inst, default_v = mkt.base, mkt.n_agv
     v = default_v if args.n_agv == "default" else int(args.n_agv)
     spec = EvalSpec(tier=args.tier, seed_chain=args.seed_chain, n_agv=v,
-                    agv_genes=args.agv_genes)
+                    agv_genes=args.agv_genes, multi_drop=args.multi_drop,
+                    agv_failover=args.agv_failover,
+                    machine_age_failure=args.machine_age_failure)
     res = run_nsga2(inst, spec, pop_size=args.pop, n_gen=args.gens, seed=args.seed)
     print(f"实例={args.inst}（{'几何' if args.geometry else 'MKT 矩阵'}口径，v={v}）")
     print(res.summary())

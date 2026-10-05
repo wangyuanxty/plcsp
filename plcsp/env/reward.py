@@ -34,7 +34,12 @@ def reward_weights(f_ref: tuple[float, float, float]) -> tuple[float, float, flo
 
 def scalar_reward(f: tuple[float, float, float], w: tuple[float, float, float],
                   prefs: tuple[float, float, float] | None = None) -> float:
-    """Σ wᵢ(−fᵢ)。`prefs` 为 C 阶段预留：给定时**取代** w（组内固定、跨组变化）。"""
+    """Σ wᵢ(−fᵢ)。`prefs`（spec §6.1 预留的签名）：给定时**取代** `w`（不是相乘）。
+
+    A 阶段用它表达"单目标档"——one-hot `(1,0,0)` = 纯 makespan；`None` = 用 f^ref 派生的 `w`
+    （既有读数靠这条，逐位不变）。组内 z 化会把总尺度消掉，故 one-hot 的原始量纲
+    （makespan ~10²、energy ~10¹、TWT ~10¹）不进优势，只改目标的相对权重。
+    """
     ww = prefs if prefs is not None else w
     return float(sum(-wi * fi for wi, fi in zip(ww, f)))
 

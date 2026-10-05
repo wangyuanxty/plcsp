@@ -131,8 +131,30 @@ def _check_adv_mode(adv_mode: str) -> None:
             "（消融 D：证明「组内相对」的那一半——std 归一化——是不是必要的）。")
 
 
+def check_prefs(prefs) -> tuple[float, float, float]:
+    """`prefs` 的入口守卫（A 主对比的单目标档）——三个**有限、非负、和 > 0** 的浮点。
+
+    ⚠️ one-hot（如 `(1,0,0)`）是**合法**输入：它就是"只优化 makespan"的单目标档的定义。
+    ⚠️ 全 0 不合法：奖励恒 0 ⟹ 优势恒 0 ⟹ **静默空转**（跑满 300 步、一步没学）。
+    这类失效在读数上表现为"这一档没效果"，必须挡在跑链之前。
+    CLI 侧（`m13_train_a`）在**开工前**调一次本函数（别等参考运行跑完才报错）。
+    """
+    p = tuple(float(x) for x in prefs)
+    if len(p) != 3:
+        raise ValueError(
+            f"prefs 必须是三个数（顺序 = makespan/energy/TWT），收到 {prefs!r}")
+    if any(not np.isfinite(x) for x in p) or any(x < 0.0 for x in p):
+        raise ValueError(f"prefs={p} 非法：三个权重必须有限且非负")
+    if sum(p) <= 0.0:
+        raise ValueError(
+            f"prefs={p} 全为 0：奖励恒 0 ⟹ 优势恒 0 ⟹ 静默空转（一步不学）。"
+            "单目标档请给 one-hot，如 (1,0,0)")
+    return p
+
+
 def _advantages(f_objs: np.ndarray, w: tuple[float, float, float],
-                adv_mode: str) -> torch.Tensor:
+                adv_mode: str,
+                prefs: tuple[float, float, float] | None = None) -> torch.Tensor:
     """组内优势 A（G 条链，float32）——两种口径（O1）。
 
     - `scalar`：r_g = Σᵢ wᵢ(−f_{g,i})，A = z(r)。⚠️ 这是**今日**的表达式（**公式**未变，
@@ -144,20 +166,29 @@ def _advantages(f_objs: np.ndarray, w: tuple[float, float, float],
       （`z(c·v)=z(v)`）——再按 w 合成，故 w 真正决定各目标的相对权重。
 
     `f_objs` 是 (G, 3) 的**原始目标值**（越小越好），float64（与奖励侧同精度口径）。
+
+    ⚠️ **`prefs`（2026-10-05，A 主对比的单目标档）**：给定时**取代** `w`（**不是相乘**）——
+    三者都是逐目标常数 ⟹ 组内 z 化把总尺度消掉，故 prefs 只改**目标的相对权重**、
+    不改优势的尺度（`scalar` 分支：`A = z(Σⱼ prefsⱼ(−fⱼ))`，one-hot `(1,0,0)` 就是
+    `A = z(−makespan)`）。`per_objective` 分支把合成权重换成 prefs，语义同型。
+    `None` = 用 `w`（**逐位等于既有读数**）。
     """
     _check_adv_mode(adv_mode)
+    if prefs is not None:
+        prefs = check_prefs(prefs)
     if adv_mode == "reinforce":
         # 消融 D 的对照：**只去掉"除以组内标准差"这一件事**。
         # GRPO 的定义特征是 A = (r − mean)/std；这里取 A = r − mean。
         # ⚠️ **刻意不减 std 之外的东西**：连均值也不减（A = r）会把**梯度尺度**也绑到 r 的量纲上，
         #    学习率得重调，测出来的是"两件事叠加"，不是"std 归一化有没有用"。只改一个变量。
-        r = np.asarray([scalar_reward(tuple(o), w) for o in f_objs], dtype=np.float64)
+        r = np.asarray([scalar_reward(tuple(o), w, prefs) for o in f_objs], dtype=np.float64)
         return torch.tensor(r - r.mean(), dtype=torch.float32)
     if adv_mode == "scalar":
-        r = np.asarray([scalar_reward(tuple(o), w) for o in f_objs], dtype=np.float64)
+        r = np.asarray([scalar_reward(tuple(o), w, prefs) for o in f_objs], dtype=np.float64)
         return torch.tensor(_z(r), dtype=torch.float32)
+    ww = w if prefs is None else prefs           # per_objective：合成权重同样被 prefs 取代
     z = np.stack([_z(-f_objs[:, i]) for i in range(f_objs.shape[1])], axis=1)   # (G, 3)
-    return torch.tensor(z @ np.asarray(w, dtype=np.float64), dtype=torch.float32)
+    return torch.tensor(z @ np.asarray(ww, dtype=np.float64), dtype=torch.float32)
 
 
 def op_feat(inst: Instance, job: int, oi: int, layout: Layout | None = None) -> list[float]:
@@ -1134,7 +1165,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      pool: "ChainWorkerPool | None" = None,
                      t3_lambda: np.ndarray | None = None,
                      t3_budget: T3Budget | None = None,
-                     t3_eta: float = 0.0) -> tuple[float, dict]:
+                     t3_eta: float = 0.0,
+                     prefs: tuple[float, float, float] | None = None) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
@@ -1241,6 +1273,17 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
       `diag["t3_ahat"]`（组内平均 â）、`diag["t3_pen_mean"]`（平均罚项，标量）。
       `r_mean` / `r_std` **仍是未加罚的奖励读数**（与历史口径同义，不因 T3 而变义）。
 
+    ⚠️ **`prefs`（固定偏好权重，2026-10-05——A 主对比的单目标档）**：默认 `None` = 用
+    `w = (1/f^ref)/Σ`（**逐位等于既有读数**）。给定时**取代** `w`（不是相乘）：三目标加权
+    标量化换成 `Σ prefsᵢ(−fᵢ)`，one-hot `(1,0,0)` 即"纯 makespan 的单目标 GRPO"。
+    本仓的 `scalar_reward(f, w, prefs)`（spec §6.1 预留的签名）就是这一处。
+    - **只改目标的相对权重，不改优势尺度**：`A = z(Σ prefsᵢ(−fᵢ))`，z 化把总尺度消掉
+      （逐目标原始量纲 makespan ~10² / energy ~10¹ / TWT ~10¹ 的差因此不进优势）。
+    - ⚠️ **T3 路径同吃 prefs**：罚项加在 `rewards`（= prefs 标量化）上再 z 化；
+      但 λ 的**有效强度**会被组内 σ(rewards) 缩放（设计 §3.3）——换 prefs 就换 σ，
+      λ 的名义值不变而实际力度变了。读 T3 档的消融时记住这条。
+    - 守卫：给定时必须是三个有限、非负、和 > 0 的数（全 0 ⟹ 静默空转，见 `check_prefs`）。
+
     ⚠️ **`parallel`（链级多进程，2026-10-04 并行批次）默认 `False` = 原串行路径，逐位不变。**
     `True` 时把 G 条链交给 `ChainWorkerPool`（spawn）——worker 跑
     `roll_chain` 的整段 episode（仿真 + 在线前向 + 决策记录），主进程只做重算/反向/
@@ -1293,6 +1336,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     **末轮**裁剪前的 `‖∂L/∂θ‖`——它非零即"这一轮确有梯度信号"（旧实现 `epochs≥2` 时恒为 0）。
     """
     _check_adv_mode(adv_mode)                   # O1：白名单先于一切（写错名不得先跑几分钟仿真）
+    if prefs is not None:                       # A 主对比的单目标档：非法 prefs 同样先挡
+        prefs = check_prefs(prefs)
     if parallel and pool is None:
         # ⚠️ 硬要求：不许静默退回串行——那样"并行没接上"会变成看不见的性能回归。
         raise ValueError(
@@ -1372,7 +1417,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)
-            rewards.append(scalar_reward(f, w))     # 奖励读数（与串行档同一运算次序）
+            rewards.append(scalar_reward(f, w, prefs))   # 奖励读数（与串行档同一运算次序；prefs 取代 w）
             mets.append(met)
     else:
         # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
@@ -1388,14 +1433,15 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)
-            rewards.append(scalar_reward(f, w))     # 奖励读数（诊断用；与历史同一运算次序）
+            rewards.append(scalar_reward(f, w, prefs))   # 奖励读数（诊断用；与历史同一运算次序）
             mets.append(met)
 
     # O1：两种优势口径的唯一分叉点（见 `_advantages`）。scalar 分支与历史表达式逐位相同。
     # T3：在**组内 z 化之前**逐链减罚项 `r'_g = r_g − Σᵢλᵢ·âᵢ,g`，再走同一个 `_z`
     #（设计 §3.2/§3.3 的 v1：罚项与目标共用 `scalar` 口径，λ 仍是单调旋钮）。
+    # ⚠️ `rewards` 已按 `prefs` 标量化（prefs 给定时取代 w）⟹ T3 路径同样吃 prefs。
     if t3_budget is None:
-        A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode)
+        A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode, prefs)
         t3_info: dict = {}
     else:
         assert t3_lambda is not None            # 入口守卫已校验成对

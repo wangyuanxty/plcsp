@@ -51,6 +51,13 @@ G=4 5.00 s/步，基准 3.00/12.75），**本批未实现为开关**（需两模
 候选路径里由策略选（① 拥堵必须开，否则入口显式报错）。它同时透传进**评估**：训练开、
 评估关 = 用另一个策略评估，且**静默**（同 `constraints` 的 R2 理由）。
 
+⚠️ **`--prefs`（A 主对比的单目标档，2026-10-05）默认 `None` = 用 f^ref 派生的 `w`（逐位不变）**：
+给定时**取代** `w`（不是相乘），表达 spec §6.1 第 ② 层的"N 组权重"——用户裁定 N=3，即
+one-hot `(1,0,0)` / `(0,1,0)` / `(0,0,1)` = 纯 makespan / 纯 energy / 纯 TWT 的单目标 GRPO。
+组内 z 化把总尺度消掉 ⟹ one-hot 的原始量纲（makespan ~10²、energy ~10¹、TWT ~10¹）不进优势，
+prefs 只改目标的相对权重。⚠️ 档 A（⑧ 交期关）的 TWT ≡ 0 ⟹ 纯 TWT 档的奖励恒 0、
+优势恒 0（**空转**）——开跑前先看 2 步的 `r_std`/`grad_norm`，退化就跑不出有意义的数。
+
 ⚠️ `--resume` 只在 `run_dir/ckpt.pt` **已存在**时生效（`runner.resume_training` 的既有语义）：
 没有 ckpt 就**从头跑**，而 `metrics.ndjson` 是**追加**打开的——此时文件里会出现**重复的 step 号**
 （前一段是废弃的尝试）。按 step 取最新一行即可；要干净曲线就换 `--run-dir` 或先删 run_dir。
@@ -64,7 +71,7 @@ from statistics import mean, pstdev
 
 import torch
 
-from .algo.group_rel import ADV_MODES, SEED_STRIDE, roll_chain
+from .algo.group_rel import ADV_MODES, SEED_STRIDE, check_prefs, roll_chain
 from .algo.policy import PolicyNet
 from .algo.runner import run_training
 from .algo.setup import build_setup
@@ -149,7 +156,30 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     ⚠️ **`t3`**：T3 **不改动力学、也不改策略输入**（罚项只在训练的优势上），故评估不需要它；
     但 T3 的上界判据（设计 §4.2"预算过紧会把动作推成单一取值"）要在**训练后的策略**上看——
     故 `t3=True` 时额外报两个动作使用率（⑪ 充电 / ⑫ 保养频率），供退化守卫读数。
+
+    ⚠️ **两栏规则基线（2026-10-05，A 主对比）**：
+    - `rule_makespan` = 调用方传入的 `rule`，锚在**十约束全开**的参考运行（`des.rollout` 的
+      默认口径）。它是 `f^ref` / `m_ref` 的锚，**不随 constraints 漂**（刻意的，勿改）。
+    - `rule_makespan_same_constraints` = **同约束集**的规则 rollout（`constraints=` 与训练
+      同一份）。约束组消融（B）里 policy 跑的是"关掉几条"的问题，拿"全开"的规则当基线
+      是**易问题比难问题**（`progress-log.md` §52.2 第 2 条）——本栏补上同口径的对照。
+      档 B（全开）两栏相等；档 A（全关）两栏差很大（mk01：117.8 vs 73.0）。
+    ⚠️ 两栏都**必须**报：删掉 `rule_makespan` 会切断 f^ref 的锚，删掉同约束栏则消融对照失真。
     """
+    # 同约束集规则的惰性缓存：一次 rollout、全部评估轮次复用（规则是确定性的，不需重算）。
+    rule_same: list[float] = []
+
+    def _rule_same_constraints() -> float:
+        """同约束集的规则基线 makespan（`rollout`，seed_chain=0，**与训练同一份 constraints**）。
+
+        ⚠️ 与 `rule` 形参（全约束锚）是两个不同的量：只在档 B（全开）下两者相等。
+        用 `seed_chain=0` 与 `rule` 同一条随机链——两栏的差只来自约束集。
+        """
+        if not rule_same:
+            rule_same.append(float(rollout(inst, seed_chain=0, cfg=cfg,
+                                           constraints=constraints)["makespan"]))
+        return rule_same[0]
+
     def eval_fn(policy) -> dict:
         ms, jobs, hits = [], [], []
         eng, twt = [], []
@@ -185,6 +215,9 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                 pm_now.append(action_usage(dec, "M", lambda a: a == PM_CAND_NOW))
         out = {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                "rule_makespan": rule,
+               # 同约束集的规则基线（A 主对比；见 docstring）：约束组消融的 policy 跑的是
+               # 另一个（更易/更难）的问题，只有这一栏才是它的同口径对照。
+               "rule_makespan_same_constraints": _rule_same_constraints(),
                # 逐评估种子的**原始值**（2026-10-05 期①消融）：种子散度是消融差异的判据，
                # 只留均值/标准差看不出单个种子的离群。**纯记录，不改任何语义**。
                "makespan_per_seed": ms,
@@ -220,6 +253,16 @@ def main() -> None:
                          "`reinforce`（消融 D 的对照）＝**只减组内均值、不除以组内标准差** —— "
                          "用来证「组内相对」的那一半（std 归一化）是不是必要的。"
                          "⚠️ 它**不进 `_make_eval_fn`**：评估只跑 argmax、不算优势。")
+    # A 主对比的"单目标 GRPO × N 组权重"（spec §6.1 的第 ② 层；用户 2026-10-05 裁定 N=3）。
+    # ⚠️ 默认 None ⟹ 走 f^ref 派生的 w，**逐位等于既有读数**（`_advantages`/`scalar_reward`
+    #    的 prefs 缺省路径与今日同一表达式）。
+    ap.add_argument("--prefs", type=float, nargs=3, default=None, metavar=("P1", "P2", "P3"),
+                    help="固定偏好权重（三个浮点，顺序 = makespan/energy/TWT）：给定时"
+                         "**取代** f^ref 派生的 w（**不是相乘**）。单目标档用 one-hot，如 "
+                         "`--prefs 1 0 0` = 纯 makespan、`--prefs 0 1 0` = 纯 energy、"
+                         "`--prefs 0 0 1` = 纯 TWT。默认 None = 用 w（逐位不变）。"
+                         "⚠️ 组内 z 化把总尺度消掉 ⟹ one-hot 的原始量纲不进优势；"
+                         "⚠️ T3 开着时 λ 的有效强度随 σ(rewards) 变（见 group_rel 的 docstring）。")
     ap.add_argument("--steps", type=int, default=300, help="训练步数（MK01/G=8 约 18 s/步）")
     ap.add_argument("--G", type=int, default=8, help="组大小（J=1，预算全给 G）")
     ap.add_argument("--lr", type=float, default=3e-4, help="Adam 学习率（仅首步生效）")
@@ -325,6 +368,10 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=None,
                     help="并行档的 worker 进程数（默认 min(核数, G)）")
     args = ap.parse_args()
+    # `--prefs`（A 主对比的单目标档）：默认 None ⟹ 用 f^ref 派生的 w，逐位不变。
+    # ⚠️ 开工前就校验（守卫在 `group_rel.check_prefs`，与 `joint_chain_step` 入口同一份）——
+    #    非法 prefs 的代价不该是"跑完 20 分钟参考运行才报错"。
+    prefs = None if args.prefs is None else check_prefs(args.prefs)
 
     # 默认落**仓库根**的 checkpoints/（锚 `__file__`，不是 CWD）——否则在包目录里执行会建出
     # `plcsp/checkpoints/`，正好破坏本文件 docstring 里"不落包目录"的保证（评审 Minor）。
@@ -398,6 +445,8 @@ def main() -> None:
         print(f"[m13] ⚠️ 短保养间隔档：pm_interval={args.pm_interval}（改动力学；⑫ 的被迫激活量"
               f" `pm_events_forced` 这才可能非零）")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
+    print(f"[m13] prefs={prefs}（None = 用 w；给定时**取代** w——A 主对比的单目标档："
+          f"one-hot (1,0,0)/(0,1,0)/(0,0,1) = 纯 makespan/energy/TWT）")
     # T3：预算表查不到实例 ⟹ `T3Budget` 显式报错（未标定实例不得静默无罚项）。
     # ⚠️ 可控性守卫在**开工前**查（同一个函数也守在 `joint_chain_step` 入口）——
     #    否则要跑完参考运行才发现"⑫ 罚了但策略没有保养动作"。
@@ -425,7 +474,8 @@ def main() -> None:
                                   pm_head=args.pm_head, charge_head=args.charge_head,
                                   batch_head=args.batch_head,
                                   recompute_chunk=args.recompute_chunk,
-                                  adv_mode=args.adv_mode),
+                                  adv_mode=args.adv_mode,
+                                  prefs=prefs),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  parallel=args.parallel, n_workers=args.workers,

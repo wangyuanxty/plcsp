@@ -139,3 +139,23 @@ def test_tier_flags_document_the_two_calibers():
 
     assert REPORT_TIERS["A-MKT"].due_dates is False
     assert REPORT_TIERS["B-Full"].due_dates is True
+
+
+@pytest.mark.unit
+def test_eval_spec_carries_the_cfg_switches():
+    """`EvalSpec` 的三个 `SimConfig` 级开关进 `cfg()`；**默认全关**（逐位等于既有读数）。
+
+    ⚠️ A 主对比要拿 NSGA-II 与 DRL 的同一档比，DRL 跑在 `multi_drop=True` 等之上
+    （`experiment-plan.md` §9.7）——缺了它们就是"两个动力学各跑各的"，而且**不报错**。
+    """
+    from plcsp.baselines.nsga2 import EvalSpec
+
+    c0 = EvalSpec(tier="A-MKT", n_agv=2).cfg()
+    assert c0.multi_drop is False and c0.agv_failover is False
+    assert c0.machine_age_failure is False, "默认档不再是既有读数口径"
+    assert c0.n_agv == 2
+
+    c1 = EvalSpec(tier="B-Full", n_agv=3, multi_drop=True, agv_failover=True,
+                  machine_age_failure=True).cfg()
+    assert c1.multi_drop is True and c1.agv_failover is True
+    assert c1.machine_age_failure is True and c1.n_agv == 3

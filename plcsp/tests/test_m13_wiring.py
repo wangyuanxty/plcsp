@@ -106,3 +106,35 @@ def test_cfg_switches_exist_on_simconfig():
     c = SimConfig()
     for k in CFG_SWITCHES:
         assert getattr(c, k) is False, f"SimConfig.{k} 的默认值不是 False"
+
+
+def test_eval_fn_reports_both_rule_columns(monkeypatch):
+    """评估必须**同时**报两栏规则 makespan（2026-10-05，A 主对比）。
+
+    - `rule_makespan` = 全约束锚（f^ref / m_ref 的来源）——**刻意不随 constraints 漂**，不得改动；
+    - `rule_makespan_same_constraints` = **同约束集**的规则 rollout：约束组消融（`c-*`）的
+      policy 跑的是另一个问题，拿全约束的规则当基线是"易问题比难问题"
+      （`progress-log.md` §52.2 第 2 条）——只有这栏才是同口径对照。
+
+    两栏缺一不可：删锚 ⟹ f^ref 失去参照；删同约束栏 ⟹ 消融表失真。
+    """
+    from plcsp.env.constraints import ABLATION_GROUPS
+
+    _spy(monkeypatch)                       # 评估链走替身（本测试只关心规则两栏）
+    calls: list[dict] = []
+
+    def fake_rollout(inst, seed_chain=0, cfg=None, constraints=None):
+        calls.append({"seed_chain": seed_chain, "constraints": constraints})
+        return {"makespan": 42.0}
+
+    monkeypatch.setattr(m13, "rollout", fake_rollout)
+    fn = _eval_fn(seeds=1, rule=117.77, constraints=ABLATION_GROUPS["None"])
+    out = fn(policy=None)
+
+    assert out["rule_makespan"] == 117.77, "全约束锚那一栏被动了"
+    assert out["rule_makespan_same_constraints"] == 42.0
+    assert calls == [{"seed_chain": 0, "constraints": ABLATION_GROUPS["None"]}], (
+        "同约束集的规则必须用**训练那一份** constraints、seed_chain=0（与锚同一条随机链）")
+    out2 = fn(policy=None)                  # 惰性缓存：第二次评估不再重跑规则 rollout
+    assert len(calls) == 1, "同约束集的规则被反复重算（它是确定性的，一次即可）"
+    assert out2["rule_makespan_same_constraints"] == 42.0
