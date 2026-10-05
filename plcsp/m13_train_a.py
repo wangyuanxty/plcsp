@@ -169,6 +169,9 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                 pm_now.append(action_usage(dec, "M", lambda a: a == PM_CAND_NOW))
         out = {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                "rule_makespan": rule,
+               # 逐评估种子的**原始值**（2026-10-05 期①消融）：种子散度是消融差异的判据，
+               # 只留均值/标准差看不出单个种子的离群。**纯记录，不改任何语义**。
+               "makespan_per_seed": ms,
                "jobs_done_min": min(jobs), "horizon_hit_frac": sum(hits) / len(hits)}
         if t3:
             # ⑪ 的"充电动作使用率"与 ⑫ 的"主动保养占比"——上界退化守卫的直接读数
