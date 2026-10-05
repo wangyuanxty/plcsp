@@ -154,7 +154,7 @@ GNNT 原文自认 "cannot detect or avoid congestion"；AEI 103216 连注意力�
 | ⑫ 维护头 / ⑪ 充电头 | ✅ 已做，但**要改为基线开**（现在默认关） |
 | **⑨：故障车的在途任务退回队列** | ✅ 已做（2026-10-05，`SimConfig.agv_failover`，见 `progress-log.md` §43） |
 | **③：故障率随役龄上升** | ✅ 已做（2026-10-05，`SimConfig.machine_age_failure`，见 `progress-log.md` §44） |
-| **⑩ 拼批头** | ✅ **已做**（2026-10-05，`progress-log.md` §47）：先改**行程模型**为 multi-drop（`SimConfig.multi_drop`，默认关）——需求 6 的**硬前置（队列内容进 `Snapshot`）已落地**（`QueuedTask`，bound/FIFO 两种形状都接）；再在其上加 **B 拼批头**（`batch_head`，默认关，候选 = 预构造批次）。提交 `dceba93` + `42a5635`。⚠️ 存在性达标但 **mk01/mk07 余量小**（1–3 次/回合） |
+| **⑩ 拼批头** | ✅ **已做**（2026-10-05，`progress-log.md` §48）：先改**行程模型**为 multi-drop（`SimConfig.multi_drop`，默认关）——需求 6 的**硬前置（队列内容进 `Snapshot`）已落地**（`QueuedTask`，bound/FIFO 两种形状都接）；再在其上加 **B 拼批头**（`batch_head`，默认关，候选 = 预构造批次）。提交 `dceba93` + `42a5635`。⚠️ 存在性达标但 **mk01/mk07 余量小**（1–3 次/回合） |
 | **T3 拉格朗日** | **未做**——带两个前置，见 §6.7 |
 
 ⚠️ **⑩ 的硬前置（2026-10-05 查得，同日已落地）**：**队列内容现在看不到。**
