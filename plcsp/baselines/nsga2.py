@@ -226,7 +226,7 @@ class Nsga2Result:
             f"NSGA-II（pymoo {PYMOO_VERSION}，Apache-2.0）｜档 {self.tier}"
             f"｜seed={self.seed}｜sim_seed_chain={self.seed_chain}"
             f"｜pop={self.pop_size}×gen={self.n_gen}｜车号块={self.agv_genes}",
-            f"cfg：n_agv={self.n_agv}｜multi_drop={self.multi_drop}"
+            f"cfg：multi_drop={self.multi_drop}"
             f"｜agv_failover={self.agv_failover}｜machine_age_failure={self.machine_age_failure}",
             f"目标 = {OBJECTIVE_NAMES[0]} / {OBJECTIVE_NAMES[1]} / {OBJECTIVE_NAMES[2]}"
             f"（本仓 DES，rollout 规则派车）",

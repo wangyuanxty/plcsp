@@ -98,6 +98,10 @@ def test_small_budget_run_on_mk01_returns_three_objectives():
     assert np.all(res.F[:, 1] > 0.0), "能耗必须为正（M2 模型）"
     assert 6 <= res.n_eval <= 6 * 2, f"实测仿真次数 {res.n_eval} 超出 [pop, pop×(gen+1)]"
     assert res.sim_s > 0.0 and res.wall_s >= res.sim_s
+    # `summary()` 必须真的能跑（它随结果报口径：档位/开关/代价）——2026-10-05 曾因
+    # 引用了结果对象上不存在的字段当场 AttributeError，而当时没有任何测试调用它。
+    text = res.summary()
+    assert res.tier in text and "multi_drop=" in text and "Pareto" in text
 
 
 @pytest.mark.unit
