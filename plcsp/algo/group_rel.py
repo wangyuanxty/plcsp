@@ -96,6 +96,11 @@ PM_FEAT_CAND = 3      # `_pm_cand_feat`：逐候选（两个**动作**的后果�
 CHARGE_FEAT_DEC = 3   # `charge_feat`：本车状态摘要（与候选无关）
 CHARGE_FEAT_CAND = 3  # `_charge_cand_feat`：逐候选（到该桩的行驶时长 / 占用排队 / 是不是不去充）
 
+# B（⑩ 拼批）头两个特征槽的宽度（**唯一真相**，与 `PolicyNet` 的 `n_feat_batch*` 形参对应——
+# `test_batch_head.test_batch_feature_widths_match_the_head` 按它核对打分头的输入宽度）。
+BATCH_FEAT_DEC = 6    # `batch_feat`：头件身份 + 该车可取队列的压力（与候选无关）
+BATCH_FEAT_CAND = 3   # `_batch_cand_feat`：逐候选（批件数 / 打乱顺序的件数 / 运输距离节省）
+
 
 def _z(vals: np.ndarray) -> np.ndarray:
     """组内 z 化（**唯一口径**）：(v − mean) / (std + eps)。
@@ -376,6 +381,106 @@ def _charge_cand_feat(snap, layout: Layout, dm: np.ndarray, ctx: NormContext,
     return out
 
 
+# ── ⑩ 拼批头（B）：候选是**预构造的批次**（动作码 = 追加件数 s），批次在序列里没有 token ──
+
+def _own_queue(snap, aid: int) -> list:
+    """决定方那台车**可取的队列**（⑩ 拼批头的候选原料）——两种队列形状**同口径**。
+
+    - `bound`（每车一 Store）⟹ 该车自己的队列（`QueuedTask.veh == aid`）；
+    - FIFO（单个共享 Store）⟹ 整条共享队列（`veh == -1`）——任何车都从同一条队列取。
+
+    形状由 `Snapshot.queued_tasks` **自己带**（有 `veh >= 0` 的项 = 绑定档）——不查 cfg、
+    不查 SimWorld：决策记录里只有快照，重算路径必须**只凭快照**重建候选（否则 ratio≠1）。
+    队列空 ⟹ 不构成决策（`des.batch_cands(0, cap) == (0,)`，仿真侧不回调），故本函数只在
+    "该车确有可取任务"时被走到。
+    """
+    if any(int(t.veh) >= 0 for t in snap.queued_tasks):
+        return [t for t in snap.queued_tasks if int(t.veh) == int(aid)]
+    return [t for t in snap.queued_tasks if int(t.veh) == -1]
+
+
+def _same_frm(queue, frm: int) -> list:
+    """队列里**同取货点**的任务（**队列序**）——与 `des.AgvSim._same_frm_indices` 同一口径。
+
+    ⚠️ 头件**不在** `queue` 里（它已被仿真取走、拿在手上）；本列表是"可以追加"的那些。
+    """
+    return [t for t in queue if int(t.frm) == int(frm)]
+
+
+def batch_feat(inst: Instance, snap, ctx: NormContext, aid: int, job: int,
+               frm: int, to: int, oi: int) -> list[float]:
+    """B 头的**决策特征**（`BATCH_FEAT_DEC` = 6 维）：**头件身份 + 该车可取队列的压力**。
+
+    `[job/n_jobs, frm/n_m, to/n_m, oi/n_ref, queue_len/max_queued, n_same_frm/capacity]`
+
+    - 前四维 = 头件的身份（这趟**正在服务谁**）——与 L 头 `task_feat` 同族口径（归一化同源）；
+    - `queue_len`：本车可取队列的长度 ÷ `ctx.max_queued`——"还有多少活等着"；
+    - `n_same_frm / capacity`：队列里同取货点的件数 ÷ 载量——"最多能拼到几件"。
+      ⚠️ 后者同时是**候选集的规模**（`des.batch_cands` 的上限）——没有它，策略看不到
+      "还有没有得拼"，只能从候选特征反推。
+    """
+    q = _own_queue(snap, aid)
+    n_same = len(_same_frm(q, frm))
+    cap = max(int(snap.vehicles[int(aid)].capacity), 1)
+    n_m = max(int(inst.n_machines), 1)
+    n_j = max(int(inst.n_jobs), 1)
+    n_ref = max(max(len(j) for j in inst.jobs), 1)
+    return [int(job) / n_j, int(frm) / n_m, int(to) / n_m, int(oi) / n_ref,
+            _clamp(len(q) / max(ctx.max_queued, 1), 0.0, 4.0),
+            _clamp(n_same / cap, 0.0, 4.0)]
+
+
+def _dock_of(layout: Layout, endpoint: int) -> int:
+    """端点号 → 通道节点（机台 `0..m-1`；= m 时是装卸站）——与 `_agv_cand_feat` 同口径。"""
+    m = len(layout.machines)
+    return int(layout.machines[endpoint].dock_node) if endpoint < m else int(layout.lu.node)
+
+
+def _batch_cand_feat(snap, layout: Layout, dm: np.ndarray, ctx: NormContext,
+                     aid: int, frm: int, to: int, cands: tuple[int, ...]) -> np.ndarray:
+    """B 头**逐候选**特征 `(n_cand, BATCH_FEAT_CAND)`——行序 = `cands`（= `des.batch_cands`）。
+
+    三个槽（设计 §⑩ 的候选特征表，逐个钉）：
+
+    0. **该批件数** = `(1 + s) / capacity`——s = 追加件数（头件已占 1 位）。唯一的"规模"信号；
+    1. **打乱顺序**：批内**最后一件**在队列里的位置之前、**没被带走**的件数 ÷ `max_queued`。
+       口头口径 = "插入这批会打乱多少个任务的相对顺序"：那些任务本来排在批内某件之前，
+       现在要等下一趟。`s=0`（不拼）恒 0；取前缀 ⟹ 越大越打乱；
+    2. **运输距离节省**（几何代理，与 L/C 头的候选特征同口径：真时长在 `env` 的 `_leg_min`，
+       特征层按几何近似）：`分送 − 拼批`，均按**本模型的卸货序**（首次出现序）折算：
+
+           分送 = Σ_{该批每件} [d(本车, 取货点) + d(取货点, 卸货点)]
+           拼批 = d(本车, 取货点) + Σ 各腿（取货点 → 卸₁ → 卸₂ → …）
+
+       归一化除以 `ctx.bbox_diag`。⚠️ 本车节点为 −1（尚未出车）⟹ `d(本车, ·)` 取 **0.0**
+       （保守：不把"省一趟回空"算进去）——**不是哨兵**（0 = 无从谈起，见 `_agv_cand_feat`
+       对 −1 的另一套约定：那里是"位置未知"的显式哨兵，这里只影响一个加项）。
+    """
+    q = _own_queue(snap, aid)
+    grp_idx = [i for i, t in enumerate(q) if int(t.frm) == int(frm)]
+    cap = max(int(snap.vehicles[int(aid)].capacity), 1)
+    node = int(snap.vehicles[int(aid)].node)
+    frm_node = _dock_of(layout, int(frm))
+    d_cur = 0.0 if node < 0 else float(dm[node, frm_node])
+    out = np.zeros((len(cands), BATCH_FEAT_CAND), dtype=np.float32)
+    for i, code in enumerate(cands):
+        take = grp_idx[:int(code)]
+        stops: list[int] = []                       # 卸货点序列（首次出现序，= `des.drop_stops`）
+        for e in ([int(to)] + [int(q[k].to) for k in take]):
+            if e not in stops:
+                stops.append(e)
+        stop_nodes = [_dock_of(layout, e) for e in stops]
+        separate = (1 + len(take)) * d_cur + float(
+            dm[frm_node, _dock_of(layout, int(to))]) + sum(
+            float(dm[frm_node, _dock_of(layout, int(q[k].to))]) for k in take)
+        batched = d_cur + sum(float(dm[a, b]) for a, b in zip(
+            [frm_node] + stop_nodes[:-1], stop_nodes))
+        out[i, 0] = (1 + len(take)) / cap
+        out[i, 1] = (0.0 if not take else (take[-1] + 1 - len(take))) / max(ctx.max_queued, 1)
+        out[i, 2] = _clamp((separate - batched) / max(ctx.bbox_diag, 1e-9), -1.0, 4.0)
+    return out
+
+
 @dataclass
 class Decision:
     """一个决策点的**全部打分输入**（采样时冻结）——`chain_logp` 据此带梯度重算 logp。
@@ -445,7 +550,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                constraints: ConstraintConfig | None = None,
                route_k: int = 1, route_zones: bool = False, geom_bias: bool = False,
                pm_head: bool = False,
-               charge_head: bool = False) -> tuple[list[Decision], dict]:
+               charge_head: bool = False, batch_head: bool = False) -> tuple[list[Decision], dict]:
     """跑一条链：仿真里每个派工点同步调策略，记录每个决策的 (token 特征, 决策特征, 候选, 动作)。
 
     ⚠️ **无梯度**——决策只记上下文（`torch.no_grad()` 下取样），logp 事后由 `chain_logp`
@@ -505,6 +610,16 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         故默认档逐位不变；⑪ 关时电池恒 = cap，**不可能**触发）。
         ⚠️ `charge_head=True` 要求 ⑪ `charging` 开：⑪ 关时决策点不存在，给一个死动作只会
         污染链 logp，故**显式报错**（同上两条的形态）。
+     ⚠️ **`batch_head`（⑩ 拼批头开关，2026-10-05）**：`False`（默认）= **关闭**——
+        `AgvSim._collect_multi` 按**规则**拼批（全队列同取货点、队列序、取满容量），不记 B
+        决策、不消费采样流 ⟹ 逐位等于"拼批头从未存在"（**注意**：与"multi_drop 关"不是同一
+        件事——`multi_drop=True` 而 `batch_head=False` 是**规则档**，模型仍是 multi-drop）；
+        `True` = AGV 在取货点、头件已取走后，在**预构造的批次候选**（`des.batch_cands`：
+        追加件数 s = 0..min(capacity−1, 同取货点任务数)）里由策略选一个。
+        ⚠️ 要求 `SimConfig.multi_drop=True`（单卸货点模型下决策点不存在）**且** ⑩ 异构车队开
+        （⑩ 关 ⟹ 载量恒 1 ⟹ 候选集恒 `(0,)`，机制是死的）——两条**都在入口显式报错**。
+        ⚠️ 候选 < 2（队列里没有同取货点任务）时**不记决策**（`_collect_batch` 直接返回单件）
+        ——同 R 头的"候选 < 2 不记决策"：记一条单候选的假决策只会给链 logp 添恒 0 项。
      ⚠️ **动作采样流**（评审 I-3）：`generator=None` ⇒ 按 `torch.Generator().manual_seed(seed)`
         现建——同 seed 同调用序列的动作**逐位相同**；显式传入者自备种子（`joint_chain_step`
         自建一条并透传，组内 G 条链顺序共享）。`sample=False`（argmax）不消费该流。
@@ -540,6 +655,16 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
             "charge_head=True 需要 ⑪ 充电开启：⑪ 关时电池从不增减（恒 = cap）、充电桩机制"
             "根本不存在（决策点不存在）——给策略一个死动作只会污染链 logp。"
             "请开 ⑪ 或传 charge_head=False。")
+    if batch_head and not cfg.multi_drop:
+        raise ValueError(
+            "batch_head=True 需要 SimConfig.multi_drop=True：单卸货点模型下一趟只有一个卸货点"
+            "（`_collect` 只拼同 (取货点, 卸货点)），载量上限永远用不上——决策点不存在，"
+            "给策略一个死动作只会污染链 logp。请开 multi_drop 或传 batch_head=False。")
+    if batch_head and not cons.heterogeneous_fleet:
+        raise ValueError(
+            "batch_head=True 需要 ⑩ 异构车队开启：⑩ 关时每台车的载量退化为 1"
+            "（`AgvSim.capacity = 1`）⟹ 候选集恒为 `(0,)`、一次决策都不会发生——"
+            "机制是死的。请开 ⑩ 或传 batch_head=False。")
     decisions: list[Decision] = []
     # ⚠️ 采样流的设备**跟随策略**（2026-10-04 设备批次）：CUDA 上 `torch.multinomial` 不接受
     #    CPU generator（`--device cuda` 时过去会直接报错）。CPU 档 `device='cpu'` 与旧行为
@@ -581,7 +706,7 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
             tok, _ = policy.forward_enc(torch.as_tensor(tok_feat).unsqueeze(0), seg, bias)
             head = {"S": policy.mach_logits_emb, "L": policy.agv_logits_emb,
                     "R": policy.route_logits_emb, "M": policy.pm_logits_emb,
-                    "C": policy.charge_logits_emb}[kind]
+                    "C": policy.charge_logits_emb, "B": policy.batch_logits_emb}[kind]
             if kind == "S":
                 # 机台号 = 序列位置（M 段在最前）——S 的候选本身就是 token 下标。
                 tok_idx = np.asarray(cand, dtype=np.int64)
@@ -605,6 +730,13 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
                 # 段），"不去充"更不是实体。故 m 个候选共用**本车**的 V token（`aid`）——
                 # 与 R 头同型（路线候选也没有 token）。照 S 写 `tok_idx = cand` 会让候选
                 # 0/1/2 去读 0/1/2 号**机台**的 token：充电头给机台打分（§31 同型缺陷）。
+                tok_idx = np.full(len(cand), v_token_index(seg)[int(aid)], dtype=np.int64)
+            elif kind == "B":
+                # ⚠️ B 的候选是**动作码**（`des.batch_cands` 的追加件数 s），批次本身
+                # （"头件 + 队列里同取货点的前 s 件"）在序列里**没有 token**（任务是 B 段
+                # 作业 token 之外的运行期实体）——故 n_cand 个候选共用**本车**的 V token
+                # （`aid`），与 C/R 两头同型。照 S 写 `tok_idx = cand` 会让候选 0/1/2 去读
+                # 0/1/2 号机台的 token——§31 同型缺陷。
                 tok_idx = np.full(len(cand), v_token_index(seg)[int(aid)], dtype=np.int64)
             else:                                   # R
                 # 路线候选在序列里没有 token（见 `PolicyNet.route_logits_emb`）：取本车 V token
@@ -669,11 +801,20 @@ def roll_chain(inst: Instance, layout: Layout, dm: np.ndarray, cfg: SimConfig,
         return _act("C", snap, charge_feat(snap, aid, ctx),
                     _charge_cand_feat(snap, layout, dm, ctx, aid, cand), cand, aid=int(aid))
 
+    def policy_b(snap, aid, job, frm, to, oi, cand):
+        # 候选 = **动作码**（`des.batch_cands` 的追加件数 s；s=0 = 只带头件）。批次本身在
+        # token 序列里没有 token（任务是运行期实体），故 n_cand 个候选共用**本车**的 V token
+        # （`aid`）——`_act` 的 B 分支与 `PolicyNet.batch_logits_emb` 都按这条口径。
+        return _act("B", snap, batch_feat(inst, snap, ctx, aid, job, frm, to, oi),
+                    _batch_cand_feat(snap, layout, dm, ctx, aid, frm, to, cand),
+                    cand, aid=int(aid))
+
     metrics = world.run_gated(seed_chain=seed, online_s=True,
                               policy_s=policy_s, policy_l=policy_l,
                               policy_r=None if route_k == 1 else policy_r,
                               policy_m=None if not pm_head else policy_m,
-                              policy_c=None if not charge_head else policy_c)
+                              policy_c=None if not charge_head else policy_c,
+                              policy_b=None if not batch_head else policy_b)
     return decisions, metrics
 
 
@@ -975,6 +1116,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      route_k: int = 1, route_zones: bool = False, geom_bias: bool = False,
                      pm_head: bool = False,
                      charge_head: bool = False,
+                     batch_head: bool = False,
                      recompute_chunk: int = 0,
                      parallel: bool = False,
                      pool: "ChainWorkerPool | None" = None) -> tuple[float, dict]:
@@ -1054,6 +1196,12 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     （C 决策与其余四头同进链 logp、同吃采样流、同受逐决策裁剪）。⚠️ 需 ⑪ `charging` 开
     （入口经 `roll_chain` 显式报错）；默认电池 2–4 kWh 在一个 episode 里放不空 ⟹
     "耗尽有后果"要在**小电池档**验证（`AgvSpec(battery_kwh=…)`，默认参数不动，见 §27.1）。
+
+    ⚠️ **`batch_head`（⑩ 拼批头开关，2026-10-05）**：默认 `False` = 规则拼批，链与训练步
+    **逐位等于今日**（`multi_drop=False` 时更是"单卸货点模型"，连规则拼批都没有）；
+    `True` 启用——AGV 在取货点在**预构造的批次候选**里选（`des.batch_cands` 的追加件数 s），
+    B 决策与其余五头同进链 logp、同吃采样流、同受逐决策裁剪。⚠️ 需 `cfg.multi_drop=True`
+    且 ⑩ 异构车队开（两条都在 `roll_chain` 入口显式报错）。
 
     ⚠️ **`parallel`（链级多进程，2026-10-04 并行批次）默认 `False` = 原串行路径，逐位不变。**
     `True` 时把 G 条链交给 `ChainWorkerPool`（spawn）——worker 跑
@@ -1156,7 +1304,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
         pool.sync_policy(policy)
         results = pool.run_chains(seed, G, inst=inst, layout=layout, dm=dm, cfg=cfg, ctx=ctx,
                                   constraints=cons, route_k=route_k, route_zones=route_zones,
-                                  geom_bias=geom_bias, pm_head=pm_head, charge_head=charge_head)
+                                  geom_bias=geom_bias, pm_head=pm_head, charge_head=charge_head,
+                                  batch_head=batch_head)
         for dec, met in results:
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
@@ -1171,7 +1320,8 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             dec, met = roll_chain(inst, layout, dm, cfg, policy, seed * SEED_STRIDE + g, ctx,
                                   sample=True, generator=gen, constraints=cons, route_k=route_k,
                                   route_zones=route_zones, geom_bias=geom_bias,
-                                  pm_head=pm_head, charge_head=charge_head)
+                                  pm_head=pm_head, charge_head=charge_head,
+                                  batch_head=batch_head)
             chains.append(dec)
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)

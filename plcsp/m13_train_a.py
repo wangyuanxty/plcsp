@@ -129,14 +129,16 @@ def build_training_setup(inst_name: str, cfg: SimConfig | None = None,
 def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                   constraints: ConstraintConfig | None = None, route_k: int = 1,
                   route_zones: bool = False, geom_bias: bool = False,
-                  pm_head: bool = False, charge_head: bool = False):
+                  pm_head: bool = False, charge_head: bool = False,
+                  batch_head: bool = False):
     """评估回调：argmax 策略在 `seeds` 个扰动种子上的 makespan（spec §5.3.4 约定 3：J>1 只评估）。
 
     ⚠️ `constraints` 必须与训练同一份（R2）：评估跑的是训练后的策略，动力学口径不一致
     （如训练 ③ 关、评估全开）会让读数对不上训练环境，且**静默**。
     ⚠️ `route_k` 同理（R 头恢复后）：训练开路线头（`route_k=2`）而评估关着 = 用**另一个策略**
     评估（恒走最短路的那一个），读数与训练不对应，且**静默**——故与 `constraints` 一样必须透传。
-    ⚠️ **`route_zones` / `geom_bias` / `pm_head` / `charge_head` 同型**（2026-10-05 基线档接线）：
+    ⚠️ **`route_zones` / `geom_bias` / `pm_head` / `charge_head` / `batch_head` 同型**
+    （2026-10-05 基线档接线；`batch_head` 随 ⑩ 拼批头加入）：
     它们每一个都改变**策略看到的输入或动作空间**——训练开、评估关 = 用**另一个策略**评估。
     `cfg` 里的 `agv_failover` / `machine_age_failure` 是**动力学**开关，随 `cfg` 一并到达，同理必须同源。
     **本函数的每个开关都要与 `main` 传给 `joint_chain_step` 的那一份逐字相同。**
@@ -146,7 +148,7 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                                ctx=ctx, sample=False, constraints=constraints,
                                route_k=route_k, route_zones=route_zones,
                                geom_bias=geom_bias, pm_head=pm_head,
-                               charge_head=charge_head)[1]["makespan"])
+                               charge_head=charge_head, batch_head=batch_head)[1]["makespan"])
               for s in range(seeds)]
         return {"makespan_mean": mean(ms), "makespan_std": pstdev(ms) if len(ms) > 1 else 0.0,
                 "rule_makespan": rule}
@@ -189,6 +191,11 @@ def main() -> None:
     ap.add_argument("--charge-head", action="store_true",
                     help="⑪ 充电头（C）：默认关。开启后 AGV 待命时由策略选 {不去充, 各桩}"
                          "（要求 ⑪ 充电开启）")
+    ap.add_argument("--multi-drop", action="store_true",
+                    help="⑩ multi-drop 行程模型（一趟 = 一个取货点 + 多个卸货点）；"
+                         "⚠️ 模型变更：打开后与旧档读数不可比")
+    ap.add_argument("--batch-head", action="store_true",
+                    help="⑩ 拼批头（在预构造的批次候选里选；需 --multi-drop）；默认关")
     ap.add_argument("--agv-failover", action="store_true",
                     help="⑨ 故障 failover：默认关（在途任务滞留在车上）。开启后停机期间把"
                          "车上/队列里的任务退回、交**未停机**的别的车。**改动力学**，"
@@ -253,7 +260,8 @@ def main() -> None:
     #    正是 `build_setup` 的既定纪律（F4 收敛）。其余四个开关是**链级**（改输入/动作空间），
     #    走下面的 `step_kwargs` 与 `eval_fn`。
     cfg = SimConfig(agv_failover=args.agv_failover,
-                    machine_age_failure=args.machine_age_failure)
+                    machine_age_failure=args.machine_age_failure,
+                    multi_drop=args.multi_drop)
     inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst, cfg=cfg)
     # ⚠️ 设备在**建好策略之后**统一搬（`--device cuda` 时整步在 GPU 上：在线前向经
     #    `forward_enc`、批重算经 `_decision_logp_terms`、动作采样流经 `policy.device` 三处
@@ -272,7 +280,8 @@ def main() -> None:
     # 基线档的开关逐个打印——**训练与评估是否同源**只看这一行就能核（见 `_make_eval_fn`）
     print(f"[m13] 开关（训练=评估，同源）：route_zones={args.route_zones} "
           f"geom_bias={args.geom_bias} pm_head={args.pm_head} "
-          f"charge_head={args.charge_head} agv_failover={args.agv_failover} "
+          f"charge_head={args.charge_head} batch_head={args.batch_head} "
+          f"multi_drop={args.multi_drop} agv_failover={args.agv_failover} "
           f"machine_age_failure={args.machine_age_failure}")
     print(f"[m13] 权重 w={tuple(round(x, 4) for x in w)}（f^ref={ref.as_tuple()}）")
     print(f"[m13] 规则基线 makespan={rule:.1f}｜run_dir={run_dir.resolve()}")
@@ -286,6 +295,7 @@ def main() -> None:
                                   G=args.G, lr=args.lr, route_k=args.route_k,
                                   route_zones=args.route_zones, geom_bias=args.geom_bias,
                                   pm_head=args.pm_head, charge_head=args.charge_head,
+                                  batch_head=args.batch_head,
                                   recompute_chunk=args.recompute_chunk),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
@@ -296,7 +306,8 @@ def main() -> None:
                                         route_zones=args.route_zones,
                                         geom_bias=args.geom_bias,
                                         pm_head=args.pm_head,
-                                        charge_head=args.charge_head)
+                                        charge_head=args.charge_head,
+                                        batch_head=args.batch_head)
                           if args.eval_every > 0 else None),
                  eval_every=(args.eval_every or None))
     print(f"[m13] 完成：{run_dir / 'metrics.ndjson'}（每步一行）｜{run_dir / 'ckpt.pt'}")

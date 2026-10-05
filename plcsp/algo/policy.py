@@ -1,4 +1,5 @@
-"""策略网络——机台选择（S 层）+ AGV 派车（L 层）+ **路线选择（R 层）** + **维护时机（M 层）**四个头。
+"""策略网络——机台选择（S 层）+ AGV 派车（L 层）+ **路线选择（R 层）** + **维护时机（M 层）**
++ **充电（C 层）** + **拼批（B 层）** 六个头。
 
 **无 critic**：组内相对优势用组内基线（见 `group_rel.py`），不需要价值网络。
 2026-10-02：分批（B 层）头已删（分批环节砍除）；2026-10-03：critic 头 `v_head` 随 PPO 变体一并删除。
@@ -13,6 +14,11 @@
 `MachineSim` 的自动规则（`pm_clock >= pm_interval`）交还策略：候选 = {现在保养, 不保养}，
 两个候选同属**一台**机台（候选是**动作**不是实体，故 `cand_idx` 两个候选共用该机台的
 M token，见该方法的说明）。默认关闭，逐位等于今日行为。
+2026-10-05（⑩ 拼批头）：**B 头（`batch_logits_emb`）新增**——把"这趟带哪几件"从
+`AgvSim._collect_multi` 的规则（全队列同取货点、取满容量）交还策略：候选 = **预构造的批次**
+（`des.batch_cands` 的追加件数 s = 0..min(capacity−1, 同取货点任务数)，候选 ≤ capacity）。
+⚠️ 只在 `SimConfig.multi_drop=True`（multi-drop 行程模型）下存在决策点——单卸货点模型一趟只有
+一个卸货点、载量永远用不上。默认关闭，逐位等于今日行为。
 2026-10-04（⑪ 充电头）：**C 头（`charge_logits_emb`）新增**——把"去哪充 / 充不充"从
 `AgvSim._maybe_charge` 的规则（低电 → 最近**空闲**桩）交还策略：候选 =
 {不去充} ∪ {各充电桩}，**变长候选集**（随布局桩数变）。⚠️ 充电桩在 token 序列里**没有
@@ -41,7 +47,7 @@ def v_token_index(seg: tuple[int, ...]) -> list[int]:
 # kind → 打分头**模块**属性名——批量打分入口 `logits_emb_batch` 用（逐决策入口经
 # `*_logits_emb` 方法，两处指向同一批参数）。新增头时两处都改，不得只改一处。
 HEAD_ATTRS = {"S": "s_head_tok", "L": "l_head_tok", "R": "r_head_tok",
-              "M": "pm_head_tok", "C": "c_head_tok"}
+              "M": "pm_head_tok", "C": "c_head_tok", "B": "b_head_tok"}
 
 
 def _to_dev(t: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
@@ -56,15 +62,16 @@ def _to_dev(t: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
 
 
 class PolicyNet(nn.Module):
-    """π = π_S(机台候选) · π_L(AGV 派车) · π_R(路线候选) · π_M(⑫ 何时保养) · π_C(⑪ 充电)；无 critic。
+    """π = π_S(机台候选) · π_L(AGV 派车) · π_R(路线候选) · π_M(⑫ 何时保养) · π_C(⑪ 充电)
+    · π_B(⑩ 拼批)；无 critic。
 
-    五个头读**同一份** token 嵌入（spec §5.3.1）：S 头 `mach_logits_emb` / L 头
+    六个头读**同一份** token 嵌入（spec §5.3.1）：S 头 `mach_logits_emb` / L 头
     `agv_logits_emb` / R 头 `route_logits_emb` / M 头 `pm_logits_emb` / C 头
-    `charge_logits_emb`，嵌入均由 `forward_enc` 产出。
+    `charge_logits_emb` / B 头 `batch_logits_emb`，嵌入均由 `forward_enc` 产出。
     ⚠️ `enc=None` 时**没有可用的头**——旧的扁平特征 MLP 回退路径（`s_head` / `mach_logits`）
     已在 P2 Task 4 删除，不存在第二条打分通路。
 
-    五个头的打分输入同构：`token 嵌入 ⊕ 决策特征 ⊕ **候选特征**`。
+    六个头的打分输入同构：`token 嵌入 ⊕ 决策特征 ⊕ **候选特征**`。
     - **决策特征**（`feat_op` / `feat_task` / `feat_route` / `feat_mach` / `feat_agv`，形参
       `n_feat_op` / `n_feat_task` / `n_feat_route` / `n_feat_pm` / `n_feat_charge`）与候选
       **无关**，broadcast 给所有候选；
@@ -77,12 +84,13 @@ class PolicyNet(nn.Module):
       在序列里没有 token（R2 打开时区段有 Z 段 token，逐候选按路径**池化读取**，见
       `route_logits_emb`）；M 头候选是**动作码**，两次候选同属一台机台
       （见 `pm_logits_emb`）；C 头候选是**动作码 + 桩**，桩同样没有 token（见
-      `charge_logits_emb`）。
+      `charge_logits_emb`）；B 头候选是**批次**（动作码 = 追加件数 s，候选 ≤ capacity），
+      批次在序列里同样没有 token（见 `batch_logits_emb`）。
 
     ⚠️ **无 `n_agv` 形参**（评审 M-4 删）：车队规模由 `seg` 的 V 段长度定（`v_token_index`），
     网络结构里没有任何一处随车队规模变——旧的 `n_agv` 形参与其 `self.n_agv` 属性**全仓零
     读取方**，只会给读者"车队规模进网络"的错觉（要理解车队规模如何进网，看 V 段 token）。
-    ⚠️ **候选集变长不进网络结构**：五个头的输出长度由 `cand_idx` 的长度定，与权重形状无关
+    ⚠️ **候选集变长不进网络结构**：六个头的输出长度由 `cand_idx` 的长度定，与权重形状无关
     （C 头的桩数、R 头的 k、S 头的候选机台数都是运行期量）。
     """
     def __init__(self, n_feat_op: int = 3,
@@ -90,7 +98,8 @@ class PolicyNet(nn.Module):
                  n_feat_task: int = 4, n_feat_cand: int = 1,
                  n_feat_route: int = 4, n_feat_route_cand: int = 3,
                  n_feat_pm: int = 3, n_feat_pm_cand: int = 3,
-                 n_feat_charge: int = 3, n_feat_charge_cand: int = 3):
+                 n_feat_charge: int = 3, n_feat_charge_cand: int = 3,
+                 n_feat_batch: int = 6, n_feat_batch_cand: int = 3):
         super().__init__()
         self.enc = enc
         self.optim: torch.optim.Optimizer | None = None   # 由训练器在首步惰性创建（Adam）
@@ -121,12 +130,20 @@ class PolicyNet(nn.Module):
             self.c_head_tok = nn.Sequential(
                 nn.Linear(enc.d_model + n_feat_charge + n_feat_charge_cand, hidden), nn.GELU(),
                 nn.Linear(hidden, 1))
+            # 编码器打分头（⑩ 拼批，B）：决策特征 = 头件身份 + 该车队列压力；
+            # 逐候选特征 = 批件数 / 打乱顺序的件数 / 运输距离节省
+            # （见 `batch_logits_emb` 的"批次没有 token"说明）。
+            # ⚠️ **必须建在 `c_head_tok` 之后**：加新头不得改变既有头的初始化抽签次序
+            # （黄金摘要含策略参数的随机初值，M/C 两头当年也是为此建在最后）。
+            self.b_head_tok = nn.Sequential(
+                nn.Linear(enc.d_model + n_feat_batch + n_feat_batch_cand, hidden), nn.GELU(),
+                nn.Linear(hidden, 1))
 
     def forward_enc(self, tok_feat: torch.Tensor | np.ndarray,
                     seg: tuple[int, ...],
                     bias: torch.Tensor | np.ndarray | None = None
                     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """编码器前向（**五个**头共用）——**唯一的 numpy→torch 转换点**；无编码器返回 (None, None)。
+        """编码器前向（**六个**头共用）——**唯一的 numpy→torch 转换点**；无编码器返回 (None, None)。
 
         `build_tok`（Task 2）产 numpy `(N, F_MAX)`，编码器要 torch **(B, N, F_MAX)**：
         numpy/列表 → float32 张量，2 维 → 补 batch 维，**最后搬到参数设备**，在此**一处**统一
@@ -280,18 +297,44 @@ class PolicyNet(nn.Module):
         cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (m, F_cand)
         return self.c_head_tok(torch.cat([tok_c, fa, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
 
+    def batch_logits_emb(self, tok: torch.Tensor, feat_batch: torch.Tensor,
+                         feat_cand: torch.Tensor, cand_idx: torch.Tensor) -> torch.Tensor:
+        """(1,N,d) × (1,1,F_dec) × (s+1,F_cand) × (s+1,) → (1,1,s+1) 候选**批次**分数（⑩ 拼批头，B）。
+
+        ⚠️ **与 C/R 两头同型的关键差别——批次在 token 序列里没有 token**：候选是**动作码**
+        （`des.batch_cands` 的追加件数 s：0 = 只带头件），批次本身是"头件 + 队列里同取货点的
+        前 s 件"这一串**任务**，而任务在序列里没有 token（序列只有 M/B/V/G，R2 打开时另有 Z）。
+        故本头的 `cand_idx` **不逐候选区分**，它取**决定方那台车**的 V token 下标
+        （n_cand 个候选传同一个值）——语义 = "这辆车在做什么决定"，与 L/C 两头同源，
+        且保住到编码器的梯度通路。
+        - **候选之间的分数差只能来自 `feat_cand`**（见 `group_rel._batch_cand_feat`：
+          批件数 / 打乱顺序的件数 / 运输距离节省）——`tok` 与 `feat_batch` 对 n_cand 个候选
+          是同一份输入。
+        ⚠️ **守卫后果（同 C 头，必须写明）**：n_cand 个候选共用**同一个** token 下标，
+        "扰动本车 V token ⟹ 分数必变"**不是恒真**（同一行加同一常数经 `log_softmax` 不变）。
+        故 `test_batch_head` 的守卫用**逐 token 恒等嵌入**切断注意力泄漏，并实地跑一遍错误
+        实现确认判据会失败（§31 的教训：恒真的守卫等于没有守卫）。
+        ⚠️ **已知限度**（如实记）：与 C 头相同——"同一辆车在不同处境下偏好不同批大小"只能由
+        `feat_cand` + 上下文的非线性调节表达；要给任务加 token 是另一条机制（不在本任务范围）。
+
+        `feat_batch` = 头件身份 + 该车队列压力（与候选无关，broadcast 给全部候选）。
+        """
+        tok_c = tok[0, _to_dev(cand_idx, tok).long()]                  # (n_cand, d)
+        fb = _to_dev(feat_batch.expand(1, tok_c.shape[0], -1)[0], tok)  # (n_cand, F_dec)
+        cand = _to_dev(feat_cand[0] if feat_cand.dim() == 3 else feat_cand, tok)  # (n_cand,F_cand)
+        return self.b_head_tok(torch.cat([tok_c, fb, cand], dim=-1)).squeeze(-1).unsqueeze(0).unsqueeze(1)
+
     def logits_emb_batch(self, kind: str, emb: torch.Tensor, tok_idx: torch.Tensor,
                          feat_dec: torch.Tensor, feat_cand: torch.Tensor,
                          zone_idx: torch.Tensor | None = None,
                          zone_mask: torch.Tensor | None = None) -> torch.Tensor:
         """(B,N,d) × (B,n_cand) × (B,F_dec) × (B,n_cand,F_cand) → (B,n_cand) 批量候选分数。
-
-        **重算路径的批量打分入口**（2026-10-04 打分头批次，`group_rel._decision_logp_terms`）：
         把**同一个头**上候选数相同的一组决策一次算完。第 b 行的算式与逐决策的 `*_logits_emb`
         **逐位同构**——`cat([emb[b, tok_idx[b]], feat_dec[b] 广播, feat_cand[b]], -1)` → 同一串
         MLP 权重；`tok_idx` 的语义（S = 机台号即序列位置；L = 车号经 `v_token_index` 映射的 V
         段下标并广播给候选；R = 本车 V token 广播 k 份；M = 该机台 M token 广播 2 份；
-        C = 本车 V token 广播 m 份）**一位不改**，逐决策记录什么就按什么批量回放。
+        C = 本车 V token 广播 m 份；B = 本车 V token 广播 s+1 份）**一位不改**，逐决策记录什么
+        就按什么批量回放。
         ⚠️ 批维**不改归约长度**：同组 `n_cand` 相同，`log_softmax` 仍只在 `n_cand` 上做，故与
         逐决策路径的差只在矩阵乘分块的末位（1e-5 容差口径，同编码器批量化）。
         ⚠️ 调用方负责**分组**（组键 = `(kind, n_cand)`）：n_cand 不齐时 `emb[rows, tok_idx]`

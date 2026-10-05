@@ -510,6 +510,11 @@ def test_per_decision_logp_vector_is_same_source_within_tolerance():
     ⚠️ 累加**次序**没变（第 2 条仍逐位钉死）——变的只是每一项的末位。
     """
     from plcsp.algo.group_rel import _decision_logp_terms
+    # ⚠️ 显式播种（2026-10-05）：`_setup()` 建策略**不播种**，故本条的取值取决于**全局 RNG
+    # 在 pytest 会话里的当时状态**（哪些文件先跑）。本批新增 `test_batch_head.py` 后，第 2 条
+    # 断言（"逐步累加与 `.sum()` 在本数据上必须不同"——一条**数据相关**的区分力判据）恰好翻转。
+    # 播种把数据钉死，判据本身一字未动（既不放宽也不删除）。
+    torch.manual_seed(0)
     inst, lay, dm, cfg, ctx, pol = _setup()
     decisions, _ = roll_chain(inst, lay, dm, cfg, pol, seed=0, ctx=ctx)
     new_vec = decisions_logp(decisions, pol).detach()
@@ -802,10 +807,11 @@ def test_scalar_adv_mode_regression_pin():
     h = hashlib.sha256()
     for k, v in sorted(pol.state_dict().items()):
         # 排除默认关档**拿不到梯度**的新增结构：R 头 / ⑫M 头 / ⑪C 头（历史批次），
-        # 以及 R2 的区段投影与区段类型嵌入（2026-10-05）——它们只在 `route_zones=True`
-        # 时被调用，默认档 grad 为 None（不进 `clip_grad_norm_`、不进 Adam），故排除它们
+        # R2 的区段投影与区段类型嵌入（2026-10-05），以及 ⑩ 拼批头 `b_head_tok`（2026-10-05）
+        # ——它们只在 `route_zones=True` / `batch_head=True` 时被调用，默认档 grad 为 None
+        # （不进 `clip_grad_norm_`、不进 Adam），故排除它们
         # **不削弱**本条对 scalar 口径默认路径的钉法；摘要值因此无需重捕获。
-        if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.",
+        if k.startswith(("r_head_tok.", "pm_head_tok.", "c_head_tok.", "b_head_tok.",
                          "enc.proj_z.", "enc.zone_type_emb")):
             continue
         h.update(k.encode("utf-8"))

@@ -1013,6 +1013,7 @@ class AgvSim:
         idxs = self._same_frm_indices(q, frm)
         cands = batch_cands(len(idxs), self.capacity)
         if len(cands) < 2:
+            self._count_batch([first])          # 不构成决策；读数口径与规则档一致（记一趟 1 件）
             return [first]
         code = int(self.batch_policy(self.aid, int(job), int(frm), int(to), int(oi), cands))
         if code not in cands:
