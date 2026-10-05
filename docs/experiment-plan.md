@@ -58,7 +58,7 @@
 | **实例** | **先 3 个：MK01 / MK07 / MK10**（小/中/大），**用户 2026-10-05 裁定**——"先 3 个后面再补"。⚠️ **补齐 MK02–MK06 / MK08 / MK09 之前，论文的主张范围只能写这 3 个。** ⚠️ 域内惯例是 **MK01–MK10 全部 10 个**（Applied Sciences 2025, 15(13), 6995 就是 10 个），**补齐前会被审稿人问"另外 7 个呢"**。口径见 §5 |
 | **两档报告** | **档 A `A-MKT`**（机制全关，与已发表数字同口径）· **档 B `B-Full`**（机制全开）。主表报档 B，档 A 用于与文献对齐 |
 | **seeds** | 初稿 **1**；**投稿前补到 ≥5–10**（见 §4） |
-| **状态** | 未跑。档 A/B 的参考表已有（`plcsp/m14_mkt_reference.py`） |
+| **状态** | 未跑。档 A/B 的参考表已有（`plcsp/m14_mkt_reference.py`）。**③ NSGA-II 已实现**（`plcsp/baselines/nsga2.py`，§50）；**④ HGS 已从零实现但跑不进本仓 DES + 论文协议 ≈ 14–18 天/实例**（§51）——两层基线的机时待定 |
 
 ### B · 约束组消融 —— 支撑"10 条约束各自要紧"
 
@@ -115,6 +115,13 @@
 
 **从零实现**（JMS 77:356–367, 2024）。它是 `INDEX.md` §5 高优先第 2 条的剩余项——
 `trans_time` 接进 `AgvSim` 已完成，矩阵口径与两档表是它的前置。**独立的一批。**
+
+**状态（2026-10-05）**：**已从零实现**（`plcsp/baselines/hgs/`，§51）——但**尚未产出训练后的数字**：
+① HGS 的动作含"选哪道工序"，本仓 `des.py` 没有该入口 ⟹ **环境不匹配，停下来报告**；
+② 原文协议 ≈ 14–18 天/实例（CPU）。
+**裁定（用户 2026-10-05）：初稿阶段不加。** 初稿用第 ③ 层 NSGA-II 作元启发式基线；
+HGS 的代码保留（`plcsp/baselines/hgs/`），**投稿前再定**加不加机时/加仿真入口。
+⚠️ 代价如实记：HGS 是 FJSP 的 SOTA 基线，**审稿人多半会问**——这是"初稿快"买来的缺口，不是没有。
 
 ### H · "赢"的定义（spec §6.4，仍然有效）
 
@@ -336,3 +343,55 @@ D:/anaconda/envs/py312/python.exe -m plcsp.m13_train_a \
     --route-k 2 --route-zones --geom-bias --pm-head --charge-head \
     --agv-failover --machine-age-failure
 ```
+
+### 9.7 期① 13 档的实际开关表（**2026-10-05 冻结**）
+
+**公共部分**（13 档逐字相同）：
+
+```bash
+--inst mk01 --steps 300 --seed 0 --G 8 --device cuda --parallel --workers 8 \
+--worker-device cpu --recompute-chunk 128 --eval-every 30 --eval-seeds 5
+```
+
+每档一个**独立 `--run-dir`**（`metrics.ndjson` 只追加，复用目录会叠行）。
+**基线档 = 全开**（即 9.6 的命令再加上 §9.3 新增的 `--multi-drop --batch-head --t3`）。
+
+| # | run | 指定改动 | **守卫强制的连带项**（见下） |
+|---|---|---|---|
+| 1 | `full` | 无 | — |
+| 2 | `c-no-logistics` | `--constraints=-物流` | `--route-k 1`、去 `--route-zones`、去 `--charge-head`、去 `--batch-head`；T3 keep → ②③⑤⑫ |
+| 3 | `c-no-production` | `--constraints=-生产` | 去 `--pm-head`、去 `--machine-age-failure`；T3 keep → ①⑪ |
+| 4 | `c-no-info` | `--constraints=-信息` | — |
+| 5 | `c-none` | `--constraints=None` | `--route-k 1`、去 `--route-zones`、去 `--pm-head`、去 `--charge-head`、去 `--batch-head`、去 `--machine-age-failure`；**T3 关**（无可控约束） |
+| 6 | `m-no-route` | `--route-k 1` | 去 `--route-zones`（R2 没有消费者） |
+| 7 | `m-no-r2` | 去 `--route-zones` | — |
+| 8 | `m-no-geom` | 去 `--geom-bias` | — |
+| 9 | `m-no-pm` | 去 `--pm-head` | T3 keep → ①②⑤⑪ |
+| 10 | `m-no-charge` | 去 `--charge-head` | T3 keep → ①②③⑤⑫ |
+| 11 | `m-no-batch` | 去 `--multi-drop`、去 `--batch-head` | — |
+| 12 | `m-no-t3` | 去 `--t3` | — |
+| 13 | `adv-reinforce` | 加 `--adv-mode reinforce` | — |
+
+`--multi-drop` / `--agv-failover` 一律照基线（它们是**惰性**开关时不影响数值，见下）。
+
+**⚠️ 为什么 6 档要多关几项**：本仓的机制开关有**硬守卫**（"死动作污染链 logp"）。
+
+- `--route-k > 1` 要求 ① 开；`--route-zones` 要求 `route_k > 1`（`algo/group_rel.py` 入口）。
+- `--pm-head` 要求 ⑫ 开；`--charge-head` 要求 ⑪ 开；`--batch-head` 要求 `multi_drop` **且** ⑩ 开。
+- `--machine-age-failure=True` 要求 ③ **且** ⑫ 开（`des.py` 显式报错）——**它不是惰性开关**。
+- T3 的 `check_influenceable`（`env/t3_budget.py`）：keep 含 ⑫ 要 `pm_head`、含 ③ 要 `pm_head`+役龄、
+  含 ⑪ 要 `charge_head`。**约束关掉后策略没有作用手段**，T3 再罚它就是罚不可控的事
+  （与 ④⑨ 不纳入 T3 同一条理由）。
+
+⟹ **T3 的 keep 是机制开关的确定函数，不是自由变量**：`keep = 六条可控约束 ∩ 该档仍开的约束`。
+这条要写进论文。故 2/3/5/6/9/10 档与 `full` 的差异**不止一项**——但多出的每一项都是守卫强制的，
+不是另选的。**报消融表时必须写出实际开关集**，不能只写"关掉 X"。
+
+**惰性开关（已验证）**：`--agv-failover` 在 ⑨ 关时车从不 down ⟹ 真惰性，照基线传。
+**`--multi-drop` 在 ⑩ 关时**：载量退化为 1 ⟹ 按代码注释是惰性，**逐位对照见 §9.7.1（⏳ 进行中）**。
+
+#### 9.7.1 `multi_drop` 惰性对照（2026-10-05）
+
+**判据**：`c-none` 档（⑩ 关）带 / 不带 `--multi-drop` 各跑 2 步，同 seed、同并发档，
+逐位比较 `r` 与全部诊断。⏳ **进行中**——结果出来后本节按实测改写。
+
