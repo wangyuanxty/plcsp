@@ -24,7 +24,7 @@
 |---|---|---|---|---|---|
 | 1 | **① 拥堵**：表征里没有几何/度量（域内 **12 篇**自认做不了） | **动态图 / 时序 GNN**——把实时交通流当**动态边权** | GNNT 自己写的 future work 就是 "**ST-GNN**（把实时交通流作为动态图属性）" | 0 | `zone_wait` + `zone_holder` 已在；缺"随状态变的边权" |
 | 2 | **② 有限缓冲**："缓冲满 → AGV 无法卸货"被假设消掉 | **约束 RL** | CPO（Achiam et al., ICML 2017）· **RCPO**（Tessler et al., ICLR 2019）· PPO-Lagrangian | 2（RCPOM, IJCNN 2023；ACERL, TNNLS 2025） | T3 已设计（`mechanism-designs.md` 预算原则），缺算法骨架 |
-| 3 | **⑩ 拼批**：批量由策略决定（域内 **0 篇**） | **指针网络 / set-to-sequence**——输出**变长子集**，不是定长打分 | Vinyals et al., *Pointer Networks*, NeurIPS 2015 | 0 | 拼批头设计已定，动作空间正是"变长子集" |
+| 3 | **⑩ 拼批**：批量由策略决定（域内 **0 篇**） | **指针网络 / set-to-sequence**——输出**变长子集**，不是定长打分 | Vinyals, Fortunato & Jaitly, *Pointer Networks*, **Advances in Neural Information Processing Systems 28 (NIPS 2015)**, pp. 2692–2700。⚠️ **2015 年该会议的正式名是 NIPS，不是 NeurIPS**（2018 年才改名） | 0 | 拼批头设计已定，动作空间正是"变长子集" |
 | 4 | **⑫ 维护**：变长退化、无观测（域内 **0 篇**） | **部分可观测 / 信念状态** + 退化探索 | RND（Burda et al., ICLR 2019） | 0 | 维护头已做；缺"退化不可观测"这一层 |
 | 5 | **3 目标权衡** | **梯度冲突重加权** | **PCGrad**（Yu et al., NeurIPS 2020）· MGDA（Sener & Koltun, NeurIPS 2018） | 0 | O3a 已设计，**被 O1 挡着** |
 | 6 | **约束累积（0→10 条）** | **课程学习** | Bengio et al., *Curriculum Learning*, ICML 2009 | 0 专文 | T5 已列，未排期 |
@@ -33,7 +33,7 @@
 | 9 | **状态是集合，要置换不变** | **集合表征** | Set Transformer（Lee et al., ICML 2019）· Perceiver（Jaegle et al., ICML 2021） | 0 | 现用"段投影 + 类型嵌入"，**没有显式置换不变性设计** |
 | 10 | **有大量现成调度数据** | **离线 RL** | CQL（Kumar et al., NeurIPS 2020）· IQL（Kostrikov et al., ICLR 2022） | ~0 | 未评估；BKS 与规则调度是现成数据 |
 | 11 | **策略表达多模态** | **序列建模 / 扩散策略** | Decision Transformer（Chen et al., NeurIPS 2021）· Diffusion Policy（Chi et al., RSS 2023） | 0 | 未评估 |
-| 12 | **多智能体协同** | **多智能体策略梯度 / 值分解** | MAT（Wen et al., NeurIPS 2022）· QMIX（Rashid et al., ICML 2018）· MAPPO（Yu et al., NeurIPS 2022） | MAT 1；**MAPPO 已用滥（16 篇）** | 本仓是**联合链**（单策略），不是多智能体——**是否要转，是设计决定** |
+| 12 | **多智能体协同** | **多智能体策略梯度 / 值分解** | MAT（Wen et al., NeurIPS 2022, pp. 16509–16521）· QMIX（Rashid et al., ICML 2018, PMLR 80:4295–4304）· **MAPPO：Yu et al., *The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games*, NeurIPS 2022 _Datasets and Benchmarks Track_, pp. 24611–24624**。⚠️ **不是主会 track，题名也不叫 MAPPO**（MAPPO 是方法简称） | MAT 1；**MAPPO 已用滥（16 篇）** | 本仓是**联合链**（单策略），不是多智能体——**是否要转，是设计决定** |
 
 ## 2. 三条最值得的
 
@@ -64,15 +64,34 @@ AEI 103216 连注意力层都没有（纯全连接 MLP），只能把距离写�
 
 **⟹ 该砍的是"泛化卖点"，不必然该砍"几何作为 ① 的输入"。本文只记录这个张力，不下结论。**
 
-## 4. 引证状态（**必须逐条核**）
+## 4. 引证状态（**2026-10-05 已逐条网搜核过**）
 
-上表的**题名 + 会议 + 年**有把握；**卷期页一律未核，全部标「待核」**。
+**核查表见 `docs/method-citations-verified.md`**（21 条，逐条给可点来源；含"与我原来写的不一致处"与"查不到处"）。
 
-⚠️ **写进论文前必须逐条对**：`docs/literature.md` · `docs/citation-cards.md` · `references/` 的原文。
-本仓规矩：**核不实就写「待核」，不得反过来当已核引用**（见 `CLAUDE.md` 硬规则 3）。
+**核出的真错误（已在本表就地改正）**：
 
-⚠️ 上表第 3 行（指针网络）与第 9 行（集合表征）**未确认 `references/` 里有没有原文**——
-插入引用前先查文献库。
+| 我原来写的 | 实际 |
+|---|---|
+| Pointer Networks, **NeurIPS** 2015 | **NIPS** 2015（该会议 2018 年才改名；写 NeurIPS 2015 是年代错误） |
+| **MAPPO**（Yu et al., NeurIPS 2022） | 题名是 *The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games*；**在 NeurIPS 2022 _Datasets and Benchmarks Track_，不是主会** |
+
+**另外两条口径**（写进论文时注意）：
+- **方法简称不是题名**。21 条里只有 CPO 与 Pointer Networks 的题名与简称恰好相同。
+  写"PCGrad（Yu et al.）"「POMO（Kwon et al.）」这类**要补正式题名**。
+- **ICML 2009 由 ACM 出版，不是 PMLR**（PMLR 从 2013 年起收录 ICML）。
+
+**⚠️ 仍标「待核」的**（核查表 §3 列全）：
+- **NeurIPS 2020/2021 官方不列页码**（第 5、9、13、15 条）——**引用时删掉页码，不要编**；
+- **Ng, Harada & Russell, ICML 1999** 无出版社在线记录、无 DOI（页码只有二手来源）；
+- **HRPEO（arXiv 2409.18742）** 未查到正式发表 ⟹ **只能引预印本并写明**。
+
+⚠️ **上表里凡我未核的字段，一律不许从记忆补。** 本仓规矩：**核不实就写「待核」**（`CLAUDE.md` 硬规则 3）。
+
+⚠️ **2026-10-05 我犯过一次同型错误（记账）**：在给 ⑩ 的 brief 里写了
+"HRPEO（arXiv 2409.18742，FJSP + 有限多载 AGV，**容量 2/3**）"——
+**本仓事实卡里没有这个数**（卡片原文只说"载重上限为 **C**"，是一个符号）。
+**那是我从印象里补的具体数字**，正是硬规则 3 要防的。**已作废，不得引用。**
+（该错只出现在对话与 brief 里，未落进任何文件。）
 
 ## 5. 与其它文档的关系
 
