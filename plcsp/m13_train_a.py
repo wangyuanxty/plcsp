@@ -64,11 +64,11 @@ from statistics import mean, pstdev
 
 import torch
 
-from .algo.group_rel import SEED_STRIDE, roll_chain
+from .algo.group_rel import ADV_MODES, SEED_STRIDE, roll_chain
 from .algo.policy import PolicyNet
 from .algo.runner import run_training
 from .algo.setup import build_setup
-from .env.constraints import ConstraintConfig
+from .env.constraints import ABLATION_GROUPS, ConstraintConfig
 from .env.des import CHARGE_CAND_SKIP, PM_CAND_NOW, SimConfig, rollout
 from .env.instances import load_mk
 from .env.reward import ReferenceObjectives, reward_weights
@@ -182,6 +182,21 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
 def main() -> None:
     ap = argparse.ArgumentParser(description="A（加权标量化）联合链 GRPO 训练")
     ap.add_argument("--inst", default="mk01", help="实例名（mk01..mk10）")
+    # ⚠️ 组名里有以 `-` 开头的（`-物流`/`-生产`/`-信息`）——**argparse 会把 `-物流` 当选项**，
+    #    故这类值必须写成 `--constraints=-物流`（等号形式）。help 里写明。
+    ap.add_argument("--constraints", default="Full", choices=tuple(ABLATION_GROUPS),
+                    help="约束组（消融 B 的那 5 组，定义在 env/constraints.py 的 ABLATION_GROUPS）："
+                         f"{tuple(ABLATION_GROUPS)}。默认 Full（十约束全开）。"
+                         "⚠️ 以 `-` 开头的组名必须用等号形式：`--constraints=-物流`。"
+                         "它与 ctx（特征归一化）、训练、评估**三处同源**——"
+                         "`build_training_setup` 原样返回，调用方不需要另传。")
+    ap.add_argument("--adv-mode", default="scalar", choices=ADV_MODES,
+                    help="优势口径（O1 + 消融 D）："
+                         "`scalar`（默认，历史口径，逐位兼容）＝先加权求和再组内 z 化；"
+                         "`per_objective`（O1）＝每目标各自组内 z 化再按 w 合成；"
+                         "`reinforce`（消融 D 的对照）＝**只减组内均值、不除以组内标准差** —— "
+                         "用来证「组内相对」的那一半（std 归一化）是不是必要的。"
+                         "⚠️ 它**不进 `_make_eval_fn`**：评估只跑 argmax、不算优势。")
     ap.add_argument("--steps", type=int, default=300, help="训练步数（MK01/G=8 约 18 s/步）")
     ap.add_argument("--G", type=int, default=8, help="组大小（J=1，预算全给 G）")
     ap.add_argument("--lr", type=float, default=3e-4, help="Adam 学习率（仅首步生效）")
@@ -322,7 +337,8 @@ def main() -> None:
         cfg = replace(cfg, battery_low=0.0)
     if args.pm_interval is not None:
         cfg = replace(cfg, pm_interval=args.pm_interval)
-    inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(args.inst, cfg=cfg)
+    inst, lay, dm, cfg, ctx, pol, constraints = build_training_setup(
+        args.inst, cfg=cfg, constraints=ABLATION_GROUPS[args.constraints])
     if args.agv_battery_kwh is not None:
         from .env.layout import AgvSpec
         for i, a in enumerate(lay.agvs):
@@ -348,6 +364,10 @@ def main() -> None:
           f"charge_head={args.charge_head} batch_head={args.batch_head} "
           f"multi_drop={args.multi_drop} agv_failover={args.agv_failover} "
           f"machine_age_failure={args.machine_age_failure} t3={args.t3}")
+    # 这两项不进 `_make_eval_fn`（评估只跑 argmax）：约束组经 `constraints=` 三处同源；
+    # 优势口径只在训练侧用。**单列一行**，好让日志一眼看出这一跑是哪一组消融。
+    print(f"[m13] 约束组={args.constraints}｜优势口径={args.adv_mode}"
+          f"（这两项不在上面的同源清单里——评估不跑优势，约束组由 build_training_setup 三处同源）")
     if args.agv_battery_kwh is not None:
         print(f"[m13] ⚠️ 小电池档：车队电池全换 {args.agv_battery_kwh} kWh、battery_low=0 "
               f"（电池是**布局**属性 ⟹ 改动力学，与默认档读数不可比；⑪ 这才可能跑到耗尽）")
@@ -381,7 +401,8 @@ def main() -> None:
                                   route_zones=args.route_zones, geom_bias=args.geom_bias,
                                   pm_head=args.pm_head, charge_head=args.charge_head,
                                   batch_head=args.batch_head,
-                                  recompute_chunk=args.recompute_chunk),
+                                  recompute_chunk=args.recompute_chunk,
+                                  adv_mode=args.adv_mode),
                  seed0=args.seed, run_dir=str(run_dir), save_every=args.save_every,
                  resume=args.resume,
                  parallel=args.parallel, n_workers=args.workers,

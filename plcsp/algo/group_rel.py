@@ -112,9 +112,11 @@ def _z(vals: np.ndarray) -> np.ndarray:
     return (vals - vals.mean()) / (vals.std() + 1e-9)
 
 
-# 优势口径（O1）。`scalar` = 历史口径（先加权求和、再组内 z 化，逐位兼容）；`per_objective`
-# = 每目标各自组内 z 化、再按 w 合成。白名单在此唯一定义，入口与算子共用（写错名不得静默回退）。
-ADV_MODES = ("scalar", "per_objective")
+# 优势口径（O1 + 消融 D）。`scalar` = 历史口径（先加权求和、再组内 z 化，逐位兼容）；
+# `per_objective` = 每目标各自组内 z 化、再按 w 合成；
+# `reinforce` = **消融 D 的对照**：保留减均值、**去掉除以组内标准差**（见 `_advantages`）。
+# 白名单在此唯一定义，入口与算子共用（写错名不得静默回退）。
+ADV_MODES = ("scalar", "per_objective", "reinforce")
 
 
 def _check_adv_mode(adv_mode: str) -> None:
@@ -124,7 +126,9 @@ def _check_adv_mode(adv_mode: str) -> None:
             f"adv_mode={adv_mode!r} 未知：只接受 {ADV_MODES}。"
             "'scalar' = 先加权求和再组内 z 化（历史口径，逐位兼容）；"
             "'per_objective' = 每目标各自组内 z 化、再按 w 合成"
-            "（O1：消除目标之间的相对尺度，让 w 真正控制权衡）。")
+            "（O1：消除目标之间的相对尺度，让 w 真正控制权衡）；"
+            "'reinforce' = 只减组内均值、**不除以组内标准差**"
+            "（消融 D：证明「组内相对」的那一半——std 归一化——是不是必要的）。")
 
 
 def _advantages(f_objs: np.ndarray, w: tuple[float, float, float],
@@ -142,6 +146,13 @@ def _advantages(f_objs: np.ndarray, w: tuple[float, float, float],
     `f_objs` 是 (G, 3) 的**原始目标值**（越小越好），float64（与奖励侧同精度口径）。
     """
     _check_adv_mode(adv_mode)
+    if adv_mode == "reinforce":
+        # 消融 D 的对照：**只去掉"除以组内标准差"这一件事**。
+        # GRPO 的定义特征是 A = (r − mean)/std；这里取 A = r − mean。
+        # ⚠️ **刻意不减 std 之外的东西**：连均值也不减（A = r）会把**梯度尺度**也绑到 r 的量纲上，
+        #    学习率得重调，测出来的是"两件事叠加"，不是"std 归一化有没有用"。只改一个变量。
+        r = np.asarray([scalar_reward(tuple(o), w) for o in f_objs], dtype=np.float64)
+        return torch.tensor(r - r.mean(), dtype=torch.float32)
     if adv_mode == "scalar":
         r = np.asarray([scalar_reward(tuple(o), w) for o in f_objs], dtype=np.float64)
         return torch.tensor(_z(r), dtype=torch.float32)
