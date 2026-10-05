@@ -32,6 +32,7 @@ from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
 from plcsp.env.des import (AgvSim, SimConfig, SimTrack, SimWorld, ZoneManager, batch_cands,
                            build_zone_map, drop_stops, rollout)
 from plcsp.env.instances import load_mk
+from plcsp.env.mkt import load_mkt
 from plcsp.env.layout import AgvSpec, sample_layout
 from plcsp.env.transport import TransportCaliber
 
@@ -331,3 +332,17 @@ def test_multi_drop_makes_the_capacity_parameter_bite():
 
     met3 = rollout(inst, seed_chain=1, cfg=SimConfig(multi_drop=True), agv_phi=[], constraints=cons)
     assert met3["batch_items"] > met3["batch_trips"], "容量 3 档必须有拼批发生"
+
+@pytest.mark.unit
+def test_multi_drop_runs_under_the_matrix_caliber():
+    """矩阵口径（MKT 实例）下 multi-drop 也成立：每腿各自查表、**无未映射段**、每件恰好送达一次。
+
+    ⚠️ ⑪ 必须关：矩阵没有充电桩项（充电腿会走 `unmapped` 降级或显式报错），
+    这是口径的既有约束（同 `test_transport_wiring._exact_caliber_constraints`），不是本批引入的。
+    """
+    mkt = load_mkt("mk01")
+    met = rollout(mkt.base, seed_chain=1, cfg=SimConfig(n_agv=3, multi_drop=True),
+                  agv_phi=[], constraints=_no_charge_cons())
+    assert met["unmapped_legs"] == 0, "multi-drop 的腿漏进了未映射端点"
+    assert met["deliveries"] == len(met["task_flow"]) and not met["horizon_hit"]
+    assert met["batch_trips"] > 0
