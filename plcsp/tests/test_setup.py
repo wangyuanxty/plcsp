@@ -66,8 +66,11 @@ def test_main_threads_constraints_to_setup_step_and_eval(monkeypatch):
 
     def _fake_roll(*a, **k):
         roll_calls.append(k)
-        # 完成度两键：`_make_eval_fn` 自 2026-10-05（T3 批）起一并报它们
-        return [], {"makespan": 1.0, "jobs_done": 1, "horizon_hit": False}
+        # 完成度两键：`_make_eval_fn` 自 2026-10-05（T3 批）起一并报它们。
+        # ⚠️ 自 2026-10-05（期① 消融批）起评估还读 `energy` 与 `completes`（另两项目标
+        # 的逐种子原始值）——替身必须凑齐**全部**被读的键，否则是替身失配、不是被测代码错。
+        return [], {"makespan": 1.0, "energy": 0.0, "completes": {},
+                    "jobs_done": 1, "horizon_hit": False}
 
     monkeypatch.setattr(m13, "run_training", _fake_run)
     monkeypatch.setattr(m13, "roll_chain", _fake_roll)

@@ -69,7 +69,8 @@ from .algo.policy import PolicyNet
 from .algo.runner import run_training
 from .algo.setup import build_setup
 from .env.constraints import ABLATION_GROUPS, ConstraintConfig
-from .env.des import CHARGE_CAND_SKIP, PM_CAND_NOW, SimConfig, rollout
+from .env.des import (CHARGE_CAND_SKIP, PM_CAND_NOW, SimConfig, compute_due_dates,
+                      rollout, weighted_tardiness)
 from .env.instances import load_mk
 from .env.reward import ReferenceObjectives, reward_weights
 from .env.t3_budget import (BUDGET_RATIO, T3_CONSTRAINTS, T3_ETA, T3Budget,
@@ -151,7 +152,20 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     """
     def eval_fn(policy) -> dict:
         ms, jobs, hits = [], [], []
+        eng, twt = [], []
         charge_use, pm_now = [], []
+        # ⚠️ **另两项目标（energy / TWT）2026-10-05 补记**：此前评估**只记 makespan**，而
+        #   ① `experiment-plan.md` §H 要求附表报**三个分量**；
+        #   ② 实验 E（三目标 Pareto 前沿）**必须**有三者，否则根本画不出前沿；
+        #   ③ **机制可能只在 energy/TWT 上有贡献**——⑪ 充电头 / ⑫ 维护头最像"拿 makespan
+        #      换能耗/交期"的机制，只报 makespan 会把它们**误判成"没用"**。
+        # ⚠️ TWT 口径与 `ReferenceObjectives.of` **逐字同源**：同一 TF/RDD 交期 + **等权**
+        #   （`SimWorld._tardy` 就是等权，见 `des.py`）。两边各写一份口径就会**静默错位**。
+        # **纯记录，不改任何语义**（不参与优势、不参与早停）。
+        # `cfg or SimConfig()`：与 `ReferenceObjectives.of` 的 None 语义一致（None = 默认 cfg）。
+        _c = cfg or SimConfig()
+        due = compute_due_dates(inst, _c.tau, _c.due_range)
+        eq_w = dict.fromkeys(range(inst.n_jobs), 1.0)
         for s in range(seeds):
             dec, met = roll_chain(inst, lay, dm, cfg, policy, seed=EVAL_SEED_BASE + s,
                                   ctx=ctx, sample=False, constraints=constraints,
@@ -159,6 +173,8 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                                   geom_bias=geom_bias, pm_head=pm_head,
                                   charge_head=charge_head, batch_head=batch_head)
             ms.append(float(met["makespan"]))
+            eng.append(float(met["energy"]))
+            twt.append(float(weighted_tardiness(met["completes"], due, eq_w)))
             # ⚠️ 完成度必须一起报：未跑完的 episode 的 makespan 是**部分完工的最大值**
             #（`max(completes)`），单看它会读出"小得多的 makespan"这种假改进。
             jobs.append(int(met["jobs_done"]))
@@ -172,6 +188,10 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                # 逐评估种子的**原始值**（2026-10-05 期①消融）：种子散度是消融差异的判据，
                # 只留均值/标准差看不出单个种子的离群。**纯记录，不改任何语义**。
                "makespan_per_seed": ms,
+               # 另两项目标（同一条纪律：**纯记录，不改任何语义**）。逐种子一起留——
+               # 消融的比较要用**配对**检验（同一批 eval 种子），只有均值做不了。
+               "energy_mean": mean(eng), "energy_per_seed": eng,
+               "twt_mean": mean(twt), "twt_per_seed": twt,
                "jobs_done_min": min(jobs), "horizon_hit_frac": sum(hits) / len(hits)}
         if t3:
             # ⑪ 的"充电动作使用率"与 ⑫ 的"主动保养占比"——上界退化守卫的直接读数

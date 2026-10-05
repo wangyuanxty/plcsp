@@ -17,11 +17,23 @@ import sys
 import pytest
 
 from plcsp import m13_train_a as m13
+from plcsp.env.des import SimConfig
+from plcsp.env.instances import load_mk
 
 # 链级开关（改输入 / 动作空间）——训练与评估**都必须**逐字相同
 CHAIN_SWITCHES = ("route_zones", "geom_bias", "pm_head", "charge_head")
 # SimConfig 级开关（改动力学）——随 `cfg` 到达两侧，同样必须同源
 CFG_SWITCHES = ("agv_failover", "machine_age_failure")
+
+
+def _eval_fn(**kw):
+    """按本文件的口径建一个评估回调（mk01 + 默认 cfg）。
+
+    ⚠️ 自 2026-10-05 起评估回调还要算 **energy / TWT**（`experiment-plan` §H 的三分量、
+    实验 E 的前置）⟹ 它现在真的会碰 `inst` 与 `cfg`，替身不能再传 `None`。
+    用 **mk01** 而非 `gen_random`：交期标定表是**逐实例名**的，合成实例查不到 (τ, R) 会显式报错。
+    """
+    return m13._make_eval_fn(load_mk("mk01"), None, None, SimConfig(), None, **kw)
 
 
 def _spy(monkeypatch) -> dict:
@@ -33,7 +45,10 @@ def _spy(monkeypatch) -> dict:
         seen.update(kw)
         # 完成度两键：`_make_eval_fn` 自 2026-10-05（T3 批）起一并报它们——未跑完的 episode
         # 的 makespan 是**部分完工**的最大值，单看会把掐表读成改进。
-        return [], {"makespan": 1.0, "jobs_done": 1, "horizon_hit": False}
+        # `energy` / `completes`：三目标补记后评估会读它们（TWT 由 completes + 交期事后算）。
+        return [], {"makespan": 1.0, "jobs_done": 1, "horizon_hit": False,
+                    "energy": 0.0,
+                    "completes": {j: 1.0 for j in range(load_mk("mk01").n_jobs)}}
 
     monkeypatch.setattr(m13, "roll_chain", fake)
     return seen
@@ -45,9 +60,8 @@ def test_eval_fn_forwards_every_chain_switch(monkeypatch):
     漏掉任何一个 ⟹ 训练开、评估关 ⟹ 评估的是**另一个策略**，且**不报错**。
     """
     seen = _spy(monkeypatch)
-    fn = m13._make_eval_fn(None, None, None, None, None, seeds=1, rule=1.0,
-                           route_k=2, route_zones=True, geom_bias=True,
-                           pm_head=True, charge_head=True)
+    fn = _eval_fn(seeds=1, rule=1.0, route_k=2, route_zones=True, geom_bias=True,
+                  pm_head=True, charge_head=True)
     fn(policy=None)
 
     assert seen["route_k"] == 2
@@ -58,7 +72,7 @@ def test_eval_fn_forwards_every_chain_switch(monkeypatch):
 def test_eval_fn_defaults_are_all_off(monkeypatch):
     """默认档：每个开关为假。**这是"默认关 ⟹ 逐位不变"契约的评估侧一半。**"""
     seen = _spy(monkeypatch)
-    m13._make_eval_fn(None, None, None, None, None, seeds=1, rule=1.0)(policy=None)
+    _eval_fn(seeds=1, rule=1.0)(policy=None)
 
     assert seen["route_k"] == 1
     for k in CHAIN_SWITCHES:
