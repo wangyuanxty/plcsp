@@ -99,6 +99,10 @@ esearch\plcsp-hnsa`。
    单步墙钟：MK01 **1.02×**、MK10 **1.07×**（同机同协议）。提交 `dceba93`（模型）+ `42a5635`（头）。
    候选见 §30.3。⏸ **未做**：跨队列收集（原型高 3–4 倍，见 §48.7）、卸货顺序交策略、载量扫描。
    ⚠️ **③ 已因役龄模型改判**（§44，`fail_rate` 不再无记忆）；⑨（failover 是动力学修复，不改变无记忆性）与 ④ 仍按 §30.5 处理——约束保留，只是不需要专门机制。
+   **T3 拉格朗日**（§49，`--t3` 默认关：`r' = r − Σλ·â`，λ 对偶上升，无 critic；
+   激活量只算**被迫发作**（⑪ `agv_dry_events` / ⑫ `pm_events_forced`）、逐实例冻结 `a^ref`、
+   六条可控约束 ①②③⑤⑪⑫）。**默认关 ⟹ 逐位不变**（参数摘要 == 既有捕获参照）。
+   ⚠️ 与设计的三处偏差、以及"G=2 时罚项结构性失效（需 G≥3）"见 §49.2。
 
 **其余**：见 `progress-log.md` 开放线索 A–K。
 
@@ -284,6 +288,29 @@ esearch\plcsp-hnsa`。
   （它自己 docstring 记 4.2–4.5 min 的 6.5 倍，本机当前 torch 状态所致，与本批改动无关；
   其余 343 项合计约 773 s）。⚠️ **该 42 min 是假象**（2026-10-03 复查）：那批实现者自己并发跑活造成争抢，实测同一份代码独占时约 8–9 min。**随后已修**（见下条），现行门禁 **351 项 / 4 min 19 s**。
 - 详见 `progress-log.md` §二十二。计划：`superpowers/plans/2026-10-03-p4b-mkt-transport-integration.md`。
+
+## 5.12 T3 拉格朗日：约束罚项 + 对偶上升（2026-10-05 完成）
+
+- **机制**（设计 `docs/t3-design.md`）：`r' = r − Σᵢλᵢ·âᵢ`（**组内 z 化之前**逐链减），
+  `λᵢ ← clip(λᵢ + η(âᵢ − bᵢ), 0, λ_max)`。**无 critic**（GRPO-Lagrangian）。
+  `âᵢ = aᵢ/aᵢ^ref` = 归一化的**被迫激活量**（⑪ 用 `agv_dry_events`、⑫ 用 `pm_events_forced`
+  ——**罚"策略主动做的动作"是自相矛盾**）；六条可控约束 ①②③⑤⑪⑫（④⑨ 不纳入：不可控）。
+  **默认关 ⟹ 逐位不变**（`t3_lambda=None` 时优势路径一字未改，参数摘要 == 既有捕获参照）。
+- **落点**：`plcsp/env/t3_budget.py`（冻结表 + 对偶上升 + 可控性守卫）、
+  `plcsp/algo/group_rel.py`（罚项/回传 λ）、`plcsp/algo/runner.py`（**λ 的跨步持有者**）、
+  `plcsp/env/des.py`（② 的计时新键 `buffer_block_min`、⑫ 拆 `pm_events_forced/chosen`、
+  `run_gated` 补 `zone_wait`）、`plcsp/m13_train_a.py`（`--t3/--t3-constraints/--t3-ratio/
+  --t3-eta` + 两个机制验证档 `--pm-interval/--agv-battery-kwh`）。
+- **标定**（`plcsp/m17_t3_calib.py`，照 ⑧ 交期的做法）：几何口径 `A_REF` **10/10 实例六条全活**；
+  矩阵口径 `A_REF_MATRIX` **只收 4/10**（另 6 个的 ② 在参考调度上恒 0、mk02/mk04 的 ③ 也为 0
+  ——参考水平为 0 无法归一化 ⟹ **不进表、查表显式报错**）。
+- **⚠️ 三处与设计的偏差**（设计没说清或没说，理由见 `progress-log.md` §49）：
+  ① 标定环境取"六条全活的机制档"（短 `pm_interval` + 小电池 + `battery_low=0`）；
+  ② 新增**可控性守卫**（③/⑫ 要维护头、③ 还要役龄模型、⑪ 要充电头，否则不可控 ⟹ 不纳入）；
+  ③ **G=2 时罚项结构性失效**（两点 z 化恒为 ±1）⟹ T3 需 G ≥ 3。
+- **验收**：`plcsp/tests/test_t3_{budget,lagrangian}.py`（设计 §6 的七条 → 45 项测试）。
+- **回归门禁**：`plcsp/tests/` **540 项通过 + 9 跳过、0 失败**（344 s）；`ruff check plcsp/` clean。
+  详见 `progress-log.md` §49。
 
 ## 6. 环境
 

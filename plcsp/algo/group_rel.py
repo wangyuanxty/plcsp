@@ -72,6 +72,7 @@ from ..env.instances import Instance
 from ..env.layout import Layout
 from ..env.reward import (ReferenceObjectives, objective_vector, reward_weights,
                           scalar_reward)
+from ..env.t3_budget import T3Budget, check_influenceable, dual_ascent, normalized_activation
 from ..nn.features import NormContext
 from ..nn.state_emb import build_geom_bias, build_tok
 
@@ -1119,7 +1120,10 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                      batch_head: bool = False,
                      recompute_chunk: int = 0,
                      parallel: bool = False,
-                     pool: "ChainWorkerPool | None" = None) -> tuple[float, dict]:
+                     pool: "ChainWorkerPool | None" = None,
+                     t3_lambda: np.ndarray | None = None,
+                     t3_budget: T3Budget | None = None,
+                     t3_eta: float = 0.0) -> tuple[float, dict]:
     """一步联合链组训练（spec §5.3.4）。
 
     G 条链（**J=1**，预算全给 G：约定 3）→ 每条一个终端奖励（三目标加权标量化，
@@ -1202,6 +1206,29 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     `True` 启用——AGV 在取货点在**预构造的批次候选**里选（`des.batch_cands` 的追加件数 s），
     B 决策与其余五头同进链 logp、同吃采样流、同受逐决策裁剪。⚠️ 需 `cfg.multi_drop=True`
     且 ⑩ 异构车队开（两条都在 `roll_chain` 入口显式报错）。
+
+    ⚠️ **`t3_lambda` / `t3_budget` / `t3_eta`（T3 拉格朗日，2026-10-05）——三者默认全 `None`
+    ⟹ 优势路径一字不改（逐位不变）**。全给时走**对偶上升**（设计 `docs/t3-design.md`）：
+
+        r'_g = r_g − Σᵢ λᵢ·âᵢ,g          # 逐链（G 条链各有自己的 â），**在组内 z 化之前**
+        A = z(r')                        # 之后照旧（唯一优势，不按头分层）
+        λᵢ ← clip(λᵢ + η·(âᵢ_mean − bᵢ), 0, λ_max)   # 下一步的 λ，回传给持有者
+
+    - **`âᵢ,g = aᵢ,g / aᵢ^ref`**：归一化的**被迫激活量**（口径见 `env/t3_budget`：
+      ⑪ 用 `agv_dry_events`、⑫ 用 `pm_events_forced`——罚"策略主动做的动作"是自相矛盾）。
+      归一化后才跨约束可比（六条的量纲从 1.75 到 2503）。
+    - ⚠️ **λ 的持久状态不在这里**：本函数**只读** `t3_lambda`、把**下一步的 λ** 放进
+      `diag["t3_lambda"]` 回传；跨步累积由**持有者**（`runner.run_training`，见
+      `env/t3_budget.T3Lagrangian`）负责——这是设计 §3.4 点名最容易写错的一处。
+    - ⚠️ **λ 的有效强度会被组内 z 化按 σ(r) 缩放**（设计 §3.3）：z 只消总尺度、不消分量之间的
+      相对尺度，故 λ 不是"直接指定罚项占多大权重"。v1 就用 `scalar` 口径（λ 仍是单调旋钮），
+      本函数因此**拒收 `adv_mode != "scalar"` + T3 的组合**（v1' 依赖 O1 切成默认，见设计 §3.3）。
+    - ⚠️ **可控性守卫**（入口显式报错，不静默）：⑫ 需要维护头、③ 需要维护头**且**
+      `cfg.machine_age_failure`、⑪ 需要充电头——没有对应动作时罚它是"罚策略无法控制的事"
+      （④⑨ 不纳入的同一条理由）。只要其中一条不在 `t3_budget.keep` 里就不受此限。
+    - 诊断：`diag["t3_lambda"]`（下一步 λ，持有者收下）、`diag["t3_lambda_used"]`（本步实际用的）、
+      `diag["t3_ahat"]`（组内平均 â）、`diag["t3_pen_mean"]`（平均罚项，标量）。
+      `r_mean` / `r_std` **仍是未加罚的奖励读数**（与历史口径同义，不因 T3 而变义）。
 
     ⚠️ **`parallel`（链级多进程，2026-10-04 并行批次）默认 `False` = 原串行路径，逐位不变。**
     `True` 时把 G 条链交给 `ChainWorkerPool`（spawn）——worker 跑
@@ -1292,10 +1319,34 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
                          "⇒ clamp 近乎恒等。请用 epochs>1，或 clip_eps=None（纯组内 REINFORCE）。")
     if policy.optim is None:
         policy.optim = torch.optim.Adam(policy.parameters(), lr=lr)
+    # ── T3（拉格朗日）入口守卫：全部**显式报错**，不静默、不在跑了几分钟仿真之后才炸 ──
+    if (t3_lambda is None) != (t3_budget is None):
+        raise ValueError(
+            "t3_lambda 与 t3_budget 必须**同时给**（λ 与预算是一对，单独给一个无意义）："
+            f"实得 t3_lambda={'None' if t3_lambda is None else '非 None'}、"
+            f"t3_budget={'None' if t3_budget is None else '非 None'}。")
+    if t3_budget is not None:
+        assert t3_lambda is not None            # 上面的一对校验已挡
+        if adv_mode != "scalar":
+            raise ValueError(
+                f"T3 目前只支持 adv_mode='scalar'（实得 {adv_mode!r}）：罚项加在标量奖励上、"
+                "组内 z 化之前（设计 §3.3 的 v1 口径）。per_objective 口径下'罚项算在哪一项'"
+                "没有定义——v1'（罚项作为独立项各自 z 化）依赖 O1 切成默认，尚未实现。")
+        if not t3_eta > 0.0:
+            raise ValueError(f"t3_eta={t3_eta} 非法：对偶上升步长必须 > 0（T3 开着而 λ 不动"
+                             "是静默空转，不是'冻结 λ'的开关——要冻结请传 t3_budget=None）。")
+        lam = np.asarray(t3_lambda, dtype=np.float64)
+        if lam.shape != (len(t3_budget),):
+            raise ValueError(f"t3_lambda 形状 {lam.shape} ≠ T3Budget 的约束数 {len(t3_budget)}"
+                             f"（keep={t3_budget.keep}）——λ 与预算不同源。")
+        # 可控性守卫：没有对应动作的约束不纳入（单一真相在 `t3_budget.check_influenceable`，
+        # CLI 用同一个函数在开工前先查一遍）。
+        check_influenceable(t3_budget.keep, pm_head, charge_head, cfg.machine_age_failure)
 
     chains: list[list[Decision]] = []
     rewards: list[float] = []
     f_objs: list[tuple[float, float, float]] = []
+    mets: list[dict] = []                       # T3 的激活量原料（逐链 metrics；T3 关时不用）
     if parallel:
         # ⚠️ 并行档（2026-10-04 并行批次）：G 条链各一个 worker 任务，worker 只跑 CPU；
         #    主进程只在这里收决策/指标，随后照旧做重算 + 反向 + 优化器步。
@@ -1311,6 +1362,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)
             rewards.append(scalar_reward(f, w))     # 奖励读数（与串行档同一运算次序）
+            mets.append(met)
     else:
         # ⚠️ 评审 I-3：动作采样流由本步的 `seed` 派生并透传——组内 G 条链**顺序共享**同一条流
         #    （消费次序确定 ⇒ 逐位可复现），不再落到全局 torch RNG。
@@ -1326,9 +1378,29 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
             f = objective_vector(met)               # 逐目标值 (makespan, energy, TWT)，越小越好
             f_objs.append(f)
             rewards.append(scalar_reward(f, w))     # 奖励读数（诊断用；与历史同一运算次序）
+            mets.append(met)
 
     # O1：两种优势口径的唯一分叉点（见 `_advantages`）。scalar 分支与历史表达式逐位相同。
-    A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode)
+    # T3：在**组内 z 化之前**逐链减罚项 `r'_g = r_g − Σᵢλᵢ·âᵢ,g`，再走同一个 `_z`
+    #（设计 §3.2/§3.3 的 v1：罚项与目标共用 `scalar` 口径，λ 仍是单调旋钮）。
+    if t3_budget is None:
+        A = _advantages(np.asarray(f_objs, dtype=np.float64), w, adv_mode)
+        t3_info: dict = {}
+    else:
+        assert t3_lambda is not None            # 入口守卫已校验成对
+        ahat = np.stack([normalized_activation(m, t3_budget.a_ref, t3_budget.keep)
+                         for m in mets])                                  # (G, n_active)
+        lam_used = np.asarray(t3_lambda, dtype=np.float64)
+        pen = ahat @ lam_used                                             # (G,)
+        A = torch.tensor(_z(np.asarray(rewards, dtype=np.float64) - pen),
+                         dtype=torch.float32)
+        # ⚠️ λ 的下一步：**回传**给持有者（runner），本函数不持有任何跨步状态。
+        ahat_mean = ahat.mean(axis=0)
+        lam_next = dual_ascent(lam_used, ahat_mean, t3_budget.b, t3_eta)
+        t3_info = {"t3_lambda": tuple(float(x) for x in lam_next),
+                   "t3_lambda_used": tuple(float(x) for x in lam_used),
+                   "t3_ahat": tuple(float(x) for x in ahat_mean),
+                   "t3_pen_mean": float(pen.mean())}
     # ⚠️ 设备跟随参数（2026-10-04 设备批次）：优势 / 逐决策回放都必须在**参数设备**上参与
     #    损失（`--device cuda` 时 `ratio`、`obj` 全在 GPU 上）；`A` 本身留在 CPU 供诊断。
     A_dev = A.detach().to(policy.device)
@@ -1379,7 +1451,7 @@ def joint_chain_step(policy: PolicyNet, inst: Instance, layout: Layout, dm: np.n
     diag = {"loss": loss_val, "ratio": ratio_mean, "clipped_frac": clipped_frac,
             "grad_norm": grad_norm,
             "r_mean": float(np.mean(rewards)), "r_std": float(np.std(rewards)),
-            "A_std": float(A.std())}
+            "A_std": float(A.std()), **t3_info}
     for d in chains:                         # ⚠️ 决策日志**用完即弃**——不得跨 step 累积
         d.clear()
     return diag["r_mean"], diag

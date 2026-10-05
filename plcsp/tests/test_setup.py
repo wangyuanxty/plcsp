@@ -66,7 +66,8 @@ def test_main_threads_constraints_to_setup_step_and_eval(monkeypatch):
 
     def _fake_roll(*a, **k):
         roll_calls.append(k)
-        return [], {"makespan": 1.0}
+        # 完成度两键：`_make_eval_fn` 自 2026-10-05（T3 批）起一并报它们
+        return [], {"makespan": 1.0, "jobs_done": 1, "horizon_hit": False}
 
     monkeypatch.setattr(m13, "run_training", _fake_run)
     monkeypatch.setattr(m13, "roll_chain", _fake_roll)

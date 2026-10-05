@@ -49,12 +49,23 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
                  save_every: int = 10, resume: bool = False,
                  eval_fn=None, eval_every: int | None = None,
                  parallel: bool = False, n_workers: int | None = None,
-                 worker_device: str = "cpu") -> dict:
+                 worker_device: str = "cpu", t3=None) -> dict:
     """训练循环+保存。step_fn(policy, inst, seed=..., **step_kwargs) → (r_mean, diag)。
 
     resume=True：run_dir 存在 ckpt.pt → 恢复续跑（覆盖 policy 参数与起始 step）。
     eval_fn(policy) → dict（可选）；eval_every 步调用并追加到 metrics.jsonl（{"step","eval",...}）。
     返回最终 {"step", "best", "r_last"}。
+
+    ⚠️ **`t3`（T3 拉格朗日的 λ 持有者，2026-10-05）：默认 `None` = 无 T3，训练环逐步
+    逐位不变。** 传 `env.t3_budget.T3Lagrangian` 时：
+    - 每步把 `t3.step_kwargs()`（当前 λ 的副本 + 预算 + η）注进 `step_fn`；
+    - 步后 `t3.advance(diag)` 收下 `joint_chain_step` 回传的**下一步 λ**——λ 是**跨步状态**
+      （设计 §3.4 点名最容易写错的一处：它既不每步重置、也不进 ckpt），**唯一持有者就是
+      本训练环**；
+    - metrics 每行多出 `t3_pen_mean`（标量，自动）+ `t3_lambda_used` / `t3_ahat`（列表，
+      逐约束，观测 λ 轨迹与 â 收敛值用）；
+    - ⚠️ `resume=True` **不恢复 λ**（ckpt 只存模型权重与步号，优化器状态同理不恢复）——
+      续跑从 λ=0 重来（设计 §7 的开放线索）。
 
     ⚠️ **`parallel`（2026-10-04 并行批次）：默认 `False` = 原串行路径，读数逐位不变。**
     `True` 时本函数**拥有**一个常驻的 `ChainWorkerPool`（G 条链铺到 worker 进程，见
@@ -100,9 +111,19 @@ def run_training(policy: PolicyNet, inst: Instance, steps: int,
                   f"startup={pool.startup_s:.2f}s", flush=True)
         t0 = time.time()
         for s in range(start, start + steps):
-            r, diag = step_fn(policy, inst, seed=seed0 + s, **step_kwargs)
+            kw = dict(step_kwargs)
+            if t3 is not None:
+                # ⚠️ λ 是**跨步状态**（设计 §3.4）：每步把**当前** λ 的副本注进 step_fn。
+                kw.update(t3.step_kwargs())
+            r, diag = step_fn(policy, inst, seed=seed0 + s, **kw)
             rec = {"step": s, "r": float(r), "t": time.time() - t0,
                    **{k: v for k, v in diag.items() if isinstance(v, (int, float, str))}}
+            if t3 is not None:
+                # 收下 step_fn 回传的下一步 λ（唯一持有者 = 本训练环）。先记后更，两不误。
+                for k in ("t3_lambda_used", "t3_ahat"):
+                    if k in diag:
+                        rec[k] = [float(x) for x in diag[k]]
+                t3.advance(diag)
             mf.write(json.dumps(rec, ensure_ascii=False) + "\n")
             mf.flush()
             if eval_fn and eval_every and (s + 1) % eval_every == 0:
