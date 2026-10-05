@@ -557,6 +557,22 @@ D:/anaconda/envs/py312/python.exe -m plcsp.m13_train_a \
   （`seed_chain=0`）单调链，那条链上搜出的点会过拟合该链（实测报告档 B：78.09 → **79.56**，
   个别前沿点 78.18 → 88.62）。
 
+**逐层口径表（2026-10-05 协调者口径核查后补——A 表缺这一列就不可核）**：
+
+| 层 | 实例 / 行程口径 | 车队 | 约束集 | `multi_drop`（`agv_failover`） |
+|---|---|---|---|---|
+| ① 规则 | 几何 mk01（`load_mk`） | **v=3** | 该报告档 `REPORT_TIERS` | 开（开） |
+| ② GRPO（全部 5 个 arm） | 几何 mk01（`load_mk`） | **v=3** | 该报告档 | 开（开；B 另加役龄） |
+| ③ NSGA-II | **几何 mk01（`--geometry`，非 MKT）** | **v=3** | 该报告档 | 开（开；B 另加役龄） |
+
+⚠️ **不与已发表数字直接比较**：HGS 153.0 / HA-DQN 97 等在 **MKT、v=6** 口径下（§5.11）；
+期①的冻结口径是**几何 mk01、v=3**。⚠️ **尤其 `v=6` 是二手参数**（原文 JMS 77:356–367, 2024 只写
+`v ~ U(0.8m, 1.2m)`；本仓 `MKT_PUBLISHED_AGV` 的 `"m"` 来自 HA-DQN, Complex & Intelligent
+Systems 11:210, 2025 Table 8）——**不得带进主表**。要出"与已发表数字并列"的行，须另跑 MKT 口径的
+我方策略（改训练口径 = 用户级决定，**先问**）。
+⚠️ 与 §50.3 的 NSGA-II demo（**MKT/v=6**，前沿 ≈(501, 43, 156)）**不是一回事**；
+本批是同实例同 cfg 的几何/v=3（口径自检：同一基因几何/v=3 = 49.14/4.093，MKT/v=6 = 190.0）。
+
 **结果与读数口径**：`progress-log.md` **§52.1 的 "A 主对比" 块**（含 a-twt 退化与
 in-sample/OOS 差异）。运行产物（不进仓库）：`D:/Temp/phaseA/<arm>/`（`metrics.ndjson` + `ckpt.pt`）
 与 `D:/Temp/phaseA/logs/<arm>.log`（口径行逐条可核）；NSGA-II 与规则基线的 JSON 亦在

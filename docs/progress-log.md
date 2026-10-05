@@ -4649,11 +4649,28 @@ multi-drop 档 **127.0 min**、⑫ 关档 **0.0**。**两处计数器各删一�
 ⚠️ `c-no-production` 的规则基线是 **117.77**（不是 109.05）：`-生产` 关 ⑤ 换型 ⟹ 规则档不走换型、
 调度不同 ⟹ 与 `full` 的 −10.4% **不可比**（同 `c-none` 的理由，见 §52.2 第 1 条）。
 `c-no-production` / `c-none` 的 **std = 0.00**：约束关到随机源没了，仿真是确定性的（§52.2 第 2 条）。
+⚠️ **`c-none` 的「档 A / A-MKT」标签只指约束集**：实例是**几何口径 mk01、v=3**，不是 §5.11 的
+MKT 档 A（矩阵、v=6）。**51.72 不可与 §50.3 的已发表 HGS 153.0 并列**——核证见 §52.6（2026-10-05）。
 
 **A 主对比（实验 A：层 ①②③，5 个新 run + 2 档 NSGA-II，2026-10-05）** —— 开关表见
 `experiment-plan.md` §9.8。策略行 = m17 从 ckpt 重评（5 个评估种子、CPU、argmax）；
 规则行 = **同约束集** `rollout`、**同一批 5 个评估种子**；NSGA-II = `pop=100×gen=50`、
 `seed_chain=0` 搜索，**前沿点再在 5 个评估种子上重评（OOS）**。
+
+**逐层口径（逐项核过；A 表缺这一列就不可核，2026-10-05 协调者口径核查后补）**：
+
+| 层 | 实例 / 行程口径 | 车队 | 约束集 | `multi_drop`（`agv_failover`） | 说明 |
+|---|---|---|---|---|---|
+| ① 规则 | 几何 mk01（`load_mk`） | v=3 | 该档 `REPORT_TIERS` | 开（开） | `rollout`，与策略同一实例/cfg/约束集 |
+| ② GRPO（ours + 三个单目标臂） | 几何 mk01（`load_mk`） | v=3 | 该档 | 开（开；档 B 另加役龄） | 训练 = 评估同源 |
+| ③ NSGA-II | **几何 mk01**（`--geometry`，**非 MKT**） | **v=3** | 该档 | 开（开；档 B 另加役龄） | 本批新跑；⚠️ 与 §50.3 的 demo（**MKT、v=6**，前沿 ≈(501, 43, 156)）**不是一回事** |
+
+⚠️ **本表不与已发表数字（HGS 153.0 / HA-DQN 97 等）直接比较**：那些数在 **MKT/v=6** 口径下，
+而期①训练/评估的冻结口径是**几何 mk01、v=3**（MKT 口径的**我方策略数不存在**；要跑得改训练
+口径 = 用户级决定，未做、先问）。
+**口径自检（可复跑）**：NSGA-II 档 A 前沿点（基因解码后）在**几何/v=3** 下重放 = 49.14/4.093
+（= 表内档 A 的 NSGA-II 行），把**同一个基因**换到 MKT/v=6 口径 = **190.0**——差 4 倍，
+证明表里跑的是几何口径、且与 §50.3 那批数无关。
 
 | 档 | 行 | makespan | energy (kWh) | TWT | 备注 |
 |---|---|---|---|---|---|
@@ -4887,3 +4904,88 @@ mk01 行逐位等于 §44.7 的复现值（`makespan=109.0455`）⟹ 口径对�
   另一次 30 seed 为 **−0.24%** ⟹ **两者都在噪声内**。（先前记的"7.4%"是**单个 seed** 的数。）
 - **未改代码是正确处置**——改了要作废 `machine_age_failure=True` 的 11 档。
 - ⚠️ 但**大实例上亏欠更明显**：开/关的故障数 mk01 0/2、mk07 0/4、**mk10 1/5**。**② 期复看。**
+
+### 52.6 口径核查（2026-10-05）：`c-none` 的 51.72 **不是档 A（MKT）的数**，不得与已发表 HGS 153.0 并列
+
+**触发**：`c-none` 的 makespan 51.72 与 §50.3 的参照"已发表 HGS 153.0"摆在一起像"好 3 倍"。
+**核查结论：不可比**——51.72 跑在**另一个问题**上。四个问题的证据如下。
+
+**① `c-none` 的实际开关（逐字；`D:/Temp/phase1/logs/c-none.log` 第 1–3 行 + `run_phase1b.sh:63-64`）**
+
+- **开**：`--constraints=None`（十约束全关）· `--route-k 1` · **`--geom-bias`** · **`--multi-drop`** ·
+  `--agv-failover`（⑨ 关 ⟹ **惰性**，§9.7 已判）。
+- **关**：`--t3` · `--route-zones` · `--pm-head` · `--charge-head` · `--batch-head` · `--machine-age-failure`。
+- **实例 = 几何口径 mk01**（`load_mk`，`m13_train_a.py:132`）· **v=3**（日志"车队3"）· seed 0 · G=8 · 300 步。
+- ⟹ `ABLATION_GROUPS["None"]` 只是**十约束对象**（`constraints.py:54-63`）；在该定义之外**还开着**的
+  是 **`geom_bias`** 与 **`multi_drop`**（`agv_failover` 惰性）。二者都不是 `ConstraintConfig` 的字段，
+  `REPORT_TIERS["A-MKT"] is ABLATION_GROUPS["None"]`（有测试钉）**表达不了它们**。
+- **`geom_bias` 不是档 A 口径的一部分**：它是**策略输入**（距离进注意力分数；开关与说明见
+  `group_rel.py:651-657`、`state_emb.build_geom_bias`）。§9.3 把它列在**基线开关**里、§C 把它列为
+  待消融机制；§9.7 的 `c-none` 行"指定改动"只有 `--constraints=None` ⟹ 它按基线保持开。
+  故 c-none = "档 A 的**约束集** + 一条开着 `geom_bias`（且 `multi_drop` 开）的策略"，
+  不是"机制全关的档 A"。
+- ⚠️ 但**更根本的错位不是 `geom_bias`**：51.72 的实例是**几何 mk01**，根本不是 MKT 实例（见 ③）。
+
+**② 153.0 的出处（已核 PDF 原文，不是凭记忆）**
+
+Moon, S., Lee, S., Park, K.-J. *Learning-enabled Flexible Job-shop Scheduling for Scalable Smart
+Manufacturing.* **Journal of Manufacturing Systems 77:356–367, 2024**；DOI 10.1016/j.jmsy.2024.09.011
+（本地 PDF = arXiv:2402.08979v1，**第 11 页 Table IV**，标题 "MAKESPAN AND RUNTIME RESULTS ON
+BENCHMARK DATASET"）。
+
+| MKT01 | SPT | LPT | FIFO | IGA | HGNN | MatNet | **HGS** |
+|---|---|---|---|---|---|---|---|
+| Cmax（gap） | 175（34%） | 198（51%） | 146（11%） | 141（8%） | 131（0%） | 159（21%） | **153（17%）** |
+
+- **makespan 定义**（原文 §III-A 与 Eq.(1) 逐字）：`Cmax = max C_{in_i}` = **末道工序的完工时刻**；
+  运输时间 = off-load（空驶取货）+ on-load（满载机→机），**含 AGV 运输**。
+  ⟹ 153.0 **不是**"不含运输"的经典 FJSP 数——用户担心的那一条**不适用**。
+- **单位**：原文未声明物理单位（与 Brandimarte 加工时间同一时间单位）；本仓按**分钟**读矩阵（§5.11）。
+- **变体** = MKT01：Brandimarte MK01 加工数据一字不改 + Homayouni & Fontes（JGO 79(2):463–502, 2021）
+  的**机台间行程时间矩阵**。且该 153 是**零样本迁移**数——原文："DRL-based methods (HGS, HGNN,
+  MatNet) use the model trained on graph size 10×6×6"（同页正文）。
+- ⚠️ **车数未公布**：HGS 原文写 "The number of vehicles v for each instance is sampled from distribution
+  **U(0.8m, 1.2m)**"（同页正文）。本仓 `MKT_PUBLISHED_AGV` 的 `"m"` 是**二手**（HA-DQN, Complex &
+  Intelligent Systems 11:210, 2025, Table 8 的 J-M-A 列 `10-6-6`）。⟹ "v=m=6"是**重建**，不是原文承诺。
+- ⚠️ 同页原文还写行程时间"randomly generated between 2 and 10"，与公开矩阵（值域 1–17、含半整数）
+  矛盾（§19.7d / `data/mkt/README.md` §2 已记）。
+
+**③ 两个 makespan 可比吗：不可比（判据逐条）**
+
+| # | 判据 | 51.72（`c-none`） | 153.0（HGS Table IV） | 判定 |
+|---|---|---|---|---|
+| 1 | 含不含 AGV 运输 | 含 | **含**（off-load + on-load，Eq.1） | ✅ **过**——"经典 FJSP 不含运输"不适用于 153.0 |
+| 2 | 运输边界 | 含 **LU 入场段 + 回站段**（`des.py:1643-1648` 从站发首任务；`LuStation.run` 到站记 `completes[j]`） | `Cmax` 止于**末工序完工**；数据管线**丢 LU**（`[1:,1:]`；车位置域 = 机台集 M；出处：`data/mkt/README.md` §2 / §19.7d） | ❌ 本仓多两条 LU 腿 |
+| 3 | **实例口径** | **几何 mk01**（无行程矩阵） | **MKT**（矩阵） | ❌ 决定性 |
+| 4 | **车队** | **v=3** | v=m=6（或 U(0.8m,1.2m) = 4.8–7.2） | ❌ 决定性 |
+| 5 | 仿真器 | 本仓 DES | 其自有仿真器（§51.2 已声明"不得直接并排"） | ❌ |
+| 6 | 策略开关 | `geom_bias` + `multi_drop` 开 | 无对应机制 | ❌ |
+
+⟹ **51.72 的"3 倍优势"全部来自口径差**。它的同口径对照只有一个：**同实例同约束集的规则基线 73.01**（见 ④）。
+
+⚠️ **顺带查出一处过期文档**：`des.py:13` 模块 docstring 仍写"搬运回库不计入 makespan（对齐 BKS 口径）"
+——**P4-B Task 2b 后已不成立**（现行口径见 `des.py:496-500` 与 `LuStation.run`）。只记录，未改代码。
+
+**④ 117.77 vs 205.0：用户猜对一半**
+
+- **117.77** = `rule_makespan` = `rollout(inst, seed_chain=0, cfg=cfg)`（`m13_train_a.py:427`）——
+  **不传 `constraints` ⟹ 十约束全开**（`des.py:47`；`:227` 写明刻意如此，锚 `f^ref`/`m_ref`）。
+  实例 = **几何 mk01**、v=3、cfg=c-none（`multi_drop`/`agv_failover` 开）。✅ 猜测正确。
+- **205.0** = `m14` 的两档参考（§5.11）：**MKT mk01、矩阵、v=m=6**、**`multi_drop=False`（默认）**、
+  约束全关；`rollout` 默认口径（最短候选 + 轮询派车），**未训练**。
+- ⟹ 两个数不同 = **约束集**（全开 vs 全关）× **实例口径**（几何 vs 矩阵）× **车数**（3 vs 6）×
+  **行程模型**（`multi_drop` 开 vs 关）**四项叠加**——不是单一原因。
+- **档 A 自己的规则基线（与 `c-none` 逐项同口径）** = **73.01 ± 0.00**——几何 mk01、v=3、约束全关、
+  同 cfg、**同一批 5 个评估种子**（`D:/Temp/phaseA/rule_baseline.json`；§52.1 的 A 块已引）。
+  ⟹ `c-none` **49.27**（CPU 重评；训练内联 51.72 是 CUDA，确定性档两者差 −2.45）对 73.01 = **−32.5%**。
+  同口径 NSGA-II = **49.14**（§52.1 A 块）⟹ **易问题上我们与 NSGA-II 打平**。
+
+**结论（写论文的判据）**
+
+1. **51.72 / 49.27 不得与 153.0 同行**。它属于"几何口径 mk01"的表（与 73.01 规则、49.14 NSGA-II 并列）。
+2. 与已发表数字对齐**只能**用 MKT 档 A。该口径下目前**只有规则参考 205.0**；**训练后的策略数尚不存在**
+   （§5.11 已记"须重训"）。⟹ 在重训出 MKT 策略之前，**"我们对 HGS"这句话不能写**。
+3. 若要做头条：重训 MKT 档 A 策略 → 同表放 205.0（自家规则）/ 156.0（NSGA-II，§50.3）/ 153.0、97.0
+   （已发表）；且必须同时声明 §51.2 的**不同仿真器**与车数的**重建**性质（HGS 原文 = U(0.8m,1.2m)）。
+4. 🔴 **开放线索**：MKT 档 A 的策略重训（前置：`due_margin` 是编码器输入，旧 checkpoint 不能直接沿用）；
+   HGS 车数 "v=m" 的证据等级降为"重建"；`des.py:13` 的过期 docstring 待改（未改）。
