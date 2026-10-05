@@ -234,8 +234,14 @@ F 敏感性  ·  G HGS  ·  E O3b（需要先做 O1 的加长实验）
 | `charge_head`（⑪） | `joint_chain_step` | **True** |
 | `agv_failover`（⑨） | `SimConfig` | **True** |
 | `machine_age_failure`（③） | `SimConfig` | **True** |
+| **`recompute_chunk`** | `joint_chain_step` | **128**（⚠️ 见下） |
 | `batch_head`（⑩） | — | ⛔ **未实现**（见 §9.5） |
 | T3 | — | ⛔ **未实现** |
+
+⚠️ **`recompute_chunk` 是唯一"不改数值语义"的开关**（它只改"分几次算"）——
+**实测 mk10 全开档：0 → 峰值 49.58 GB；128 → 1.32 GB、步时还快 1.36×**（`progress-log` §47）。
+**基线档必须带它**，否则 mk10 在 8 GB 卡上撞分配器换出。
+它**不进 `_make_eval_fn`**（评估不算 logp 重算 ⟹ 与它无关）。
 
 ### 9.4 随机流口径
 
