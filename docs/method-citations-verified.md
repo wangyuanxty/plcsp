@@ -44,8 +44,8 @@
 | 17 | Multi-Agent Reinforcement Learning is a Sequence Modeling Problem | Muning Wen, Jakub Grudzien Kuba, Runji Lin, Weinan Zhang, Ying Wen, Jun Wang, Yaodong Yang | Advances in Neural Information Processing Systems 35（NeurIPS 2022）· Main Conference Track · pp. 16509–16521 · DOI 10.52202/068431-1201 | 2022 | 是 | [NeurIPS 官网](https://proceedings.neurips.cc/paper_files/paper/2022/hash/69413f87e5a34897cd010ca698097d0a-Abstract.html) · [DOI](https://doi.org/10.52202/068431-1201)（Crossref 记录已核）· [arXiv:2205.14953](https://arxiv.org/abs/2205.14953) | ✅ 已核 |
 | 18 | QMIX: Monotonic Value Function Factorisation for Deep Multi-Agent Reinforcement Learning | Tabish Rashid, Mikayel Samvelyan, Christian Schröder de Witt, Gregory Farquhar, Jakob N. Foerster, Shimon Whiteson | Proceedings of the 35th International Conference on Machine Learning（ICML 2018）· PMLR 80 · pp. 4295–4304 | 2018 | 是 | [PMLR](https://proceedings.mlr.press/v80/rashid18a.html) · [arXiv:1803.11485](https://arxiv.org/abs/1803.11485) | ✅ 已核 · ⚠️ 页码有错值流传，见 §2.6 |
 | 19 | The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games | Chao Yu, Akash Velu, Eugene Vinitsky, Jiaxuan Gao, Yu Wang, Alexandre Bayen, Yi Wu | Advances in Neural Information Processing Systems 35（NeurIPS 2022）· **Datasets and Benchmarks Track** · pp. 24611–24624 · DOI 10.52202/068431-1787 | 2022 | 是 | [NeurIPS 官网（D&B）](https://proceedings.neurips.cc/paper_files/paper/2022/hash/9c1535a02f0ce079433344e14d910597-Abstract-Datasets_and_Benchmarks.html) · [DOI](https://doi.org/10.52202/068431-1787)（Crossref 记录已核）· [arXiv:2103.01955](https://arxiv.org/abs/2103.01955) | ✅ 已核 · ⚠️ track 与题名见 §2.2 |
-| 20 | A History-Guided Regional Partitioning Evolutionary Optimization for Solving the Flexible Job Shop Problem with Limited Multi-load Automated Guided Vehicles | Feige Liu, Chao Lu, Xin Li | **arXiv 预印本** arXiv:2409.18742（cs.SY，交叉 cs.NE）· 14 页 · 未查到正式发表 | 2024 | **否（预印本）** | [arXiv:2409.18742](https://arxiv.org/abs/2409.18742) | ⚠️ 待核（正式发表版本未知）· ⚠️ 容量 2/3 无来源，见 §3.4 |
-| 21 | Integrated Optimization of Automated Warehouse Operations and Last-Mile Transport for Differentiated On-Demand Delivery | Xiaozhu Sun, Bilal Farooq | **arXiv 预印本** arXiv:2609.19048（cs.LG）· 未查到正式发表 | 2026 | **否（预印本）** | [arXiv:2609.19048](https://arxiv.org/abs/2609.19048) | ⚠️ 待核（描述不符，见 §2.7；v1 日期矛盾，见 §3.5） |
+| 20 | A History-Guided Regional Partitioning Evolutionary Optimization for Solving the Flexible Job Shop Problem with Limited Multi-load Automated Guided Vehicles | Feige Liu, Chao Lu, Xin Li | **arXiv 预印本** arXiv:2409.18742（cs.SY，交叉 cs.NE）· 14 页 · 未查到正式发表 | 2024 | **否（预印本）** | [arXiv:2409.18742](https://arxiv.org/abs/2409.18742) | ⚠️ 待核（正式发表版本未知）· ✅ 容量 2/3 已闭环，见 §3.4 |
+| 21 | Integrated Optimization of Automated Warehouse Operations and Last-Mile Transport for Differentiated On-Demand Delivery | Xiaozhu Sun, Bilal Farooq | **arXiv 预印本** arXiv:2609.19048（cs.LG）· 未查到正式发表 | 2026 | **否（预印本）** | [arXiv:2609.19048](https://arxiv.org/abs/2609.19048) | ⚠️ 待核（v1 日期矛盾，见 §3.5）· 原「描述不符」已撤回，见 §2.7 |
 
 ---
 
@@ -86,13 +86,15 @@ ICML 2009 的正式出版方是 **ACM**（Proceedings of the 26th Annual Interna
 
 PMLR 官方页写 **4295–4304**。检索中见到二手引用写 4292–4301（错）。**按 PMLR 官方写。**
 
-### 2.7 第 21 条（arXiv 2609.19048）：描述不符
+### 2.7 第 21 条（arXiv 2609.19048）：描述**成立**——原否定结论已撤回（2026-10-06）
 
-我写「多容量 AGV」。**该文不是这个内容。**
+原写「描述不符。该文不是这个内容」。**该否定结论经全文核对为假，予以撤回。**
 
 - 该文题目：Integrated Optimization of Automated Warehouse Operations and Last-Mile Transport for Differentiated On-Demand Delivery。
-- 内容：AGV 仓库作业 + 最后一公里运输的联合优化（DRL）。多容量/异构容量出现在**最后一公里的车辆路径问题**（MRMH-HCVRP）里，**不是 AGV 的多载容量**。
-- **⟹ 不能把它当作「多容量 AGV」的文献依据。**
+- 内容：AGV 仓库作业 + 最后一公里运输的联合优化（DRL）。
+- **原文逐字**（`references/arXiv2609.19048_AutomatedWarehouse_LastMile_Integrated.pdf`，PDF 第 2 页与第 5 页）："…integrated infrastructure, including multi-tier racks, **multi-capacity automated guided vehicles (AGVs)**, workstations, and conveyors"；"The AGVs execute their assigned missions by **retrieving multiple items**, enabled by their **multi-capacity handling mechanism**."
+- **⟹ 该文确实建模多容量 AGV，可作「多容量 AGV」的文献依据。** 多容量/异构车队另见于最后一公里的车辆路径问题（MRMH-HCVRP）。
+- 本仓卡片记录正确：`citation-cards.md:4511`。
 
 ### 2.8 通例：方法是简称，不是题名
 
@@ -170,10 +172,13 @@ NeurIPS 官网**不显示页码**；2020/2021 年的 Metadata.json 不存在（�
 检索**只找到 arXiv 预印本**（arXiv:2409.18742, 2024-09-27, 14 页）。未见期刊/会议版本。
 ⟹ 写进论文时必须标「预印本」。
 
-### 3.4 第 20 条的「AGV 容量 2/3」：无来源
+### 3.4 第 20 条的「AGV 容量 2/3」：**已闭环**（2026-10-06）
 
-我写「容量 2/3」。**摘要、索引页、评论页都没有这个数**。全文 PDF 超出抓取上限，未能读到。
-⟹ **标待核。** 用之前请读原文（arXiv:2409.18742）确认。
+原判「摘要、索引页、评论页都没有这个数 ⟹ 标待核」。**现已有全文级来源**：本仓 HRPEO 卡片逐字记录原文（`citation-cards.md:5910`、`citation-cards.md:6006`）：
+
+> "the datasets do not consider the upper limit of the AGV capacity. Therefore, this paper sets the upper limit of the AGV capacity to **2 or 3**"
+
+⟹ 容量 2/3 是该文**自设**（基准 FJSPT / EX 本身不含 AGV 载重上限）。引用时写「该文自设上限 2 或 3」，**不再标待核**。
 
 ### 3.5 第 21 条的 v1 日期：与编号矛盾
 
@@ -196,5 +201,5 @@ AlphaZero 的 arXiv:1712.01815 题名是 "Mastering Chess and Shogi by Self-Play
 ## 4. 一句话结论
 
 - 第 1–19 条：**全部有正式发表版本，全部可点来源**；其中 4 处页码待核（§3.2），1 处页码按官方元数据改（第 6 条）。
-- 第 20、21 条：**只有 arXiv 预印本**，且第 21 条的内容与原文描述不符。
-- 最需要改的三处：**第 19 条的 track 与题名**、**第 3 条的 NIPS 会议名**、**第 21 条的内容描述**。
+- 第 20、21 条：**只有 arXiv 预印本**；第 20 条「容量 2/3」已闭环（§3.4），第 21 条原「描述不符」结论已撤回（§2.7）。
+- 最需要改的两处：**第 19 条的 track 与题名**、**第 3 条的 NIPS 会议名**。（原列的第三处「第 21 条的内容描述」已于 2026-10-06 撤回，见 §2.7。）

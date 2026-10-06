@@ -7,10 +7,10 @@
 
 | # | 趋势 | 期刊侧代表 | 顶会侧代表 |
 |---|---|---|---|
-| 1 | **异构图/图注意力 + 多策略 PPO 成事实标准**（工序/机器/AGV 建异构节点、统一动作空间同步决策）| HGA-MPPO(SWEVO 102:102331)、HCHGNN-PPO(ESWA 334:134345)、DFJSPHT(IEEE TSMC-Sys 56(5):3086-3098)、TII 22(4):2863-2874 | — |
+| 1 | **异构图/图注意力 + 多策略 PPO 成事实标准**（工序/机器/AGV 建异构节点、统一动作空间同步决策）| HGA-MPPO(SWEVO 102:102331)、HCHGNN-PPO(ESWA 334:134345，卷年 2027／DOI 年 2026)、DFJSPHT(IEEE TSMC-Sys 56(5):3086-3098)、TII 22(4):2863-2874 | — |
 | 2 | **表征极简化 + Transformer 取代 GNN** | — | RESCHED(ICLR'26)、RL-SPH(ICML'26) |
 | 3 | **多目标/偏好条件化**（偏好向量作虚拟节点注入注意力，一次出整条 Pareto）| — | DCAN(ICLR'26) |
-| 4 | **约束现实主义**：有限缓冲/死锁、充电、多行程载重、机械臂退化、**工人学习/遗忘曲线** | HCHGNN-PPO、C&OR 189:107409、C&IE 214:111882 | — |
+| 4 | **约束现实主义**：有限缓冲/死锁、充电、多行程载重、机械臂退化、**工人学习/遗忘曲线** | HCHGNN-PPO（有限缓冲/死锁）、C&OR 189:107409（机械臂退化；原文自证 "Charging of the AMRs is not considered."）、**充电** = Applied Sciences 15(13):6995（三级充电动作 + 充电桩选择）、EJOR 332(3):730-747（最优充电策略闭式解）、C&IE 214:111882（工人学习/遗忘曲线）| — |
 | 5 | **RL 与精确求解器/元启发式混合**（纯端到端构造式降温）| HRLMA(EAAI 167)、LLM-MOMA(SWEVO) | RL-SPH、PUMA(KDD'26)、branch-and-bound RL(AAAI'26) |
 | 6 | **LLM/Agentic AI 进入调度** | **JMS 2026 四篇**（完整标题见下）| PathWise(ICML'26)、G-STAR(KDD'26)、IDP-MCTS(ICML Workshop) |
 
@@ -42,7 +42,7 @@
 |---|---|---|---|---|
 | 1 | **DFJSPHT**：Distributed FJSP with Heterogeneous Transportation | IEEE TSMC-Sys 56(5):3086-3098, 2026 | 10.1109/TSMC.2026.3656196 | 唯一把**跨厂物流**写成 MDP 的顶刊长文，问题定义最新 |
 | 2 | **HGA-MPPO**：异构图表注意力 + 多策略 PPO 的 AGV 辅助 FJSP | SWEVO 102:102331, 2026 | 10.1016/j.swevo.2026.102331 | 与 TAAGNet 最同构的**强基线** |
-| 3 | **HCHGNN-PPO**：hub-centric 图 RL 的 AGV 派工 + 并行机调度 | ESWA 334:134345, 2026 | 10.1016/j.eswa.2026.134345 | 有限缓冲/**死锁** + 动作掩码（约束加强版模板）|
+| 3 | **HCHGNN-PPO**：hub-centric 图 RL 的 AGV 派工 + 并行机调度 | ESWA 334:134345（**卷年 2027**；DOI 年 2026，冲突已记录于 `citation-cards.md:3190`）| 10.1016/j.eswa.2026.134345 | 有限缓冲/**死锁** + 动作掩码（约束加强版模板）|
 | 4 | **Production-logistics cooperative scheduling**（装配 + AMR，含机械臂退化）| C&OR 189:107409, 2026 | 10.1016/j.cor.2026.107409 | 标题即"production-logistics cooperative"，方向最正面 |
 | 5 | **ATLAS**：Alibaba 学习增强调度数据集与基准 | ICLR 2026 | — | **真实生产数据 + 非全知评测协议**（实验必用）· `github.com/zhiyunjiang0810/non-clairvoyant-with-predictions` |
 | 6 | **MACSIM**：Multi-Action Self-Improvement for NCO | ICLR 2026 | — | FJSP/FFSP 最强神经求解器之一，**必对比基线** · `github.com/LTluttmann/macsim` |
@@ -53,7 +53,7 @@
 
 **期刊**：JFMS 联合调度(EJOR 332(3))｜装配+AGV+AMR matheuristic(EJOR, in press)｜Transformer-MARL for FJSP-AGV(ASOC)｜Dynamic FJSP+AGV DRL(FGCS)｜MACD 连续动态 FJSP(IEEE TASE 23:10574-10586)｜多视图图注意力(TSMC-Sys)｜Multiagent Transformer(TCYB 56(5))｜分层双缓存调参(TCYB 56(10))｜DT 扰动识别+自适应调度(RCIM 101:103323)｜HFS+预防性维护(RCIM 97:103085)｜DT+DRL 动态 AGV(IJPR 64(1):106-124)｜ND3QN-PER 多行程多 AGV(AEI)
 
-**顶会**：Instance-wise Adaptive Scheduling via Derivative-Free Meta-Learning(ICLR'26, `github.com/calmQ/DF-META`)｜DEFT 云工作流 MoE(ICLR'26)｜RRNCO 真实路网(ICLR'26)｜FrontierCO 基准(ICLR'26)｜EoH-S 启发式集演化(AAAI'26)｜EvoReal LLM 实例生成(AAAI'26)｜RulePlanner 设计规则→掩码(ICML'26, `github.com/Thinklab-SJTU/EDA-AI`)｜DynaSchedBench(ICML'26)
+**顶会**：Instance-wise Adaptive Scheduling via Derivative-Free Meta-Learning(ICLR'26, `github.com/calmQ/DF-META`)｜DEFT 云工作流 MoE(ICLR'26)｜RRNCO 真实路网(ICLR'26)｜FrontierCO 基准(ICLR'26)｜EoH-S 启发式集演化(AAAI'26)｜EvoReal LLM 实例生成(AAAI'26)｜RulePlanner 设计规则→掩码(ICML'26, `github.com/Thinklab-SJTU/EDA-AI`)｜DynaSchedBench(ICML'26)｜**JSSP+运输 联合 vs 模块化协调缺口分析**(IEEE CASE'26, arXiv:2604.24117, `github.com/proto-lab-ro/jsspt-coordination-gap`)
 
 ## 五、我方位置对照
 
@@ -61,6 +61,6 @@
 |---|---|---|
 | 用 DRL 做 PLCSP | 期刊极卷（华中科大李新宇组一家占 3-4 篇）| ⚠️ 红海 |
 | 真 AGV 派车 | 2026 已成标配 | ⚠️ 不再是新意 |
-| **几何/度量感知注意力** | 顶会/期刊**均未见**（GNNT 原文自证排除距离；TAAGNet 无成对几何项）| ✅ **仍是空位** |
-| **三环节联合**（投放 + 排产 + 派车）| 2026 有"生产+AGV"，但三者齐备未见 | ✅ 窄空位 |
+| **几何/度量感知注意力** | **已收窄**：Zhu & Peng 2026（*Algorithms* 19(4):289，RGV 轨道分 **17 段**、实时占用作边特征进 DQN）、GRAND（arXiv:2512.03194, IEEE RA-L，区段占用 + 走廊负载进派工状态）、Graphormer（NeurIPS 2021，沿最短路平均边特征）、**RRNCO**（ICLR 2026，距离偏置注入注意力）均有先例（GNNT 原文自证排除距离；TAAGNet 无成对几何项）| ⚠️ **收窄到粒度差异**：单条通道段作可独立注意力的 token |
+| **三环节联合**（投放 + 排产 + 派车）| **有在刊先例（Moon 2024）**：JMS 77:356-367 已用一个策略网络 + 复合动作 (工序, 机台, 车辆) 联合决策 | ⚠️ 卖点改为**测量**联合 vs 模块化，**不是首创** |
 | 证据体量 | 2026 论文普遍多规模 + 真实数据（ATLAS 级）| ❌ **我方仅 MK01 单实例 = 最大短板** |

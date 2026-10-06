@@ -6167,3 +6167,43 @@ v=6（HGS 自己的车数）：**731.40 vs 规则 717.74 —— 优势消失并�
 **⚠️ 该决定使论文现有 10 张表全部作废，须重跑。**
 
 **⟹ 待办批次：① L=4 ② 排序 ③ 基线 ④ 全量重跑。**
+
+---
+
+## 五十九、⭐ §57 的一处更正：**GNNT 那条我说错了**（2026-10-06）
+
+### 59.1 我说过的话（错）
+
+在 §57 ① 里我写：
+
+> **⚠️ Gao et al.（`gao2026gnntransformer`，我们**自己引**的那篇）已有道路网拓扑 + 物理距离进 GCN 编码器**（CAD 219 节点、单行道约束、边权 = 物理距离）。
+> ⟹ 论文原句 **"carry topology without space" 对我们自己的引文是假的**
+
+**用户据此批准改了论文 `01-introduction.tex`，改动已提交并推送（`d20a57a`）。**
+
+### 59.2 实际是什么（逐字核对后）
+
+**文献审计 agent 回到原 PDF 逐字核对，指出上述推理不成立：**
+
+> GNNT 原文：**"the Map Encoder focuses on learning the latent topological features _without explicit distance-based edge weights_"**
+> 它的 "Edge weights are set to the physical distances (in meters) … extracted from the CAD layout" **是图构造层**，只用于 Dijkstra 与奖励。
+
+**⟹ Gao 的编码器确实不带距离。"对自己的引文是假的"这条不成立。**
+
+**真正的反例是**：**RRNCO**（ICLR 2026，距离偏置进注意力，**就在本仓**）、**Zhu & Peng 2026**、**GRAND**、**Graphormer 2021**。
+
+### 59.3 改动本身仍然成立（但理由换了）
+
+`01-introduction.tex` 已改为：
+
+> "The encoders in this literature carry the network's **structure but not its live state**: three papers state that theirs cannot represent congestion, so a policy using one cannot learn to avoid it. **Where the network does enter an encoder it enters as static topology.**"
+
+**这句对 Gao 成立**（静态拓扑、无距离）。**而且它同时修掉了原句真正的毛病 —— "the encoders in this literature" 这个全称推广。**
+
+**⟹ 修是对的，我给的理由是错的。两者要分开记。**
+
+### 59.4 教训
+
+**"我核过"和"它核过"不是一回事。** §57 ① 的反例是我从 agent 报告里**转述**的，我没有回到 PDF 逐字确认就写进了记录、并建议改论文。
+
+**本项目纪律已有一条"数字必须追源"；本条补上：文献主张同样必须逐字追源，转述不算。**

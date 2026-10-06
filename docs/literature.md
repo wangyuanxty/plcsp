@@ -2,7 +2,7 @@
 
 ### 参考文献整理：DRL × 调度 × 策略优化
 
-> 来源：`references\` 目录，共 **63 份 PDF、63 篇独立论文**（2026-09-29 实测）。
+> 来源：`references\` 目录，共 **103 份 PDF**（2026-10-06 实测）。**下表是从中挑选的 40 篇精选子集，不是 `references/` 的全量索引。**
 > 期刊级别为基于公开 JCR / 中科院分区数据的近似标注；本地文件为预印本、已有正式发表版本的以「正式版」注明。
 > **编号对照**：本表序号 1–22 对应 2026-09-03 版《literature.md》旧编号（移出 8、15、16、21、24、27、28 共 7 篇游戏引擎相关文献，连同 `game-engine-related/` 目录移除；09-04 曾录入 3 篇世界模型文献，随后连同 `world-model-related/` 目录移出）；23–27 为 09-04 新增的 2026 年调度/GRPO 前沿文献；28–37 为同日域侧补录（生产-物流集成调度 DRL，全部已发表期刊）。旧版编号映射：旧 1→1, 2→2, 3→3, 4→4, 5→5, 6→6, 7→7, 8→(已移出), 9→8, 10→9, 11→10, 12→11, 13→12, 14→13, 15→(已移出), 16→(已移出), 17→14, 18→15, 19→16, 20→17, 21→(已移出), 22→18, 23→19, 24→(已移出), 25→20, 26→21, 27→(已移出), 28→(已移出), 29→22；旧新增 23–25 → 已移出。
 
@@ -45,6 +45,9 @@
 | 35 | Green flexible job-shop scheduling considering transportation time and machine multi-rotation speeds（GFJSPT-MMRS）| 2025 | Swarm and Evolutionary Computation, 99:102181 | SCI Q1（中科院1区）| **首次**同时 AGV 运输时间+多转速机器+多目标（makespan-能耗）；**D3QN + 分层动作空间（工件/机器/转速/AGV 四子决策层）+ 分层奖励**；真实车间案例，节能 ≤18.6%。 | Dueling Double DQN + 分层动作/奖励——**"分层"概念直接竞争者（§3.5 五家对照）**；2026-09-04 精读修正：**"节能 ≤18.6%"未标注实例/对位基线，引用须谨慎**；其"分层"= 四子决策层**规则抽象**（|A|=9×10×2×6=1080 复合动作）+ 奖励**时域**局部/全局，无条件策略、无组内优势 |
 | 36 | Intelligent scheduling optimisation for whole-vehicle stamping production via proximal policy optimisation deep reinforcement learning（GPVSM）| 2026 | International Journal of Production Research | SCI Q1（领域旗舰）| 整车冲压：GNN 任务-资源图 + PPO + **调度规则组合优化（GNN 动态选规则）**；产线真实数据、动态任务；正交实验超参寻优。 | GNN+PPO 选规则——"RL 选规则"路线（与 34 同族）；IJPR 接受产线级 GNN+PPO = 方向受认可佐证 |
 | 37 | Multi-agent collaborative reinforcement learning for dynamic flexible job shop scheduling under machine random failures（MADAPPO）| 2026 | Computers & Operations Research | SCI Q1（中科院2区）| 动态 FJSP（机器随机故障）：**双智能体 PPO + 异构图 GNN + 多头注意力**；两阶段分层调度（工件选择+机器分配协同）+ **新型优势估计**；多目标（makespan+空闲率+负载均衡）。 | MADAPPO（双智能体+新优势估计）——**§3.5 五家对照成员**；其优势估计消融设计可参照 |
+| 38 | Learning-enabled Flexible Job-shop Scheduling for Scalable Smart Manufacturing（HGS）| 2024 | Journal of Manufacturing Systems, 77:356–367 (Elsevier)；arXiv:2402.08979 | SCI Q1（中科院1区）| FJSPT（柔性作业车间 + 运输约束）的规模泛化：异构图表征（工序/机器/车辆三类节点 + 兼容弧）+ 结构感知异构编码器（机器节点只聚合加工时间、车辆节点只聚合运输时间）+ 三阶段 O→M→V 解码；固定规模训练、直接泛化到更大规模，不依赖预定义规则。 | **DRL 方法（非元启发式）**：单策略网络，复合动作 (工序, 机台, 车辆)，整条 episode 一个 log-prob（标量回报），REINFORCE + 贪心 rollout 基线，**无 critic**——本方向标准 DRL 基线（本表 #10 #29 均以其为对比）|
+| 39 | RRNCO: Towards Real-World Routing with Neural Combinatorial Optimization | 2026 | ICLR 2026（会议论文）| 顶会（ICLR 2026）| 真实路网 VRP 的 NCO sim-to-real 缺口：ANE 自适应节点嵌入以上下文门控融合空间坐标与真实距离特征；NAB 神经自适应偏置首次联合建模非对称距离、时长与方向角；发布 100 城市非对称距离/时长矩阵的真实基准并取得 SOTA。 | 注意力模型 + **距离/时长/方向偏置注入注意力**（Neural Adaptive Bias）——「几何/度量感知注意力」的已发表先例 |
+| 40 | An Analysis of the Coordination Gap between Joint and Modular Learning for Job Shop Scheduling with Transportation Resources | 2026 | IEEE CASE 2026（已录用）；arXiv:2604.24117 | IEEE 国际会议（EI 收录）| JSSPT 的**联合训练 vs 模块化训练**条件分析：以运输资源稀缺度与时间支配比做敏感性分析，量化 coordination gap；联合训练在多数情形优于调度规则组合与模块化训练，但在瓶颈环境（严重运输/加工约束）优势消失。 | GIN + MLP 双智能体，PPO/MAPPO（joint）vs 独立训练 + 调度规则代理（modular）——**与本方向最接近的一篇**，「联合 vs 模块化」评测协议可直接借鉴 |
 
 ## 备注说明
 
@@ -55,3 +58,4 @@
 5. **域侧补录（序号 28–37，09-04 入库）**：生产-物流集成调度 DRL 的**已发表**期刊阵容（Appl. Sci./Machines/CIS/EAAI/IoT-J/C&IE/ESWA/SWEVO/IJPR/C&OR）——"题目顶刊级、方法多为 PPO/GNN/DQN 旧配方"，是引言"规模轴已卷、拓扑轴空白、对位文献自认局限"的论据列；其中 **31（SGFormer-SAC）= 早前检索的 TNNLS 版 GT-PPO 的 EAAI 期刊正式版**，引用时以期刊版为准。
 5. 研究内容与方法均依据本地 PDF 摘要及引言提炼。
 6. **序号 28–37 的 DOI / 出版社页面 ID（2026-09-29 由已删除的"补充文献清单"节保留至此，避免信息丢失）**：28 CRGPPO-TKL = `10.3390/app15136995`；29 HGNNR = MDPI Machines 8(8):584（期卷待核）；30 HA-DQN = `10.1007/s40747-025-01828-6`；31 SGFormer-SAC = EAAI（其前身 GT-PPO 版本见 IEEE TNNLS 2025, 36(9):16521-16533, `10.1109/TNNLS.2025.3569868`）；32 MT-FJSP = IEEE IoT-J 12(4):4420-4434（Xplore 10734312）；33 GNNT = C&IE 2026, `S0360835226005358`；34 GRMO = ESWA 2025, `S0957417425020470`；35 GFJSPT-MMRS = SWEVO 2025, `S2210650225003384`；36 GPVSM = IJPR 2026, `10.1080/00207543.2026.2646338`；37 MADAPPO = C&OR 2026, `S0305054826002625`。
+7. **补录（2026-10-06 文献审计）**：序号 38–40 为审计发现的漏引先例——38 = Moon, Lee & Park 2024, *J. Manuf. Syst.* 77:356–367（DOI `10.1016/j.jmsy.2024.09.011`；arXiv:2402.08979）是本方向标准 DRL 基线，也是本课题"三环节联合"主张的在刊先例；39 = RRNCO（ICLR 2026，Son et al.）；40 = Link, Hoss & Klarmann（IEEE CASE 2026；arXiv:2604.24117）与本方向最接近。
