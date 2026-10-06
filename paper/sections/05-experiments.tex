@@ -1,0 +1,763 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental settings}
+\label{sec:setup}
+\subsubsection{Benchmark instances}
+\label{sec:setup:instances}
+
+Instances come from the MKT benchmark~\citep{homayouni2021}, which takes the
+processing data of the Brandimarte MK instances~\citep{brandimarte1993}
+unchanged and adds two things: a machine-to-machine travel-time matrix and a
+vehicle count. The matrices are asymmetric, and their zeroth row and column
+address the load--unload station. Adding transport to the MK data does not
+alter any processing time, so results can be traced back to the original
+instances.
+
+This paper reports results on MK01 only: 10 jobs, 6 machines, 55 operations.
+We state this plainly because it bounds every claim below. The remaining
+instances of the benchmark are not covered here, and no statement in this paper
+should be read as extending to them.
+
+One property of MK01 matters for the interpretation of the results. Of the
+instances in the benchmark, MK01 offers the fewest opportunities for
+multi-drop travel: the instance can batch more than one task on 1.4\% of its
+pick-ups, against 2.5\% for MK07 and 12.3\% for MK10. A mechanism that only
+acts when a batch can be formed will therefore look inert on MK01 for reasons
+that belong to the instance rather than to the mechanism. We report the
+batching results with that caveat attached rather than as a verdict on the
+mechanism.
+
+\subsubsection{Configuration}
+\label{sec:setup:config}
+
+Two report tiers are used throughout. Tier A (\texttt{A-MKT}) switches off all
+ten constraints and all mechanisms, leaving a flexible job shop with transport.
+Tier B (\texttt{B-Full}) enables all of them. The two tiers differ only in the
+mechanism switches; the instance, the fleet size, and the transport caliber are
+identical.
+
+All policies are trained for 300 steps with a group size of $G = 8$, learning
+rate $3\times10^{-4}$, and Adam, on a single training seed ($\text{seed} = 0$).
+The policy is evaluated every 30 steps on five evaluation seeds with argmax
+action selection. The training seed is the only source of variation in the
+learned parameters; the five evaluation seeds perturb the simulation, not the
+training.
+
+We report the training-seed variation explicitly, because it is large. Under
+the \texttt{scalar} advantage with the budget mechanism off, five training
+seeds on MK01 give makespans of 84.04, 81.24, 87.19, 79.27, and 71.56 --- a
+mean of 80.66, a standard deviation of 5.90, and a range of 15.63. Every
+ablation number in Section~\ref{sec:results} other than the advantage ablation
+comes from a single training seed, and the differences between ablation arms
+are of the same order as that standard deviation. Those numbers are reported as
+measurements, not as effect estimates, and are labelled as single-training-seed
+throughout. The advantage ablation (Section~\ref{sec:results:advantage}) is the
+exception: all three of its arms were trained with five seeds, precisely because
+its conclusions are not readable from one.
+
+\subsubsection{Baselines}
+\label{sec:setup:baselines}
+
+Three baselines are used.
+
+\begin{itemize}
+\item \textbf{Rule.} Each operation goes to its fastest eligible machine, with
+      a first-in-first-out tie-break, and vehicles are dispatched round-robin.
+      This is also the schedule used to derive the reward weights of
+      Equation~\eqref{eq:weights}, so it defines the reference point that the
+      reward is normalized against.
+\item \textbf{Single-objective GRPO.} The same policy and training procedure,
+      with the preference vector set to a one-hot vector over one of the three
+      objectives. Three arms are trained, one per objective. This is the
+      standard scalarization control: it answers whether training on the
+      weighted scalar is better or worse than training once per objective and
+      choosing afterwards.
+\item \textbf{NSGA-II.} Population 100, 50 generations, 5000 evaluations per
+      tier, run on the same instance and the same fleet and constraint
+      configuration as the learned policies.
+\end{itemize}
+
+A fourth baseline layer --- a published deep reinforcement learning method ---
+is not included. The comparison is therefore restricted to a rule, a
+single-objective version of our own method, and a metaheuristic.
+Section~\ref{sec:discussion} records what this omission costs.
+
+\paragraph{Out-of-sample re-evaluation of the front}
+NSGA-II searches on a single random chain. Points found on that chain can
+overfit it. Every point of the NSGA-II front is therefore re-evaluated on the
+same five evaluation seeds used for the policies, and the re-evaluated front is
+what we compare against. The difference is not cosmetic: on tier B the search
+front reads $78.09$ in-sample and $79.56$ after re-evaluation, and individual
+front points move further ($78.18 \rightarrow 88.62$).
+
+\paragraph{Matching the baselines to the tier}
+The rule baseline is run under the same constraint set as the policy it is
+compared with, using the same five evaluation seeds, so that comparisons
+between the rule row and the policy row are paired. The rule makespan under
+tier B (105.35) and under tier A (73.01) are therefore different quantities,
+and neither equals the reference makespan used for the reward weights.
+
+\subsubsection{Reproducibility}
+\label{sec:setup:repro}
+
+Every mechanism switch defaults to off, and a run with all switches off
+reproduces the pre-mechanism trajectory bit for bit. This property is what
+makes the ablations in Section~\ref{sec:results} measurements of the mechanism
+rather than of an incidental change elsewhere, so it is verified rather than
+asserted: a digest of the sampled chain and of the parameter vector is pinned
+for each switch position, and the same discipline is applied to the wiring
+between training and evaluation, so that a switch cannot be active in one and
+inactive in the other.
+
+Because the switches alter the shop dynamics, the reference makespan differs
+between ablation arms. Disabling age-dependent failure changes the reference
+makespan from 109.05 to 117.77; disabling multi-drop travel changes it to
+115.13. The absolute makespan of an arm that switches off a dynamics constraint
+is therefore not comparable with the absolute makespan of an arm that leaves it
+on: the two arms solve different problems. Where such a comparison would be
+misleading we report the paired difference against the all-on configuration
+instead.
+
+\subsubsection{Why published figures are not reproduced in our tables}
+\label{sec:related:incomparable}
+
+We deliberately do not place our numbers in a table beside published numbers
+from this literature. Four differences independently prevent the comparison,
+and each one is large enough to change the conclusion on its own.
+
+\emph{Travel-time caliber.} Some published results use a machine-to-machine
+travel-time matrix and others use geometric travel times. We use both, and the
+caliber is a property of the instance rather than a run-time switch, so a
+number cannot be moved between calibers by changing a configuration. The same
+chromosome evaluated under a geometric caliber and under a matrix caliber
+differs by roughly a factor of four in our own measurements.
+
+\emph{Fleet size.} Our main configuration uses three vehicles. Published
+results on the same instance family use six or use the number of machines. The
+vehicle count is not published with the benchmark: the source
+paper~\citep{homayouni2021} describes it as a uniform draw over a range of the
+machine count, so any specific value used by a later paper is a reconstruction
+rather than a reproduction.
+
+\emph{Simulator.} Each study runs its own discrete-event simulation. Two
+simulators that agree on the problem statement can disagree on makespan through
+tie-breaking, event ordering, and rounding.
+
+\emph{Transport boundary.} Our makespan includes the travel of a job from the
+load--unload station to its first machine and its return travel after its last
+operation. Published makespans in this line end at the completion of the last
+operation. The difference is measurable and not small.
+
+Because these four differences are independent, no single adjustment corrects
+for them all, and a table that placed the numbers side by side would invite a
+comparison that the numbers cannot support. We therefore compare only against
+baselines we ran ourselves on our own configuration, and we state the boundary
+explicitly rather than leaving it to a footnote. The consequence for evaluation
+is that this paper cannot claim to have beaten a published method; it can claim
+to have measured its own method against a rule, a single-objective version of
+itself, and a metaheuristic, all under one caliber.
+Section~\ref{sec:discussion} records what that costs.
+
+\label{sec:results}
+
+\subsection{Main comparison}
+\label{sec:results:main}
+
+Table~\ref{tab:main} reports the three baselines against the learned policy on
+both tiers. The $\pm$ values are the spread over the five evaluation seeds.
+
+\begin{table*}[htbp]
+\centering
+\caption{Main comparison on MK01. Tier A disables all ten constraints and all
+mechanisms; tier B enables them. The
+rule row is run under the same constraint set as the policy it is paired with,
+so the two rule rows are not the same quantity. NSGA-II rows are re-evaluated
+out-of-sample on the five evaluation seeds.}
+\label{tab:main}
+\setlength{\tabcolsep}{5pt}
+\begin{threeparttable}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Tier & Method & Makespan & Energy (\kWh) & \TWT & Source \\
+\midrule
+A & Rule (same constraint set) & 73.01 $\pm$ 0.00 & 5.675 & 0.000 & --- \\
+A & Single-objective GRPO, makespan & 57.60 & 4.714 & 0.000 & --- \\
+A & Single-objective GRPO, energy & 52.91 & 4.341 & 0.000 & --- \\
+A & \textbf{Ours} (weighted scalar) & 49.27 & 4.097 & 0.000 & --- \\
+A & NSGA-II (out-of-sample) & \textbf{49.14} & \textbf{4.093} & 0.000 & --- \\
+\midrule
+B & Rule (same constraint set) & 105.35 $\pm$ 4.56 & 7.936 $\pm$ 0.33 & 60.14 $\pm$ 19.00 & --- \\
+B & Single-objective GRPO, makespan & \textbf{74.09} $\pm$ 4.67 & 5.790 & 5.977 & --- \\
+B & Single-objective GRPO, energy & 96.93 $\pm$ 9.98 & 7.434 & 97.458 & --- \\
+B & Single-objective GRPO, \TWT & 77.30 $\pm$ 6.35 & 6.048 & 7.392 & --- \\
+B & \textbf{Ours} (weighted scalar) & 78.90 $\pm$ 3.71 & \textbf{6.160} & \textbf{5.042} & --- \\
+B & NSGA-II (out-of-sample) & 79.56 $\pm$ 2.64 & 6.239 & 42.48 & --- \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item Tier A switches off the tardiness constraint, so \TWT\ is identically
+      zero for every row of tier A by definition, not as a measurement. Tier A
+      also has no stochastic source left once the ten constraints are off, so
+      its five evaluation seeds return identical values and no statistical test
+      is possible on that tier. The tier A NSGA-II row is deterministic and
+      rests on 5000 evaluations.
+\end{tablenotes}
+\end{threeparttable}
+\end{table*}
+
+
+
+On tier B the learned policy dominates the entire NSGA-II front: the front's
+best re-evaluated values are 79.56 for makespan, 6.239 for energy, and 20.73
+for tardiness, and the policy attains 78.90, 6.160, and 5.042. Every one of the
+12 re-evaluated front points is dominated. The rule baseline is beaten by
+26.5 in makespan and by 55.1 in tardiness.
+
+On tier A the ordering reverses, narrowly. NSGA-II reaches 49.14 against our
+49.27 and 4.093 against our 4.097. A difference of 0.3\% in makespan on a
+deterministic problem is not a tie in the statistical sense --- there is no
+noise to attribute it to --- and we report it as a loss rather than rounding it
+away. The reading is that on the easier problem, where the ten constraints are
+absent and 5000 deterministic evaluations are available, the metaheuristic is
+at least as good.
+
+The single-objective arms do not displace the weighted scalar. On tier B the
+makespan-only arm achieves the best makespan of any learned row (74.09) but
+pays for it in tardiness (5.977 against 5.042), and the energy-only arm is
+worse on every objective. The spread across the last few evaluations of a single
+run is 10--20\% of the value, which is larger than most of the gaps here.
+
+\subsection{Constraint and mechanism ablation}
+\label{sec:results:ablation}
+
+Table~\ref{tab:ablation} reports twelve ablation arms against the all-on
+configuration. Each arm switches off one constraint group or one mechanism.
+
+\begin{table*}[htbp]
+\centering
+\caption{Ablation against the all-on configuration (\texttt{full}, makespan
+78.90). $\Delta$ is arm minus \texttt{full}: positive means the arm is worse,
+so a positive $\Delta$ is the mechanism helping. $p$ values are paired
+$t$-tests over five evaluation seeds against \texttt{full}.}
+\label{tab:ablation}
+\setlength{\tabcolsep}{5pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Arm & $\Delta$makespan & $p$ & $\Delta$energy & $p$ & $\Delta$\TWT & $p$ \\
+\midrule
+\texttt{c-no-logistics}  & $+1.69$ & 0.453 & $+0.116$ & 0.481 & $+19.07$ & \textbf{0.012} \\
+\texttt{c-no-production} & $-8.17$ & \textbf{0.012} & $-0.619$ & \textbf{0.009} & $-2.65$ & 0.535 \\
+\texttt{c-no-info}       & $+5.41$ & \textbf{0.028} & $+0.406$ & \textbf{0.024} & $+28.06$ & \textbf{0.020} \\
+\texttt{c-none}          & $-29.63$ & \textbf{0.0001} & $-2.063$ & \textbf{0.0001} & $-5.04$ & 0.267 \\
+\texttt{m-no-route}      & $-1.64$ & 0.581 & $-0.075$ & 0.729 & $+6.58$ & 0.448 \\
+\texttt{m-no-r2}         & $+7.79$ & \textbf{0.048} & $+0.531$ & 0.065 & $+30.19$ & 0.068 \\
+\texttt{m-no-geom}       & $+8.28$ & \textbf{0.001} & $+0.664$ & \textbf{0.001} & $+26.23$ & 0.077 \\
+\texttt{m-no-pm}         & $+1.30$ & 0.146 & $+0.103$ & 0.130 & $+0.49$ & 0.931 \\
+\texttt{m-no-charge}     & $-1.15$ & 0.591 & $-0.062$ & 0.677 & $+4.08$ & 0.616 \\
+\texttt{m-no-batch}      & $+5.66$ & \textbf{0.008} & $+0.376$ & \textbf{0.013} & $+34.74$ & \textbf{0.018} \\
+\texttt{m-no-t3}         & $+5.14$ & 0.187 & $+0.425$ & 0.142 & $+16.39$ & 0.056 \\
+\texttt{adv-reinforce}   & $-7.78$ & 0.053 & $-0.587$ & \textbf{0.049} & $-3.83$ & 0.434 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item Arms beginning with \texttt{c-} switch off constraint groups; arms
+      beginning with \texttt{m-} switch off a single mechanism. Six arms
+      necessarily disable more than the named item, because a mechanism cannot
+      be enabled when the constraint it acts on is off; the released
+      configuration files record the exact switch set of every arm. The
+      \texttt{adv-reinforce} row here is the single-seed run; the five-seed
+      version is in Table~\ref{tab:advantage}.
+\end{tablenotes}
+\end{threeparttable}
+\end{table*}
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig_ablation.pdf}
+\caption{Ablation against the all-on configuration, the same numbers as
+Table~\ref{tab:ablation}. The shaded band is one training-seed standard
+deviation. The tardiness differences mostly fall outside it; the makespan
+differences mostly do not.}
+\label{fig:ablation}
+\end{figure*}
+
+Table~\ref{tab:ablation}, plotted in Figure~\ref{fig:ablation}, reads as two
+groups.
+
+Among the mechanism arms, the separation is between the mechanisms the
+instance can exercise and the mechanisms it cannot. Three of them have nothing
+to act on here: the charging constraint never activates under these parameters,
+the maintenance interval is never reached on this instance, and congestion does
+not bind at the reference load. Their makespan differences straddle zero
+($-1.6$ to $+1.3$) and their tardiness differences are small ($+0.5$ to
+$+6.6$), which is what a correctly implemented mechanism with no effect to make
+should look like. The four mechanisms that do have something to act on --- the
+aisle-segment tokens, the distance bias, the batch head, and the budget
+mechanism --- have positive differences in every case: $+5.1$ to $+8.3$ in
+makespan and $+16$ to $+35$ in tardiness. The grouping is not chosen after the
+fact. Whether a mechanism can act is established independently of this table,
+by measuring the constraint rather than the policy
+(Tables~\ref{tab:active} and~\ref{tab:batching}).
+
+What the table does not support is an ordering among the mechanisms. With one
+training seed per arm, and a measured training-seed standard deviation of
+5.90, the differences are of the same order as the seed-to-seed variation, and
+a re-run with other seeds would shuffle the order. A single seed cannot
+separate a mechanism that helps by five makespan units from a mechanism that
+does nothing. The $p$ values in the table test consistency across five
+\emph{evaluation} seeds, which is a different source of variation and does not
+cover the training seed. We therefore report the grouping and not the ordering,
+and Section~\ref{sec:conclusion} states how many seeds an ordering would need.
+The three negative arms among the constraint groups --- production, all-off,
+and the REINFORCE advantage --- fall inside the range that changing the
+training seed alone can produce.
+
+One further caveat applies to the three constraint-group arms. Switching off a
+dynamics constraint changes the problem: the reference makespan moves from
+109.05 to 117.77 when age-dependent failure is off and to 115.13 when multi-drop
+travel is off. The absolute makespans of those arms are therefore not
+comparable to the all-on configuration, and only the paired differences above
+are meaningful.
+
+The levels behind those differences are worth stating, because the differences
+are differences of small numbers. Across the thirteen arms the total energy
+account spans $0.0772$ to $0.0832$ kWh per minute of makespan, a range of
+7.6\% of its mean, while the net account spans four times as much; machine
+utilization ranges from $0.399$ to $0.704$, and the highest value belongs to
+the all-off arm, which finishes ten jobs quickly because it faces the easiest
+problem.
+
+
+
+\subsection{What the benchmark actually exercises}
+\label{sec:results:active}
+
+A constraint that is modelled but never triggered contributes nothing to the
+problem, and whether a constraint triggers is an empirical question. It can be
+answered without training: run the reference schedule and count the events.
+This measurement is a property of the constraint under the reference schedule,
+not a property of any learned policy, so we report it for all ten instances of
+the benchmark even though every policy result in this paper comes from MK01.
+
+\begin{table}[htbp]
+\centering
+\caption{Constraint activation under the reference schedule, tier B switches,
+one seed. Counts are per episode. The maintenance clock column gives the
+largest accumulated spindle time reached by any machine, against a maintenance
+interval of 120 minutes.}
+\label{tab:active}
+\setlength{\tabcolsep}{2.5pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Instance & $C_{\max}$ & Failures & Forced PM & Max clock & Drained \\
+\midrule
+mk01 & 109.05 & 0 & \textbf{0} & \textbf{82} & 0 \\
+mk02 & 74.72 & 0 & \textbf{0} & \textbf{45} & 0 \\
+mk03 & 406.35 & 1 & 3 & 125 & 0 \\
+mk04 & 270.75 & 0 & 1 & 122 & 0 \\
+mk05 & 351.91 & 1 & 4 & 126 & 0 \\
+mk06 & 233.77 & 1 & \textbf{0} & \textbf{105} & 0 \\
+mk07 & 309.72 & 0 & 3 & 128 & 0 \\
+mk08 & 777.85 & 5 & 16 & 133 & 0 \\
+mk09 & 616.91 & 1 & 14 & 129 & 0 \\
+mk10 & 501.02 & 1 & 9 & 128 & 0 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item No vehicle ever drains on any instance, so the charging constraint is
+      inert throughout the benchmark under the standard parameters. The
+      maintenance constraint activates on seven of the ten instances; on the
+      three marked in bold the accumulated spindle time stays below the
+      interval, so no maintenance is ever forced. Vehicle failures occur 15 to
+      114 times per episode depending on the instance and are not tabulated
+      here.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+Two consequences run through the rest of the paper. First, the charging
+mechanism has nothing to act on: the fleet consumes 0.51--4.62 \kWh{} per
+episode against a 2--4 \kWh{} battery, a factor of three to ten of headroom, so
+the state never arises. Second, the maintenance mechanism has nothing to act on
+in MK01 specifically, which is the instance all policy results come from. Both
+are reported as facts about the parameterization rather than as properties of
+the mechanisms.
+
+\subsubsection{Where congestion begins to bind}
+\label{sec:results:load}
+
+The congestion mechanism shows a zero in Table~\ref{tab:ablation} on MK01, and
+it is worth establishing whether that belongs to the instance or to the
+parameters. Table~\ref{tab:load} varies the travel load through the vehicle
+speed and the supply through the fleet size, and records the time vehicles
+spend waiting for an aisle segment as a share of the makespan per vehicle.
+
+\begin{table}[htbp]
+\centering
+\caption{Aisle contention as a function of travel load and fleet size, under
+the reference schedule with all ten constraints on. Entries are the total time
+vehicles wait for an aisle segment, divided by the fleet size and by the
+makespan, in per cent.}
+\label{tab:load}
+\setlength{\tabcolsep}{5pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrcc@{}}
+\toprule
+Instance & Vehicle speed (m/s) & 3 vehicles & 6 vehicles \\
+\midrule
+mk01 & 1.00 & 0.31 & 0.20 \\
+mk01 & 0.50 & 0.51 & 0.65 \\
+mk01 & 0.25 & 1.23 & 1.33 \\
+mk01 & 0.10 & \textbf{18.13} & \textbf{10.41} \\
+\midrule
+mk10 & 1.00 & 0.13 & 0.12 \\
+mk10 & 0.50 & 0.27 & 0.35 \\
+mk10 & 0.25 & 0.97 & 0.90 \\
+mk10 & 0.10 & \textbf{4.94} & \textbf{5.09} \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item The nominal speed is 0.5~m/s. With a single vehicle the entry is zero at
+      every speed, since one vehicle cannot contend with itself.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+Three things are readable. First, the single-vehicle column is identically
+zero at every speed, which is a property of the metric rather than a finding:
+it confirms that what is being measured is interaction between vehicles and not
+travel time as such. Second, at the nominal speed a vehicle waits for an aisle
+segment well under one per cent of the time, and adding vehicles does not
+change that. Third, the transition to a contended regime is abrupt rather than
+gradual: on MK01 the wait goes from 1.2\% at a quarter of the nominal speed to
+18\% at a tenth of it, and on MK10 from 1.0\% to 4.9\%. The constraint is
+therefore not inert in general. It is inert at the benchmark's operating point,
+where vehicle utilisation lies between 4\% and 23\%, and that is the sense in
+which its zero in Table~\ref{tab:ablation} should be read.
+
+\subsubsection{Batching opportunities}
+\label{sec:results:batching}
+
+The multi-drop travel model and its batching head were added because the load
+capacity of a vehicle was a parameter the model carried but never used.
+Whether the mechanism has anything to do depends on how often a pick-up point
+holds more than one waiting task. Table~\ref{tab:batching} measures that
+across the three instance sizes, again under the reference schedule.
+
+\begin{table}[htbp]
+\centering
+\caption{Batching opportunities under the reference schedule. ``Pick-ups'' is
+the number of times a vehicle collects at a pick-up point; the middle column
+counts how often more than one task was available there.}
+\label{tab:batching}
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Instance & Seed & Pick-ups & Multi-task & Mean per trip \\
+\midrule
+mk01 & 0 & 70 & 1 (1.4\%) & 1.014 \\
+mk01 & 1 & 67 & 1 (1.5\%) & 1.015 \\
+mk07 & 0 & 119 & 3 (2.5\%) & 1.042 \\
+mk07 & 1 & 120 & 2 (1.7\%) & 1.033 \\
+mk10 & 0 & 235 & 29 (12.3\%) & 1.140 \\
+mk10 & 1 & 227 & 34 (15.0\%) & 1.163 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item The maximum batch size reached is two on MK01 and three on MK07 and
+      MK10. Under a first-in-first-out travel rule, which collects more
+      aggressively, the rates rise to 3 of 64 pick-ups on MK01, 13 of 99 on
+      MK07, and 55 of 204 on MK10.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+MK01, the only instance on which policies are trained here, is the instance
+with the fewest batching opportunities: 1.4\% of pick-ups against 12.3\% on
+MK10. A mechanism that only acts when a batch can be formed will therefore
+appear inert on MK01 for a reason that belongs to the instance. The
+\texttt{m-no-batch} row of Table~\ref{tab:ablation} should be read with that in
+mind, and it should not be read as a verdict on batching.
+
+\subsection{Advantage ablation}
+\label{sec:results:advantage}
+
+This is the one experiment in the paper with five training seeds per arm,
+because its conclusion is about the training procedure itself.
+Table~\ref{tab:advantage} reports it.
+
+\begin{table}[htbp]
+\centering
+\caption{Advantage ablation, five training seeds per arm, budget mechanism off,
+all other switches identical. $p$ values are paired $t$-tests over the five
+training seeds.}
+\label{tab:advantage}
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+ & \texttt{scalar} & \texttt{reinforce} & \texttt{raw} \\
+ & $(r-\bar r)/\sigma$ & $r - \bar r$ & $r$ \\
+\midrule
+Seed 0 & 84.04 & 71.12 & 84.97 \\
+Seed 1 & 81.24 & 79.96 & 87.98 \\
+Seed 2 & 87.19 & 75.31 & 90.72 \\
+Seed 3 & 79.27 & 71.79 & 79.35 \\
+Seed 4 & 71.56 & 85.85 & 85.41 \\
+\midrule
+Mean makespan & $80.66 \pm 5.90$ & $76.81 \pm 6.15$ & $85.69 \pm 4.22$ \\
+Mean energy & 6.315 & 6.053 & 6.650 \\
+Mean \TWT & 17.10 & 16.94 & 40.14 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item Paired differences, makespan: \texttt{reinforce} $-$ \texttt{scalar}
+      $= -3.85$ ($p = 0.48$); \texttt{raw} $-$ \texttt{scalar} $= +5.03$
+      ($p = 0.11$); \texttt{raw} $-$ \texttt{reinforce} $= +8.88$
+      ($p = 0.034$). Nine paired tests are reported in this section; a
+      Bonferroni threshold over them is $0.0056$, which none of these reaches.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig_advantage.pdf}
+\caption{Advantage ablation, five training seeds per arm. Points are individual
+seeds; the horizontal bar is the arm mean and the vertical bar is one standard
+deviation. The three arms are identical in every switch and hyperparameter;
+only the advantage differs.}
+\label{fig:advantage}
+\end{figure}
+
+Figure~\ref{fig:advantage} gives two findings.
+
+Subtracting a group-mean baseline has an effect. The arm that uses the raw
+reward, with no baseline subtracted, is worse than the arm that subtracts the
+group mean by 8.88 makespan units, with four of five seeds agreeing on the
+sign. The uncorrected $p$ value is 0.034; with nine paired tests in this
+section, the Bonferroni threshold is 0.0056, so we report this as a consistent
+direction rather than as a significant effect.
+
+Dividing by the group standard deviation has no measurable effect. The
+\texttt{scalar} and \texttt{reinforce} arms differ by 3.85 makespan units with
+$p = 0.48$, and the per-seed differences change sign. On this problem the
+normalization step of the group-relative advantage is not doing detectable
+work; the baseline subtraction is.
+
+This distinction matters for how the method is described. The usual statement
+is that group-relative advantages are necessary. What the data support is
+narrower: a group-mean baseline is necessary, and the division by the group
+standard deviation is not measurably different from omitting it.
+
+This table is also where the seed variance was measured, and it is the reason
+the rest of this paper's ablations are labelled as they are. The per-arm
+standard deviation is 4--6 makespan units; the differences between arms are
+4--9. Before this experiment was run, a single-seed comparison of the
+\texttt{scalar} and \texttt{reinforce} arms read as a 15.4\% win for
+\texttt{reinforce}; with five seeds it is 4.8\% with $p=0.48$. The
+\texttt{scalar} arm's own seed 4 (71.56) is lower than the
+\texttt{reinforce} arm's seed 0 (71.12) for all practical purposes.
+
+\subsection{The objectives}
+\label{sec:results:front}
+
+Table~\ref{tab:front} reports five preference vectors trained to completion,
+plus the default weight vector derived from the reference schedule.
+
+\begin{table}[htbp]
+\centering
+\caption{Preference sweep on tier B. The three
+one-hot vertices were trained as the single-objective baseline arms of
+Table~\ref{tab:main}. ``Non-dominated'' is over the six rows of this table.}
+\label{tab:front}
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Point & Preferences & Makespan & Energy & \TWT \\
+\midrule
+\texttt{b-ms} & $(1,0,0)$ & \textbf{74.09} & \textbf{5.790} & 5.977 \\
+\texttt{b-twt} & $(0,0,1)$ & 77.30 & 6.048 & 7.392 \\
+\texttt{e-me} & $(0.5,0.5,0)$ & 77.27 & 6.053 & 9.594 \\
+\texttt{full} & $w$-derived & 78.90 & 6.160 & \textbf{5.042} \\
+\texttt{e-eq} & $(1/3,1/3,1/3)$ & 80.96 & 6.333 & 20.456 \\
+\texttt{b-en} & $(0,1,0)$ & 96.93 & 7.434 & 97.458 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item The default weight vector is $w = (0.062, 0.819, 0.120)$, derived from the
+      reference schedule. ``Non-dominated'' marks \texttt{b-ms} and
+      \texttt{full}. All six runs completed all ten jobs with no horizon
+      truncation.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+The attainable front collapses to two points: \texttt{b-ms} and \texttt{full}.
+The three remaining preference vectors, including both interior points, are
+dominated.
+
+The collapse is a property of the objectives, not of the search. On this
+instance the three objectives are strongly aligned: a policy that does well on
+makespan also does well on energy and tardiness. The makespan-only arm is not
+merely non-dominated; it is within 0.9 tardiness units of the default arm while
+being better on the other two objectives.
+
+Two caveats. The endpoint of a single training run moves: the
+\texttt{e-me} arm read 72.65 / 5.683 / 3.038 at step 270, which would have
+dominated every point in the table, and 77.27 / 6.053 / 9.594 at step 300. Five
+evaluation seeds do not pin the endpoint of a single arm. And the effective
+strength of the budget mechanism differs between preference arms, because the
+penalty enters before group normalization and is therefore scaled by the group
+reward spread; the arms in Table~\ref{tab:front} differ in both the preference
+vector and the effective penalty strength.
+
+\subsubsection{The energy account and the makespan}
+\label{sec:results:energy}
+
+The paper reports energy as a third objective, and one property of the account
+has to be stated so that the energy column is not read as something it is not.
+Total energy as defined by Equation~\eqref{eq:energy} is close to
+rank-equivalent with the makespan: across the thirteen ablation runs the ratio
+of the two spans 7.6\%, and their rank correlation is $\rho = 0.978$.
+
+The reason is not a finding but a consequence of the definition. Machine
+processing accounts for 38--45\% of the total, machine standby for 21--31\%,
+machine setup for 13--17\%, vehicles for 8--9\%, and the fixed shop load for
+8.5\%; of these, the fixed shop load is charged over the makespan explicitly,
+vehicle standby is likewise horizon-bound, and machine standby is not merely
+correlated with the makespan but determined by it, since the time a machine
+spends idle is the horizon minus the time it spends working. Together these
+terms are a little under half of the total, and they are affine in the makespan
+for any schedule whatsoever. The aggregate account therefore cannot move
+independently of the makespan by more than the variation in the remaining
+terms, and a schedule cannot be made more energy-efficient under this account
+without also being made shorter. A net account that keeps only the terms
+attributable to work actually performed, and drops the three horizon-bound
+ones, is not tied to the makespan in this way ($\rho = 0.582$); it is reported
+in Equation~\eqref{eq:energy:net} and used in Section~\ref{sec:results:front},
+but the reward is trained on the total account, so it is a reading and not an
+objective here.
+
+Two consequences for reading the tables. The energy column of
+Table~\ref{tab:main} should be read as a restatement of the makespan rather
+than as an independent axis: under the standard account the reported
+three-objective problem has an effective dimension of two. And the same is true
+of the published work this paper compares against indirectly, because the
+account is the standard one; the point is about the account, not about any
+particular study. Section~\ref{sec:conclusion} records what would be needed to
+turn the net account into an objective.
+
+A counterfactual bounds the sensitivity to one modelling choice. The machine
+standby power is taken from the loaded-idle column of the cited source rather
+than its separately tabulated standby power; replacing it with the lower
+tabulated value reduces the mean total energy by 12.9\% and widens the ratio
+spread from 7.6\% to 16.6\%, while leaving the rank correlation unchanged at
+$\rho = 0.973$. The choice moves the level of the reported energy, not its
+ordering.
+
+\subsubsection{Sensitivity to the assumed parameters}
+\label{sec:results:sensitivity}
+
+Most constraint parameters have no published source, and the sensitivity of the
+reported results to them is part of what the paper has to establish.
+Table~\ref{tab:sens} re-evaluates the tier B policy under perturbed dynamics.
+
+\begin{table*}[htbp]
+\centering
+\caption{Sensitivity of the tier B policy to the assumed parameters, five
+evaluation seeds. The policy is held fixed and only the dynamics change. The
+default column repeats the tier B row of Table~\ref{tab:main}. Values are
+makespan / energy / \TWT.}
+\label{tab:sens}
+\setlength{\tabcolsep}{5pt}
+\begin{threeparttable}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Parameter & Low & Default & High \\
+\midrule
+Setup time (min) & 1.0 & 2.0 & 4.0 \\
+\quad & 67.38 / 5.359 / 0.00 & 78.90 / 6.160 / 5.04 & 95.73 / 7.315 / 100.07 \\
+Failure rate & $\times 0.5$ & $\times 1$ & $\times 2$ \\
+\quad & 78.81 / 6.152 / 4.89 & 78.90 / 6.160 / 5.04 & 84.74 / 6.593 / 45.41 \\
+Rework probability & 0.025 & 0.05 & 0.10 \\
+\quad & 73.53 / 5.773 / 3.11 & 78.90 / 6.160 / 5.04 & 81.99 / 6.399 / 8.05 \\
+Maintenance interval (min) & 240 & 120 & 60 \\
+\quad & \multicolumn{3}{c}{bit-identical to default at 240} \\
+\quad & --- & 78.90 / 6.160 / 5.04 & 79.90 / 6.229 / 5.04 \\
+Vehicle MTBF (min) & 240 & 480 & 960 \\
+\quad & 80.02 / 6.240 / 7.73 & 78.90 / 6.160 / 5.04 & 78.81 / 6.154 / 5.16 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item Job weights are not swept: the evaluation path hard-codes equal weights,
+      so the parameter has no entry point. Re-evaluation holds the policy and
+      its normalization context fixed and changes only the dynamics. The
+      maintenance row is identical at 240 because MK01 never reaches the
+      default interval in the first place.
+\end{tablenotes}
+\end{threeparttable}
+\end{table*}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig_sensitivity.pdf}
+\caption{Sensitivity to the assumed parameters, the same numbers as
+Table~\ref{tab:sens}. The policy is held fixed and only the dynamics change.
+Parameter levels are not commensurate, so the horizontal axis is the level
+index rather than a physical value, and each curve is identified by marker and
+line style as well as by colour. The setup time and the failure rate dominate
+the makespan; the tardiness panel separates the parameters far more sharply,
+and the maintenance interval is flat on both because the instance never
+reaches it.}
+\label{fig:sensitivity}
+\end{figure}
+
+The two largest levers, in Figure~\ref{fig:sensitivity}, are the setup time and
+the machine failure rate. Over
+the swept range the setup time moves the makespan by 28 points and the
+tardiness by 100, and the failure rate by 5.8 and 40. Rework is intermediate,
+at 8.5 and 5. Vehicle failure and the maintenance interval move little, and the
+maintenance parameter at 240 is bit-identical to the default because the
+instance never reaches the interval at either setting.
+
+Re-evaluation approximates retraining for these parameters. We trained two
+fresh policies in the perturbed environment, at the most adverse level of each
+of the two largest levers. For the setup time the retrained policy reaches
+102.85 against 95.73 for the re-evaluated one; for the failure rate, 82.91
+against 84.74. Both gaps are of the same order as the training-seed standard
+deviation of 5.90 for makespan, so the order the re-evaluation reports is
+informative. Tardiness moves much further, by $+18.1$ and $-24.5$, and the
+re-evaluated tardiness should not be read as a retrained value.
+
+\subsection{Discussion}
+\label{sec:discussion}
+
+The two tiers say more together than either says alone. On tier B, where the
+ten constraints are present, the learned policy dominates every out-of-sample
+point of the NSGA-II front and beats the rule baseline by 26.5 in makespan. On
+tier A, where the constraints are switched off and the problem is easy, the
+ordering reverses and the metaheuristic edges ahead. That pair locates the
+policy's advantage in its representation of the constrained state rather than
+in its search behaviour, which is the claim this paper set out to test.
+
+The advantage ablation narrows a claim that is often stated too broadly. A
+group-mean baseline is doing measurable work; the division by the group
+standard deviation is not measurably different from omitting it. That is a
+statement about the training procedure and not about this problem in
+particular, and it is the one comparison in the paper that rests on enough
+training seeds to be read as an estimate rather than as a measurement.
+
+The constraint results are consistent rather than surprising. Every mechanism
+that the instance can exercise shows a positive difference when it is removed,
+and every mechanism that it cannot exercise sits at zero; the two groups are
+separated by properties of the constraint that were measured independently of
+the policy. What the ablation does not support is an ordering among the
+mechanisms, and the reason is sample size rather than effect size.
+

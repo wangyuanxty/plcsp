@@ -1,0 +1,269 @@
+\section{Problem formulation}
+\label{sec:problem}
+
+\subsection{Production and logistics}
+\label{sec:problem:model}
+
+We study the production--logistics collaborative scheduling problem (PLCSP).
+The problem couples two decision layers that are usually solved apart:
+a flexible job shop, where each operation must be assigned to one eligible
+machine and sequenced on it, and a fleet of automated guided vehicles (AGVs),
+which must move every job between machines and to and from a load--unload
+station. The term follows the recent literature on production--logistics
+collaborative scheduling; the same problem class appears in the older
+literature as integrated scheduling of machines and AGVs.
+
+Let $\mathcal{J}$ be the set of $n$ jobs, $\mathcal{M}$ the set of $m$
+machines, and $\mathcal{V}$ the set of $V$ vehicles. Job $j$ consists of
+$n_j$ operations that must be processed in the fixed order
+$O_{j,1} \to O_{j,2} \to \dots \to O_{j,n_j}$. Operation $O_{j,k}$ may be
+processed on any machine in the eligible set $\mathcal{M}_{j,k} \subseteq
+\mathcal{M}$; its processing time on machine $i$ is $p_{jki}$. If job
+$j'$ is scheduled on a machine immediately after job $j$, a sequence-dependent
+setup time $s_{jj'}$ elapses before $j'$ can start.
+
+\paragraph{Shop layout and transport}
+Machines occupy the cells of a two-dimensional grid with $n_{\mathrm{col}} =
+\lceil \sqrt{m} \rceil$ columns and $n_{\mathrm{row}} = \lceil m /
+n_{\mathrm{col}} \rceil$ rows. Empty cells are permitted. The aisles are the
+grid lines between cells, so a passage never crosses a machine. The aisle
+network is a graph whose nodes are the $(n_{\mathrm{row}}+1)(n_{\mathrm{col}}+1)$
+intersections and whose edges are the horizontal and vertical segments between
+adjacent intersections; the weight of an edge is its physical length. Each
+machine has a dock, connected to the nearest corner intersection of its cell.
+The load--unload (LU) station is a node outside the grid, joined to the left
+boundary by one connecting segment. Jobs enter the shop at the LU station and
+return there when their last operation is complete. Completion times are
+therefore measured at the LU station, so the makespan of a job includes both
+its entry travel and its return travel. Figure~\ref{fig:layout} shows the
+layout.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\columnwidth]{fig_layout.pdf}
+\caption{Shop layout. Machines occupy grid cells; the aisles are the grid lines
+between cells, so a passage never crosses a machine. Each machine has a dock
+linking it to the nearest intersection. The load--unload station lies outside
+the grid and is joined to the left boundary by one connecting segment. Charging
+stations occupy aisle intersections. The solid line is one AGV travel.}
+\label{fig:layout}
+\end{figure}
+
+Two transport-time calibers coexist in this study, and the caliber is a
+property of the instance rather than of the run configuration. Under the
+geometric caliber, the travel time between two nodes is the shortest-path
+length in the aisle graph divided by the effective vehicle speed. Under the
+matrix caliber, the travel time is read from a machine-to-machine travel-time
+matrix supplied with the instance; entries are already in minutes, and the
+matrix includes the LU station as its zeroth row and column. The matrix is
+asymmetric, so a lookup preserves direction. A fleet-wide speed multiplier
+still applies under the matrix caliber; the aisle width and the nominal
+vehicle speed do not.
+
+\paragraph{Constraints}
+Ten constraints are modelled. Each is an independent switch, so a run can
+enable any subset.
+
+\begin{description}\itemsep2pt
+\item \textbf{C1 --- AGV congestion, zone conflict, deadlock.}
+      An aisle segment carries at most one vehicle. A vehicle requests the next
+      segment before releasing the previous one, and wait cycles are detected
+      and broken.
+\item \textbf{C2 --- Finite input and output buffers.}
+      A machine blocks when its output buffer is full, and an operation waits
+      when the input buffer of its machine is full.
+\item \textbf{C3 --- Machine failure.}
+      Failures occur at a rate that rises with machine age, and repair occupies
+      the machine for a random interval.
+\item \textbf{C4 --- Rework.}
+      A completed operation is re-queued with probability $p_{\mathrm{rw}}$.
+\item \textbf{C5 --- Sequence-dependent setup.}
+      A setup time $s_{jj'}$ precedes each job change on a machine.
+\item \textbf{C6 --- Due dates and tardiness.}
+      Per-job due dates enter Equation~\eqref{eq:twt}. This is the one
+      constraint that changes only what is measured: the simulation trajectory
+      is unaffected.
+\item \textbf{C7 --- AGV failure.}
+      A vehicle stops for a repair interval, and tasks already assigned to it
+      are returned to the dispatcher and re-offered to the remaining vehicles.
+\item \textbf{C8 --- Heterogeneous fleet.}
+      Vehicles differ in speed multiplier, load capacity, and battery size.
+\item \textbf{C9 --- Charging and battery.}
+      Vehicle energy is tracked. A depleted vehicle becomes unavailable, and
+      charging is a scheduled decision.
+\item \textbf{C10 --- Preventive maintenance.}
+      Each machine carries a maintenance clock, and maintenance is a scheduled
+      decision that resets it.
+\end{description}
+
+The distinction between a constraint that changes the dynamics and one that
+changes only the objectives matters for the ablations in
+Section~\ref{sec:results}. Switching off a dynamics constraint changes the
+trajectory; switching off C6 leaves every trajectory bit-identical and only
+removes a term from the objective.
+
+\subsection{Objectives}
+\label{sec:problem:objectives}
+
+Three objectives are reported. Let $C_j$ denote the completion time of job
+$j$, measured when the job reaches the LU station, and let $d_j$ denote its
+due date.
+
+\paragraph{Makespan}
+\begin{equation}
+\Cmax = \max_{j \in \mathcal{J}} C_j .
+\label{eq:makespan}
+\end{equation}
+
+\paragraph{Total energy consumption}
+Energy is accounted by a three-state machine model and a three-state vehicle
+model, plus a fixed shop load. Let $\pi^{\mathrm{p}}_i$, $\pi^{\mathrm{s}}_i$,
+and $\pi^{\mathrm{u}}_i$ be the processing, setup, and standby power of machine
+$i$, in kilowatts, and let $T^{\mathrm{p}}_i$, $T^{\mathrm{s}}_i$, and
+$T^{\mathrm{u}}_i$ be the total minutes machine $i$ spends in each state. Let
+$\pi^{\mathrm{l}}$, $\pi^{\mathrm{e}}$, and $\pi^{\mathrm{i}}$ be the loaded,
+empty-travel, and standby power of a vehicle, and let $T^{\mathrm{l}}$,
+$T^{\mathrm{e}}$, and $T^{\mathrm{i}}$ be the corresponding fleet totals. Let
+$P_0$ be the fixed shop power. Then
+\begin{equation}
+E_{\mathrm{mach}} = \frac{1}{60} \sum_{i \in \mathcal{M}}
+   \left( \pi^{\mathrm{p}}_i T^{\mathrm{p}}_i
+        + \pi^{\mathrm{s}}_i T^{\mathrm{s}}_i
+        + \pi^{\mathrm{u}}_i T^{\mathrm{u}}_i \right),
+\label{eq:energy:mach}
+\end{equation}
+\begin{equation}
+E_{\mathrm{agv}} = \frac{1}{60} \left( \pi^{\mathrm{l}} T^{\mathrm{l}}
+   + \pi^{\mathrm{e}} T^{\mathrm{e}} + \pi^{\mathrm{i}} T^{\mathrm{i}} \right),
+\label{eq:energy:agv}
+\end{equation}
+\begin{equation}
+E_{\mathrm{tot}} = E_{\mathrm{mach}} + E_{\mathrm{agv}}
+   + \frac{P_0 \, \Cmax}{60} .
+\label{eq:energy}
+\end{equation}
+The fixed shop load is charged over the makespan, so the third term is linear
+in $\Cmax$ by construction.
+
+Section~\ref{sec:results} also reports a second energy account,
+$E_{\mathrm{net}}$, which keeps only the terms attributable to the work
+actually performed:
+\begin{equation}
+E_{\mathrm{net}} = \frac{1}{60} \sum_{i \in \mathcal{M}}
+   \left( \pi^{\mathrm{p}}_i T^{\mathrm{p}}_i
+        + \pi^{\mathrm{s}}_i T^{\mathrm{s}}_i \right)
+   + \frac{1}{60} \left( \pi^{\mathrm{l}} T^{\mathrm{l}}
+        + \pi^{\mathrm{e}} T^{\mathrm{e}} \right) .
+\label{eq:energy:net}
+\end{equation}
+$E_{\mathrm{net}}$ excludes machine standby, vehicle standby, and the fixed
+shop load. The two accounts behave differently as objectives, and
+Section~\ref{sec:results} reports that difference as a result rather than
+treating the choice as a formality.
+
+\paragraph{Total weighted tardiness}
+\begin{equation}
+\TWT = \sum_{j \in \mathcal{J}} \wj \max(0, \, C_j - d_j).
+\label{eq:twt}
+\end{equation}
+All job weights are set to one in this study, so \TWT\ is the unweighted total
+tardiness. The weights are retained in the formulation because the objective
+is defined with them and because the instance data carry a weight field.
+
+\subsection{Due dates}
+\label{sec:problem:due}
+
+Due dates must be exogenous, per job, and spread. A common due date makes the
+tardiness objective degenerate: if all $d_j$ are equal, then $\TWT = 0$
+whenever $\Cmax \le d$, so the objective carries no signal beyond the
+makespan. Two formulations that are natural at first sight fail on this point,
+and the failure is structural rather than numerical. Setting $d_j$ to a fixed
+multiple of the job's own processing time ignores queueing and transport, so
+every job is tardy. Setting $d_j = \tau M_{\mathrm{ref}}$, where
+$M_{\mathrm{ref}}$ is the makespan of a reference schedule on the same
+instance, is endogenous: changing the fleet size changes
+$M_{\mathrm{ref}}$ and therefore changes the due dates.
+
+We therefore generate due dates from the job work content. Let
+$W_j = \sum_{k} \min_{i \in \mathcal{M}_{j,k}} p_{jki}$ be the shortest
+attainable processing time of job $j$, and let
+\begin{equation}
+\mathrm{LB} = \max \left( \frac{1}{m} \sum_{j \in \mathcal{J}} W_j, \;
+   \max_{j \in \mathcal{J}} W_j \right)
+\label{eq:lb}
+\end{equation}
+be a load lower bound on the makespan of any feasible schedule. Let
+$\rho_j \in [0,1]$ be the rank of $W_j$ among all work contents, normalized
+to the unit interval, with $\rho_j = 0.5$ when $n = 1$. The due date of job
+$j$ is
+\begin{equation}
+d_j = \mathrm{LB} \cdot \tau \cdot \left( 1 + R (2\rho_j - 1) \right).
+\label{eq:duedate}
+\end{equation}
+Equation~\eqref{eq:duedate} reads only instance data: the reference schedule
+and the fleet configuration do not appear, so changing the fleet size does not
+move any due date. The pair $(\tau, R)$ is calibrated per instance. The
+tardiness rate of the reference schedule and the tardiness rate after a 12\%
+improvement are both required to fall in $[0.20, 0.75]$; among the pairs that
+satisfy this, the calibration selects the one minimizing
+$|\eta_{\mathrm{ref}} - 0.45| + |\eta_{\mathrm{imp}} - 0.40| + 0.02R$, where
+$\eta$ denotes a tardiness rate. Tightening $\tau$ only increases our own
+tardiness, so the rule carries no incentive to tune the target in our favour.
+$R$ is bounded below by $0.2$ because $R = 0$ collapses
+Equation~\eqref{eq:duedate} to a common due date, which is the degeneracy this
+section exists to avoid. It is bounded above by $0.8$ because the factor
+$1 + R(2\rho_j - 1)$ crosses zero once $R > 1$, which would produce negative
+due dates.
+
+The calibrated $\tau$ differs across instances by up to a factor of 3.4 under
+the geometric caliber and 12.0 under the matrix caliber. That spread is
+inherent to work-content-based due dates and is reported rather than hidden. Table~\ref{tab:duedates} gives the frozen pairs for both
+transport calibers. They are part of the instance data in the sense that
+matters here --- the reward of Equation~\eqref{eq:reward} is not reproducible
+without them --- so they are reported in full even though the policy results in
+this paper come from a single instance.
+
+Both columns were produced by a search over a fixed grid, with a step of 0.05
+in $\tau$ and 0.10 in $R$, rather than chosen by hand. Halving the grid step
+leaves the induced tardiness rates unchanged on nine of the ten instances under
+the geometric caliber; on the tenth it moves to a neighbouring pair with a
+slightly worse score. The table reports the frozen values.
+
+\begin{table}[htbp]
+\centering
+\caption{Frozen due-date parameters, one pair per caliber. The two calibers
+measure travel time on different scales, so they need separate pairs.}
+\label{tab:duedates}
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & \multicolumn{2}{c}{Geometric} & \multicolumn{2}{c}{Matrix} \\
+\cmidrule(r){2-3}\cmidrule(l){4-5}
+Instance & $\tau$ & $R$ & $\tau$ & $R$ \\
+\midrule
+mk01 & 2.75 & 0.3 & 19.80 & 0.4 \\
+mk02 & 2.45 & 0.4 & 22.15 & 0.2 \\
+mk03 & 3.65 & 0.4 & 16.10 & 0.3 \\
+mk04 & 5.00 & 0.7 & 20.45 & 0.5 \\
+mk05 & 1.70 & 0.5 &  4.40 & 0.4 \\
+mk06 & 5.85 & 0.6 & 45.50 & 0.5 \\
+mk07 & 1.90 & 0.5 &  8.60 & 0.3 \\
+mk08 & 2.70 & 0.8 &  8.80 & 0.6 \\
+mk09 & 2.70 & 0.8 & 13.00 & 0.4 \\
+mk10 & 3.10 & 0.8 & 52.70 & 0.6 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item Frozen values; the grid search that produced them is described in the
+      text.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+The tardiness objective also saturates. Because due dates are absolute
+thresholds, a schedule that finishes every job before the earliest $d_j$
+attains $\TWT = 0$ regardless of how much better it is. The calibration above
+pins the reference schedule near the middle of the band rather than at either
+edge, but the saturation remains, and it is reported wherever it occurs rather
+than being treated as a measurement of zero tardiness.

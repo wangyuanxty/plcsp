@@ -1,0 +1,71 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper studied production--logistics collaborative scheduling with ten
+modelled constraints and three reported objectives, using a joint-chain
+formulation in which all production and logistics decisions of an episode form
+a single decision chain trained by group-relative policy optimization. The
+policy's parts are standard, a Transformer encoder with candidate-scoring
+heads; what the paper contributes is the chain that joins the two decision
+layers, the encoding that puts the aisle network into the state, and the
+measurement of what the ten constraints do when they are all present.
+
+The method beats a rule baseline by 26.5 in makespan on the fully constrained
+problem and dominates every out-of-sample point of an NSGA-II front, while
+losing narrowly to the same metaheuristic on the unconstrained problem. That
+combination locates the method's advantage in its representation of the
+constrained state rather than in its search behaviour. On the objective side,
+the aggregate energy consumption commonly reported in this literature is close
+to rank-equivalent with the makespan, because the terms that dominate it are
+linear in the horizon by construction; under that account the reported
+three-objective problem has an effective dimension of two, which is consistent
+with the observed collapse of the preference front to two points. A net account
+that removes the horizon-linear terms restores independent ordering.
+
+\paragraph{Limitations} The evaluation is a first pass and the scope is narrow.
+Every number comes from a single instance of the benchmark, and MK01 is the
+instance least favourable to the batching mechanism, so the batching results
+here are not a verdict on batching. Except for the advantage ablation, each
+configuration was trained once. Against that, the training-seed standard
+deviation is measured rather than assumed: it is 5.90 makespan units on the same
+configuration, which is the order of most of the differences we report, and it
+is why the ablation table is presented without a ranking.
+
+The comparison uses a rule, a single-objective version of our own method, and
+NSGA-II. It does not use a published deep reinforcement learning method, which
+is the baseline a reviewer would most reasonably ask for; adapting one to this
+simulation is substantial work, and Section~\ref{sec:related:incomparable}
+explains the boundary conditions under which any such number could be compared.
+A state-of-the-art metaheuristic for the flexible job shop is absent for the
+same reason. On the constraint side, two of the ten do not activate under the
+reported parameters: the charging constraint never fires across the benchmark,
+and maintenance does not trigger on MK01, so the budget mechanism penalizes four
+constraints in practice rather than the six it is configured with. The
+consequence is stated plainly: this paper reports no evidence on whether the
+charging mechanism works, and establishes that only in a configuration where
+vehicles actually drain. Most of the constraint parameters have no published
+source and are values we chose; the sensitivity analysis in
+Section~\ref{sec:results:sensitivity} reports how far the results move when they
+change, but does not make them cited. One parameterization of the reported
+energy is conservative: the machine standby power is taken from the loaded-idle
+column of the cited source rather than its separately tabulated standby power,
+which overstates standby energy by 12.9\% of the total without changing any
+ordering. Finally, the paper proves no bound and no convergence guarantee.
+
+\paragraph{Future work} Three measurements would change the conclusions rather
+than extend them. The ablation table reports a grouping, not an ordering,
+because one training seed per arm cannot separate differences of the size it
+reports. An ordering would need about ten seeds per arm, some hundred and fifty
+runs at the cost measured in Section~\ref{sec:method:cost}, with the number set
+by the smallest difference the table is meant to resolve: at a seed-to-seed
+spread of eight makespan units, an effect of eight units needs eight seeds and
+an effect of five needs twenty. The comparison against the baselines is much
+cheaper to settle, because its effect is three times the seed-to-seed spread;
+three seeds per arm would certify it. Running the mechanisms on further
+instances of the benchmark would separate the effects that belong to the
+mechanism from those that belong to MK01, which matters most for batching and
+for maintenance. And training with the net energy account as the reward, rather
+than measuring it after the fact, would test whether the third dimension
+available at the measurement level is usable at the optimization level. The
+comparison against a published deep reinforcement learning method remains the
+piece of work this paper most needs done next.

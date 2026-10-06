@@ -1,0 +1,185 @@
+\section{Introduction}
+\label{sec:intro}
+
+A flexible job shop does not run on machines alone. Jobs must be moved between
+machines, and in an automated shop that movement is performed by a fleet of
+automated guided vehicles whose availability, routing, and load state determine
+whether a machine that is ready to work has anything to work on. Deciding the
+two layers separately, fixing the production plan first and dispatching vehicles
+to execute it afterwards, is the conventional decomposition. It is exact only when
+transport is never the limiting resource. In an automated shop it can be, and
+the coupling is then exactly what the decomposition discards: the production
+plan determines which transport tasks exist and when they are due, and the
+dispatch decisions determine whether the machines are ever fed.
+
+The integrated problem is known in the recent literature as the
+production--logistics collaborative scheduling problem
+(PLCSP)~\citep{li2025plcsp,shi2025nested}, and in an older line as integrated
+scheduling of machines and AGVs~\citep{ulusoy1993}. Both lines are active
+today. Reinforcement learning is the dominant recent tool, applied through a
+variety of representations: multi-agent PPO over hand-built priority
+vectors~\citep{li2025plcsp}, nested hierarchical
+architectures~\citep{shi2025nested}, heterogeneous graph
+attention~\citep{taagnet2026,yang2026hgamppo,yue2027hchgnn}, and hybrid
+GNN--Transformer encoders~\citep{gao2026gnntransformer}. A parallel line
+attacks the same coupling with hand-designed search such as large-neighbourhood
+search and Benders decomposition, and solves closely related three-layer
+problems well~\citep{chen2025carseq,chen2026benders}. The two lines differ in
+what they cost to extend: the search-based methods are tailored per problem,
+and a change to the constraints generally means redesigning the encoding or the
+cuts, whereas a learned policy is in principle indifferent to which constraints
+are switched on.
+
+That second property is the reason this paper exists, and it is also why the
+field's current state is worth examining closely. Across the recent work, the
+architecture has converged while the constraint coverage has not. Congestion
+and path conflict are excluded in at least eleven papers, three of which name
+the cause rather than the choice: an encoder that carries only connectivity
+cannot represent congestion, so a policy using it cannot learn to avoid
+it~\citep{gao2026gnntransformer,taagnet2026,li2025plcsp}. Preventive
+maintenance is listed as future work rather than modelled~\citep{zhang2026amr}.
+Batching as a decision appears in warehouse order picking but not in transport
+inside a job shop~\citep{wang2025gphh}. Charging is modelled in several
+works~\citep{huang2025collaborative,dong2026handling}, but whether the
+constraint ever activates under the parameters used is rarely reported.
+
+Two consequences follow, and they set up the contribution. First, a model can
+carry a constraint that never fires. A constraint that is modelled but never
+violated, or modelled but never actionable, contributes nothing to the problem
+and nothing to the comparison. Whether it fires is reported rarely, one
+constraint at a time, and never --- in the work we surveyed --- for every
+modelled constraint of a benchmark family at once; the closest case counts the
+actions one constraint triggers, on a single
+instance~\citep{huang2025collaborative}.
+Section~\ref{sec:results:active} reports activation for all ten constraints
+across the whole benchmark. Second, an architecture
+claim and a constraint-handling claim are different claims, and the second is
+where the field is uneven. Section~\ref{sec:related} documents both.
+
+Figure~\ref{fig:motivation} shows the decomposition failing on a three-machine
+shop, and what changes when the two layers are decided together.
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig_motivation.pdf}
+\caption{Deciding production and transport separately breaks down when the
+vehicle fleet is the limiting resource; deciding them in one chain does not.
+The shop has three machines and one vehicle. In (a) the machine schedule is
+fixed first, with the vehicle absent from its input: it places two transfers
+one time unit apart, job $J_1$ from $M_1$ to $M_2$ and job $J_2$ from $M_2$ to
+$M_3$, because it assumes that transport is always available. In (b) the
+vehicle is dispatched to execute that plan, and one vehicle cannot serve both
+transfers: $J_1$ waits while the vehicle carries $J_2$, $M_2$ has nothing to
+work on, and every later block on that machine shifts, so the loss appears as
+idle machine time rather than as a worse machine sequence. In (c) both layers
+are decided in one chain, so the plan is built knowing what the fleet can
+deliver, and a single tour serves $J_1$ and then $J_2$ without idling any
+machine. The example is constructed to make the mechanism visible and is not
+drawn from a measured run.}
+\label{fig:motivation}
+\end{figure*}
+
+This paper therefore spends its effort on the constraints and on the
+representation they need. The policy's parts are standard: a Transformer
+encoder, a candidate-scoring head per decision kind, and group-relative policy
+optimization. What the paper adds to them is a formulation and a
+representation. The formulation is the joint chain, which carries every
+production and logistics decision of an episode under one log-probability and
+one advantage. The representation is the transport-network-aware encoding of
+Section~\ref{sec:method:state}, which puts the aisle network into the state
+rather than leaving it to be inferred from the machine and vehicle tokens.
+Every constraint then gets a mechanism that gives the policy something to act
+on: a decision point where a rule used to decide, a dynamics change where the
+model was incomplete, or an input feature where the state was not visible.
+Every switch defaults to off with bit-identical behaviour, so that an ablation
+measures the mechanism and not an incidental change elsewhere.
+Section~\ref{sec:related:coverage} sets out, for each of the ten constraints,
+what prior work does and what this paper does.
+
+\paragraph{What we find}
+
+On the fully constrained problem the learned policy dominates every
+out-of-sample point of an NSGA-II front: the front's best re-evaluated values
+are 79.56 for makespan, 6.239 for energy, and 20.73 for tardiness, against
+78.90, 6.160, and 5.042 for the policy, and all twelve front points are
+dominated. On the unconstrained problem the ordering reverses and NSGA-II edges
+ahead, 49.14 against 49.27, on a problem where it has five thousand
+deterministic evaluations available. That pair of results locates the method's
+advantage in its representation of the constrained state rather than in its
+search behaviour, which is the claim the rest of the paper examines.
+
+Two further observations are worth stating before the results. An ablation over
+the advantage shows that subtracting a group-mean baseline does measurable work
+while dividing by the group standard deviation does not, which is a narrower
+statement than the one usually made about group-relative advantages. And a
+hypothesis we set out to confirm (that ablating on the makespan alone
+systematically misses mechanisms) did not survive its own test. One property of
+the reported objectives is not an observation at all and is stated where the
+results are given: the energy account cannot move independently of the
+makespan, because most of it is tied to the horizon by definition
+(Section~\ref{sec:results:energy}).
+
+\paragraph{Contributions}
+
+\begin{enumerate}
+\item \textbf{A joint-chain formulation, and a measurement of which part of it
+      matters.} Production and logistics decisions in one episode are treated
+      as one decision chain with one log-probability and one group-relative
+      advantage, rather than as separate agents. We give the reason (group
+      relative advantage compares samples within a group, and a group drawn
+      from two policies is not a group) and then measure it. The
+      measured answer is narrower than the usual statement: subtracting the
+      group mean matters, dividing by the group standard deviation does not
+      (Section~\ref{sec:results:advantage}). The arrangement is not merely a
+      convenience: a recent comparison of joint and modular training on a job
+      shop with transport resources finds a coordination gap, in which the
+      modular arrangement does not recover what joint training
+      obtains~\citep{link2026coordination}.
+
+\item \textbf{A transport-network-aware encoding, and a mechanism for each of
+      ten constraints.} The encoders in this literature carry topology without
+      space: three papers state that theirs cannot represent congestion, and
+      that the vehicle features contain neither coordinates nor distances. We
+      therefore make the transport network itself part of the state. The
+      aisle segments become tokens carrying their own occupancy, a
+      distance-dependent bias enters the attention score, and the route head
+      reads the segments each candidate traverses. The aisle stops
+      being something the policy is told about and becomes something it can act
+      on. The remaining mechanisms follow the same discipline: a decision point
+      where a rule used to decide, a dynamics change where the model was
+      incomplete, or an input feature where the state was not visible.
+      Section~\ref{sec:related:coverage} sets out the ten cases one by one and
+      separates the ones where the difference is categorical from the ones where
+      it is a matter of degree. Every switch defaults to off and reproduces the
+      pre-mechanism trajectory bit for bit, which is what makes the ablations
+      measurements rather than comparisons against an unstated baseline. We do
+      not claim that the encoding transfers to shop layouts it was not trained
+      on; the mechanisms are demonstrated on the layout of the instance.
+
+\item \textbf{Results reported against interest.} We report the ablation table
+      as a grouping rather than as an ordering, because the measured
+      training-seed standard deviation is the same order as most of the
+      differences in it. We report the hypothesis about single-objective
+      ablation that did not hold, and the constraints that do not activate
+      under the reported parameters, so that the coverage claim is a statement
+      about the model rather than about demonstrated effects.
+\end{enumerate}
+
+\paragraph{Scope} The evaluation in this paper is a first pass. It uses one
+instance of the MKT benchmark and a single training run per configuration, with
+five seeds per arm reserved for the advantage ablation because that comparison
+is about the training procedure itself. Section~\ref{sec:discussion} states
+what this bounds. The experimental protocol is designed so that widening it
+later changes the tables rather than the claims.
+
+The remainder of the paper is organized as follows.
+Section~\ref{sec:related} reviews the two literature lines, sets out the
+constraint-by-constraint coverage, and explains why published figures from this
+literature are not reproduced in our tables. Section~\ref{sec:problem}
+formulates the problem, the ten constraints, and the three objectives.
+Section~\ref{sec:method} describes the policy, the training procedure, and the
+mechanism for each constraint. Section~\ref{sec:setup} gives the benchmark, the
+configuration, and the reproducibility discipline.
+Section~\ref{sec:results} reports the results, including the one negative one.
+Section~\ref{sec:discussion} states the limitations, and
+Section~\ref{sec:conclusion} concludes.

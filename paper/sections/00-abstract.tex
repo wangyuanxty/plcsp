@@ -1,0 +1,20 @@
+Production--logistics collaborative scheduling couples a flexible job shop
+with a fleet of automated guided vehicles. We formulate the two layers as a
+single decision chain and train it with group-relative policy optimization, so
+that every production and logistics decision in an episode contributes to one
+log-probability and one advantage. The policy is a standard Transformer over a
+token sequence with a candidate-scoring head per decision kind, and ten
+constraints are modelled as independent switches, each with a mechanism that
+gives the policy something to act on. We measure the method on MK01 of the MKT
+benchmark against a rule baseline, a single-objective version of itself, and
+NSGA-II. On the fully constrained problem it dominates all twelve
+out-of-sample points of the metaheuristic front; on the unconstrained problem
+the metaheuristic is marginally ahead. Three further results are reported.
+First, the aggregate energy consumption commonly reported in this literature is
+close to rank-equivalent with the makespan, because the terms that dominate it
+are linear in the horizon by construction, so energy adds a third dimension
+only under a net account that removes those terms. Second, an ablation over the
+advantage shows that subtracting a group-mean baseline has a measurable effect
+while dividing by the group standard deviation does not. Third, a hypothesis
+that single-objective ablation systematically misses mechanisms did not survive
+its test.

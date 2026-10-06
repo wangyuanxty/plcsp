@@ -1,0 +1,611 @@
+\section{Method}
+\label{sec:method}
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=\textwidth]{fig_overview.pdf}
+\caption{The policy and its training loop. The shop state at one decision is
+encoded as a set of tokens in five segments --- machines, jobs, vehicles, one
+global token, and the aisle segments --- padded to a common width and passed
+through a Transformer with no attention mask. One head scores the candidates of
+each decision kind. Every decision of one episode is appended to a single
+chain, which receives one terminal scalarized reward; the group-relative
+advantage is computed over the chains sampled at that step, and the policy is
+updated without a critic. The zone segment exists only when the congestion
+mechanism is enabled; the other four are always present. The zone segment
+together with the distance bias and the route head form the
+transport-network-aware encoding of Section~\ref{sec:method:state}: they are
+what puts the aisle network into the state rather than leaving it to be
+inferred from the machine and vehicle tokens.}
+\label{fig:overview}
+\end{figure*}
+
+\subsection{Overall framework}
+\label{sec:method:framework}
+
+Figure~\ref{fig:overview} shows the pipeline, and this subsection names its
+stages in the order the running system passes through them.
+
+\emph{Encoding.} At a decision instant the simulation hands over a snapshot:
+machine states and buffers, job progress and due-date margins, vehicle
+positions and loads, the shop clock, and the aisle occupancy. The snapshot is
+turned into the token tensor of Section~\ref{sec:method:state}, with the
+per-token features normalized by instance constants so that the same encoder
+accepts a 10-job and a 20-job instance.
+
+\emph{Scoring.} The encoder produces one embedding per token. The head of the
+active decision kind scores its candidate set against those embeddings, and the
+policy samples a candidate during training or takes the highest-scoring one
+during evaluation.
+
+\emph{Advancing.} The chosen candidate is applied to the simulation, which runs
+until the next decision instant and then hands over a new snapshot. The chain
+grows by one decision. The kind of the next decision is determined by the
+triggering event, not by a fixed schedule, so the proportion of S, L, and
+optional decisions in a chain is a property of the episode rather than a design
+constant.
+
+\emph{Learning.} The episode ends, one terminal reward is computed, and the
+chains sampled at that step are compared with one another to give the advantage
+of Algorithm~\ref{alg:train}.
+
+\emph{Deployment.} At inference the policy needs the same snapshot, the same
+candidate construction, and one forward pass; it does not need the reference
+run, the reward, or the group. The candidate sets are built from the simulation
+state exactly as during training, so the action space seen at deployment
+matches the one seen during training. Evaluation in this paper uses argmax
+action selection, which makes a trained policy deterministic given a seed; the
+group-based sampling path exists only during training.
+
+\subsection{Markov decision process formulation}
+\label{sec:method:mdp}
+
+We formulate the coupled problem as a Markov decision process
+$\mathcal{M} = (\mathcal{S}, \mathcal{A}, P, r, \gamma)$ with a terminal
+reward and no discounting.
+
+\paragraph{State}
+At a decision instant $t$ the state is the shop snapshot, encoded as a token
+tensor and a segment assignment,
+\begin{equation}
+s_t = \left( \mathbf{X}_t \in \mathbb{R}^{N \times F_{\max}}, \;
+            \mathbf{g}_t \in \{1,\dots,5\}^{N} \right),
+\label{eq:state}
+\end{equation}
+where $N = m + n + V + 1 + Z$ is the number of tokens, $F_{\max}$ the padded
+feature width, and $\mathbf{g}_t$ the segment identifier of each token. The
+token set is built from the simulation state at the instant of the decision,
+not from a fixed initial snapshot, so a decision taken late in an episode sees
+the consequences of the decisions taken before it.
+Section~\ref{sec:method:state} lists the features.
+
+\paragraph{Action}
+The action space is not a single set, because the decisions are of different
+kinds. At each decision instant exactly one kind $k$ is active, drawn from
+$\mathcal{K} = \{\mathrm{S}, \mathrm{L}, \mathrm{R}, \mathrm{M}, \mathrm{C},
+\mathrm{B}\}$, and the action is a choice from a candidate set that depends on
+the state and the kind:
+\begin{equation}
+a_t \in \mathcal{C}_k(s_t), \qquad
+\mathcal{C}_k(s_t) = \{c_1, \dots, c_{C}\}, \quad C = C_k(s_t).
+\label{eq:action}
+\end{equation}
+The candidate set varies in size: eligible machines for an operation, available
+vehicles for a transport task, admissible paths for a travel, admissible batch
+sizes for a pick-up. Formulating the action this way, rather than as a fixed
+index into a problem-sized vector, is what lets one parameter set serve
+instances of different size.
+
+\paragraph{Transition}
+$P(s_{t+1} \mid s_t, a_t)$ is the discrete-event simulation itself. The shop
+advances until the next decision instant, and the triggering event --- an
+operation released, a travel requested, a machine idle, a vehicle empty, a
+batch starting --- determines the kind $k$ of the next decision. Because the
+simulation is stochastic (failures, rework, repair durations), the transition
+is stochastic even when the policy is deterministic.
+
+\paragraph{Reward}
+The reward is terminal and arrives once, at the end of the episode:
+\begin{equation}
+r(s_1, a_1, \dots, a_T) = w_1(-\Cmax) + w_2(-E) + w_3(-\TWT),
+\label{eq:reward-mdp}
+\end{equation}
+with the weights of Equation~\eqref{eq:weights}. There is no intermediate
+reward and no shaping term, so the credit for every decision in an episode is
+assigned by the same scalar.
+
+\paragraph{Objective}
+The policy $\pi_\theta(a_t \mid s_t)$ is trained to maximize
+$\mathbb{E}_{\pi_\theta}[r]$, with no discount factor, since the horizon is
+the episode.
+
+\subsection{Joint-chain formulation}
+\label{sec:method:chain}
+
+An episode of the scheduling problem contains many decisions of more than one
+kind. Each operation needs a machine, and each transport task needs a vehicle.
+A policy could be trained on each decision point separately, with one reward
+per decision. We instead treat the whole episode as one decision chain.
+
+Let $a_S$ be the sequence of machine choices, one per operation, and $a_L$ the
+sequence of vehicle choices, one per transport task. A \emph{chain} is the pair
+$(a_S, a_L)$ together with the optional decisions of
+Section~\ref{sec:method:mechanisms}. Its log-probability under the policy is the
+sum of the per-decision log-probabilities,
+\begin{equation}
+\begin{split}
+\logp(\text{chain})
+   &= \sum_{t} \logp_S(a_S[t] \mid s_t)
+      + \sum_{t} \logp_L(a_L[t] \mid s_t) \\
+   &\quad + \sum_{k} \sum_{t} \logp_k(a_k[t] \mid s_t),
+\end{split}
+\label{eq:chain-logp}
+\end{equation}
+where the last sum runs over the optional decision kinds $k$ that are enabled.
+The chain receives a single terminal reward, computed after the episode ends.
+No intermediate reward is used.
+
+Three properties of the problem motivate this formulation.
+
+First, group-relative advantages compare the members of a group with one
+another. That comparison is only meaningful if every member was produced by the
+same policy from the same state distribution. If the production and logistics
+decisions were split between two policies, each group would mix samples drawn
+from two different distributions, and the group mean would no longer estimate
+a baseline for either of them. Multi-agent methods handle this by learning a
+joint value function or a centralised critic~\citep{rashid2018qmix,yu2022mappo};
+both routes reintroduce the critic that a group-relative method is meant to
+avoid.
+
+Second, the two decision layers are coupled by construction: the quality of a
+dispatching decision depends on the production plan that generated the
+transport tasks. A dispatching policy that is trained against a fixed or
+randomly generated plan therefore learns against a task stream that the
+deployed system will not produce.
+
+Third, the coupling is asymmetric. Production decisions determine which
+transport tasks exist and when they exist; transport decisions determine
+whether the machines receive work on time. A chain-level advantage assigns
+credit to the whole chain and leaves the split between the two layers to the
+policy.
+
+Treating a trajectory as one object and learning from it as a sequence is
+itself an established formulation~\citep{chen2021decision}. What is specific
+here is that the sequence spans two decision layers whose actions are of
+different kinds and live in different candidate spaces, and that the reward
+arrives only at the end. The candidate-scoring interface of
+Section~\ref{sec:method:policy} is what lets one chain carry both.
+
+\subsection{State representation}
+\label{sec:method:state}
+
+The policy reads the shop state as a sequence of tokens. Four kinds of entity
+are encoded, plus one global token. Each token carries a fixed-width feature
+vector. The feature vectors of the four segments are padded to a common width
+$F_{\max}$ and concatenated into a single tensor of shape $(N, F_{\max})$, where
+$N = m + n + V + 1$ for $m$ machines, $n$ jobs, and $V$ vehicles. A segment
+identifier accompanies the tensor.
+
+Machines, jobs, vehicles, and the global token have different numbers of
+informative fields. A machine has 7, a job has 9, a vehicle has 11, and the
+global token has 3. Because the four segments are padded to a common width,
+column $c$ of a machine token and column $c$ of a job token can carry different
+meanings. A learned type embedding, indexed by the segment identifier, is added
+to every token and is what separates those meanings. Without it the shared
+projection cannot distinguish a machine from a job.
+
+Table~\ref{tab:features} lists the features. All quantities are normalized by
+static instance constants --- total work content, the makespan of a reference
+schedule, the machine count, the bounding box of the shop --- rather than by
+per-episode statistics, because online decision making cannot observe the
+statistics of an episode that has not finished.
+
+\paragraph{Transport-network-aware encoding}
+The four segments above describe the machines, the jobs, and the vehicles, and
+none of them carries the shop's spatial structure: a machine token says how
+much work is queued, not how far it is from anything else. We therefore add the
+transport network to the state, in three parts that only work together. The
+aisle segments become a fifth token segment, so each segment of the network is
+an entity carrying its own occupancy and the time vehicles have waited on it. A
+distance-dependent bias enters the attention score, so that a token can be
+attended to in proportion to how far its entity is from the deciding one. And
+the route head reads the segment tokens its candidate path would traverse,
+which is what turns the first two parts from context into something the policy
+can choose between. Section~\ref{sec:method:mechanisms} lists the switches that
+enable each part.
+
+This is a representation choice and not a claim about generalization. Whether
+the encoding transfers to a shop layout it was not trained on is a separate
+question, and this paper does not measure it.
+
+\begin{table*}[htbp]
+\centering
+\caption{Token features. Each column is one scalar. Normalizers are instance
+constants, not per-episode statistics.}
+\label{tab:features}
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\begin{tabular}{@{}llp{11.4cm}@{}}
+\toprule
+Segment & Width & Features \\
+\midrule
+Machine ($m$ tokens) & 7 &
+  Queued processing work divided by total work content;
+  queued operations divided by input capacity;
+  output buffer occupancy divided by output capacity;
+  busy indicator and remaining processing time as a fraction of the operation;
+  remaining time until the next forced maintenance;
+  failure rate divided by the largest failure rate in the instance. \\
+Job ($n$ tokens) & 9 &
+  Completed operations divided by total operations;
+  remaining nominal processing time divided by total work content;
+  due-date margin $(d_j - \text{now})/M_{\mathrm{ref}}$, which may be negative;
+  completion indicator;
+  current machine index, normalized, or $-1$ if not started;
+  in-transit indicator and the index of the carrying vehicle;
+  job weight divided by the largest weight. \\
+Vehicle ($V$ tokens) & 11 &
+  One-hot over idle, empty-travelling, loaded, and failed;
+  current node coordinates divided by the bounding-box diagonal;
+  assigned tasks divided by the instance maximum;
+  battery fraction;
+  load divided by capacity;
+  speed multiplier divided by the largest multiplier;
+  time spent waiting for an aisle segment divided by the wait limit. \\
+Global (1 token) & 3 &
+  Elapsed time divided by $M_{\mathrm{ref}}$;
+  completed jobs divided by $n$;
+  tasks in transit divided by the instance maximum. \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item The setup time of a job change is deliberately absent from the machine
+      token. Setup is a property of a machine--job pair, not of either entity
+      alone, so it is supplied to the machine-selection head as a candidate
+      feature instead. A per-entity feature cannot express it.
+\end{tablenotes}
+\end{threeparttable}
+\end{table*}
+
+\subsection{Policy architecture}
+\label{sec:method:policy}
+
+The encoder is a standard Transformer~\citep{vaswani2017}. Tokens are
+projected, given a type embedding, and passed through $L$ self-attention layers
+with no mask, so every token can attend to every other token. We use $L = 8$
+layers and model dimension $d = 128$ throughout.
+
+Attention is unmasked rather than restricted to within-segment or
+within-axis blocks. Segment identity is information about what a token is;
+an attention mask is a restriction on what a token may see. The two are not
+interchangeable, and dropping a restriction does not drop the information.
+
+Each decision kind has its own head. A head scores \emph{candidates} rather
+than a fixed action set, in the manner of pointer
+networks~\citep{vinyals2015pointer}:
+\begin{equation}
+\ell = f_k\!\left(\mathbf{h}_{\text{token}}, \mathbf{g}_{\text{decision}},
+   \mathbf{c}_{1:C}\right) \in \mathbb{R}^{C},
+\label{eq:candidate}
+\end{equation}
+where $\mathbf{h}_{\text{token}}$ is the encoder output for the token that
+owns the decision, $\mathbf{g}_{\text{decision}}$ collects decision-level
+features, and $\mathbf{c}_{1:C}$ are per-candidate features. The number of
+candidates $C$ varies with the state and with the instance, so the same
+parameters serve a 10-job and a 20-job instance without resizing. Every head
+reads the same token embeddings; no head receives a hand-built flat vector.
+
+This matters because the candidate count is not a design constant. Eligible
+machines per operation, available vehicles per task, viable paths per travel,
+and admissible batch sizes all vary from decision to decision. Attention over
+a set of elements is permutation-invariant by construction~\citep{lee2019set},
+which is the property the head relies on: the score of a candidate must not
+depend on where in the candidate list it happens to sit.
+
+\subsection{Group-relative training over chains}
+\label{sec:method:training}
+
+For each training step the policy samples $G$ chains from the same state. Each
+chain $g$ yields a terminal reward $r_g$. The advantage is the group-relative
+score of Shao et al.~\citep{shao2024grpo},
+\begin{equation}
+A_g = \frac{r_g - \operatorname{mean}(r_{1:G})}
+           {\operatorname{std}(r_{1:G}) + \epsilon},
+\label{eq:advantage}
+\end{equation}
+and the objective is the REINFORCE objective with this advantage,
+\begin{equation}
+\mathcal{L} = -\frac{1}{G} \sum_{g=1}^{G} A_g \,
+   \logp(\text{chain}_g),
+\label{eq:loss}
+\end{equation}
+with $\logp$ from Equation~\eqref{eq:chain-logp}. No critic is used. The
+optimizer is Adam. A single group is used per step ($J = 1$); the sampling
+budget is spent on $G$ rather than on repeated seeds, because the group mean
+already supplies the baseline and averaging over seeds would reduce noise
+inside a quantity that is about to be compared within the group. The group is
+also where diversity comes from: all $G$ chains start from the same state and
+differ only in the sampling, the same device that multi-start policy
+optimization uses to find several good solutions to one
+instance~\citep{kwon2020pomo}.
+
+\begin{algorithm}[t]
+\caption{Joint-chain group-relative policy optimization}
+\label{alg:train}
+\begin{algorithmic}[1]
+\Require instance, initial policy $\pi_\theta$, group size $G$, steps $T$
+\Statex \textbf{reference} run the reference schedule once, cache
+       $f^{\mathrm{ref}}$, $w$, $M_{\mathrm{ref}}$
+\For{step $= 1$ \textbf{to} $T$}
+  \For{$g = 1$ \textbf{to} $G$}
+    \State sample a chain $\tau_g$: run the simulation under $\pi_\theta$
+    \Statex \hspace{\algorithmicindent} and record every S, L, R, M, C, B decision
+    \State $r_g \gets w_1(-\Cmax^{(g)}) + w_2(-E_g) + w_3(-\TWT_g)$
+  \EndFor
+  \State $\bar{r} \gets \frac{1}{G}\sum_{g} r_g$; \quad
+         $\sigma \gets \sqrt{\frac{1}{G}\sum_{g} (r_g - \bar{r})^2}$
+  \State $A_g \gets (r_g - \bar{r}) \,/\, (\sigma + \epsilon)$
+         \Comment{advantage, Eq.~\eqref{eq:advantage}}
+  \State $\mathcal{L} \gets -\frac{1}{G}\sum_{g} A_g \logp(\tau_g)$
+  \State $\theta \gets \mathrm{Adam}\!\left(\theta, \nabla_\theta \mathcal{L}\right)$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Training details}
+The reference run is executed once per instance and configuration, and the
+weights of Equation~\eqref{eq:weights} are derived from it before training
+starts; the same run supplies the normalizing constant $M_{\mathrm{ref}}$ used
+in the token features, so features and reward share one reference point.
+Training uses $G = 8$ chains per step, $T = 300$ steps, Adam with a learning
+rate of $3\times10^{-4}$, and a single pass over each group
+($\mathrm{epochs} = 1$, so the default path is REINFORCE with a group-relative
+advantage). Action sampling uses a seeded generator derived from the chain
+index, which makes a run reproducible within one process but not across
+processes. Evaluation uses argmax action selection over five perturbation
+seeds, none of which is seen during training.
+
+Equation~\eqref{eq:advantage} divides by the group standard deviation.
+Section~\ref{sec:results} reports an ablation over this choice: a variant that
+subtracts the group mean without dividing by the standard deviation, and a
+variant that uses the raw reward. The three variants differ only in the
+advantage; every switch and hyperparameter is otherwise identical. The same
+comparison has been made for neural combinatorial optimization, where the
+group-relative construction is used without a critic as
+well~\citep{sepulveda2026baselinefree}, and the constrained variant of the same
+family is what our budget mechanism
+extends~\citep{hu2023constrained,achiam2017cpo,tessler2019rcpo}.
+
+\paragraph{Reward}
+The reward is a weighted scalarization of the three objectives,
+\begin{equation}
+r = w_1 (-\Cmax) + w_2 (-E) + w_3 (-\TWT),
+\label{eq:reward}
+\end{equation}
+with weights derived from a reference schedule rather than chosen by hand:
+\begin{equation}
+w_i = \frac{1/f_i^{\mathrm{ref}}}{\sum_j 1/f_j^{\mathrm{ref}}},
+\label{eq:weights}
+\end{equation}
+where $f_i^{\mathrm{ref}}$ is the measured value of objective $i$ under the
+reference schedule. The reference schedule assigns every operation to its
+fastest eligible machine and dispatches vehicles round-robin. The weights are
+normalized so that improving each objective by one unit relative to the
+reference contributes equally. We report the weight vector together with the
+reference schedule, because the tardiness component of $f^{\mathrm{ref}}$
+depends on the due-date calibration and the reward is not reproducible without
+it.
+
+Combining the objectives at the reward level keeps one scalar return per
+episode, which is what the advantage estimator operates on; combining them at
+the gradient level~\citep{sener2018mgda,yu2020pcgrad} would instead require
+per-objective advantages and a rule for reconciling them.
+
+The reward is terminal and undiscounted, and no shaping term is
+added~\citep{ng1999shaping}. This is a deliberate simplification: a shaping
+term would require a potential function over a state space in which the useful
+potential is not obvious, and it would change what the episode-level comparison
+inside a group means.
+
+\subsection{Constraint mechanisms}
+\label{sec:method:mechanisms}
+
+Ten constraints are modelled. Making them switchable is not enough to make them
+learnable; the policy must also be able to act on them. We group the mechanisms
+by what they change.
+
+\begin{itemize}
+\item \textbf{Decision points.} The mechanism adds a new kind of decision that
+      was previously made by a fixed rule, and the policy chooses it. The
+      candidate-scoring interface of Equation~\eqref{eq:candidate} is what makes
+      this a local change: a new head is added, the chain grows, and nothing
+      else moves.
+\item \textbf{Dynamics.} The mechanism changes how the shop evolves --- a
+      breakdown, a returned task, a blocked buffer. The policy does not gain an
+      action; it faces a different system.
+\item \textbf{Input.} The mechanism adds features to the representation. No
+      action and no trajectory changes.
+\end{itemize}
+
+The mechanisms are listed below. Every switch defaults to off,
+and turning it off reproduces the pre-mechanism behaviour bit for bit; that
+property is verified rather than asserted (Section~\ref{sec:setup:repro}).
+
+\begin{description}\itemsep2pt
+\item \textbf{Route choice (C1, decision point, \texttt{route\_k}).}
+      At each travel the policy selects one of the $k$ shortest paths between
+      the endpoints. Candidates carry path length, the number of aisle segments
+      traversed, and the current contention on those segments.
+\item \textbf{Zone tokens (C1, input, \texttt{route\_zones}).}
+      Aisle segments become tokens, and the route head reads the segments its
+      candidate traverses. Without this, the candidates of a travel differ only
+      in their own summary features.
+\item \textbf{Geometric bias (C1, input, \texttt{geom\_bias}).}
+      A fixed, non-learned bias $-w\,d(i,j)/\text{diag}$ is added to the
+      attention score, where $d$ is the shortest-path distance on the aisle
+      graph. Nothing is learned here; the term only makes distance and
+      congestion visible to attention.
+\item \textbf{Maintenance head (C10, decision point, \texttt{pm\_head}).}
+      When a machine is idle the policy chooses between starting maintenance
+      now and deferring it. The forced-maintenance threshold remains a hard
+      floor, so the policy can advance maintenance but not postpone it.
+\item \textbf{Charging head (C9, decision point, \texttt{charge\_head}).}
+      When a vehicle is idle the policy chooses between not charging and each
+      charging station. A vehicle whose battery reaches zero becomes
+      unavailable until it recovers.
+\item \textbf{Multi-drop travel (C8, dynamics, \texttt{multi\_drop}).}
+      One trip collects every queued task at a pick-up point and delivers to
+      several drop points, bounded by capacity. Loaded travel becomes a
+      sequence of segments rather than one.
+\item \textbf{Batch head (C8, decision point, \texttt{batch\_head}).}
+      At pick-up the policy chooses how many further tasks to append to the
+      trip. Candidates carry batch size, the number of tasks whose relative
+      order the batch would disturb, and the resulting travel saving.
+\item \textbf{Failure failover (C7, dynamics, \texttt{agv\_failover}).}
+      Tasks held by a failed vehicle are returned and offered to vehicles that
+      are still running.
+\item \textbf{Age-dependent failure (C3, dynamics, \texttt{machine\_age\_failure}).}
+      The failure rate rises with the machine maintenance clock along a Weibull
+      hazard, so the failure process acquires memory and maintenance acquires a
+      second effect.
+\end{description}
+
+Four constraints need no dedicated mechanism. C2, C4, and C6 are already
+visible in the token features of Table~\ref{tab:features}, and C5 is supplied
+to the machine head as a candidate feature. Section~\ref{sec:results} reports
+which of the mechanisms changed a measured quantity and which did not.
+
+\paragraph{Why some ablation arms change more than one switch.}
+A decision point that is enabled while the constraint it acts on is disabled
+produces a dead action: the head samples a choice that cannot change anything,
+and the chain log-probability still includes it. The advantage would then be
+assigned partly to a decision with no effect, which contaminates the comparison
+rather than merely wasting computation. Such combinations are therefore
+rejected rather than permitted, and the consequence for the ablations is that
+several arms necessarily change more than the one item they are named for. The
+logistics arm, for instance, also disables the route head, the zone tokens, the
+charging head, and the batch head, because each of those acts on a constraint
+the arm has switched off. The released configuration files record the exact
+switch set of every run, and Table~\ref{tab:ablation} marks the affected arms
+so that the reader is not left to infer the switch set from the arm name.
+
+\paragraph{Two mechanisms change the simulated system, not only the policy.}
+Making vehicle capacity operational required changing the travel model: one
+trip now collects every queued task at a pick-up point and delivers to several
+drop points, so loaded travel is a sequence of segments rather than one. This
+is a change to the shop dynamics and it is reported as such, because it means
+the readings on either side of it are not comparable. The same is true of the
+charging mechanism, which required that a vehicle at zero battery actually
+become unavailable before there was a decision worth making. Both changes were
+made because a parameter the model carried --- load capacity, battery state ---
+had no effect on the simulation. The list below marks each
+mechanism as a decision point, a dynamics change, or an input change for
+exactly this reason.
+
+\subsection{Lagrangian constraint budgets}
+\label{sec:method:t3}
+
+A constraint that is modelled but never violated contributes nothing to the
+reward, so the policy has no reason to avoid violating it when the trade-off
+turns favourable. We add a Lagrangian term with a per-constraint multiplier.
+The construction follows the constrained policy optimization
+lineage~\citep{achiam2017cpo,tessler2019rcpo}, with one difference that matters
+here: those methods estimate the constraint cost with a value function, and we
+do not use a critic. The multiplier is updated from the batch itself, which is
+what makes the scheme compatible with a group-relative advantage.
+
+Let $a_i$ be the activation of constraint $i$ over an episode, measured so
+that it counts only what the policy was forced into: time spent waiting for an
+aisle segment, minutes blocked by a full buffer, setup minutes, failures,
+battery-depletion events, and maintenance triggered by the threshold. Let
+$a_i^{\mathrm{ref}}$ be the same quantity under the reference schedule, so that
+$\hat a_i = a_i / a_i^{\mathrm{ref}}$ is the activation as a fraction of the
+reference level. With a budget $b_i$, the penalized reward of chain $g$ is
+\begin{equation}
+r'_g = r_g - \sum_i \lambda_i \hat a_{i,g},
+\label{eq:lagrangian}
+\end{equation}
+and the advantage is computed from $r'$ as in Equation~\eqref{eq:advantage}.
+The multipliers follow dual ascent,
+\begin{equation}
+\lambda_i \leftarrow \operatorname{clip}\!\left(
+   \lambda_i + \eta \left(\hat a_i - b_i\right), \, 0, \, \lambda_{\max}\right),
+\label{eq:dual}
+\end{equation}
+where $\hat a_i$ is the mean over the group, $\eta$ is a step size, and
+$\lambda_{\max}$ guards against divergence. The multipliers persist across
+training steps; they are not reset per step.
+
+Two properties of this construction need to be stated because they bound what
+it can do. The penalty is applied to the scalar reward \emph{before} the group
+normalization, so the effective strength of $\lambda_i$ is scaled by the group
+standard deviation of the reward and is not a direct statement of how much
+weight the constraint carries. And the penalty enters the advantage only if the
+group can express a difference: with $G = 2$ the normalized advantage is
+identically $(-1,+1)$ regardless of the reward, so the penalty is inert. The
+budget mechanism therefore requires $G \ge 3$.
+
+Two constraints are excluded from the budget. Rework and vehicle failure are
+memoryless events that the policy cannot influence, so penalizing them would
+add noise to the reward rather than pressure to the policy. For the same
+reason a constraint is admitted only when the policy has the corresponding
+action available; the configuration is rejected at start-up if a constraint in
+the budget has no enabled mechanism to act on it.
+
+\paragraph{Calibration and the meaning of the budget.}
+The reference activation $a_i^{\mathrm{ref}}$ is measured on the reference
+schedule, and the budget $b_i$ is expressed as a fraction of it. The scale of
+$a_i$ differs by three orders of magnitude across constraints --- aisle waiting
+is measured in minutes, maintenance in events --- which is why the ratio form
+is used rather than the raw quantity.
+
+Calibration is done in a configuration in which all six constraints activate,
+because on the standard parameters two of them never do
+(Section~\ref{sec:results:active}) and a ratio with a zero denominator is
+undefined. On the geometric caliber all ten instances yield six live
+constraints. On the matrix caliber only four of the ten instances do, because
+in the remaining six the buffer-blocking quantity is identically zero on the
+reference schedule; those instances are excluded from the table rather than
+entering it with an undefined reference, and a lookup on an absent instance
+raises an error instead of falling back.
+
+\paragraph{What the budget can and cannot reach.}
+The penalty is computed from the activation of constraints in the
+configuration being trained, not from the calibration configuration. If a
+constraint never activates in training, its normalized activation is zero while
+its reference is not, so its multiplier stays at zero and the constraint is not
+penalized. Under the standard parameters this happens for two of the six
+constraints, so the budget in practice acts on four of them. This is stated in
+Section~\ref{sec:results:active} and is reflected in the way the budget arm is
+described there.
+
+\subsection{Computational cost}
+\label{sec:method:cost}
+
+The policy is evaluated once per decision, and a decision costs one forward
+pass over the token sequence plus the construction of its candidate set. The
+network dominates the cost of a step: across the configurations we measured,
+the sampling pass, the recomputation pass, and the backward pass together
+account for between 55 and 88 per cent of a step, and the simulation for the
+remainder. Costs are reported per training step, each step comprising $G = 8$
+sampled episodes and one update.
+
+With the mechanisms switched off, a step costs between 0.85\,s and 6.00\,s
+depending on instance size, and a step over all ten instances of the benchmark
+costs 26.4\,s in total. The cost grows with the number of decisions per episode
+rather than with the number of tokens, since each S and L decision is a
+separate forward pass; the 20-job instances cost roughly five times the 10-job
+instance for that reason.
+
+The optional mechanisms add measured overhead, and one of them reduces cost.
+Enabling the aisle-segment tokens multiplies the cost of a step by about 1.44,
+because they lengthen the token sequence and the route head reads a subset of
+them per candidate. The distance bias adds about 5\%, since the bias is
+precomputed. Multi-drop travel and the batch head together add about 2\% on
+MK01 and 7\% on MK10. Chunking the log-probability recomputation, by contrast,
+reduced both memory and time on the largest instance: without it the peak
+allocation reached 49.6\,GB and the run could not complete on the available
+device, and with a chunk size of 128 the peak fell to 1.3\,GB and the step
+became 1.36 times faster. All figures are single measurements on one machine
+and are reported with their configurations in the released records; they should
+be read as orders of magnitude rather than as benchmarks.

@@ -9,6 +9,21 @@ __pycache__/
 *.pyc
 *.pyo
 
+# ── LaTeX 编译产物（源文件入库，中间产物不入库）──
+# `paper/*.pdf` 只匹配 paper/ 直属层，figures/ 里的矢量图不受影响，必须入库
+paper/*.pdf
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.spl
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+paper/*.bcf
+paper/*.run.xml
+
 # ── 运行日志（可重生成）──
 *_run.log
 *_run*.log

@@ -1,0 +1,368 @@
+\section{Related work}
+\label{sec:related}
+
+\subsection{Integrated scheduling of machines and vehicles}
+\label{sec:related:plcsp}
+
+Treating machine scheduling and vehicle dispatching as one problem has a
+lineage that predates its current name. Ulusoy and
+Bilge~\citep{ulusoy1993} scheduled machines and AGVs simultaneously and
+proposed a genetic algorithm for the combined problem. The recent literature
+has converged on the name production--logistics collaborative scheduling, used
+by Li et al.~\citep{li2025plcsp} and Shi et al.~\citep{shi2025nested} among
+others. The two names describe the same two-layer structure: a flexible job
+shop decides which machine processes each operation, and a vehicle fleet
+decides which vehicle performs each transfer.
+
+The scope of the two layers is consistent across this literature, and so is one
+boundary: reinforcement learning is used to control task allocation, that is
+the assignment of operations to machines and of transfers to vehicles, while
+local collision avoidance at the millisecond scale is delegated to the fleet
+control system. We adopt the same boundary.
+
+The problem also has an exact-optimisation line. Yao et al.~\citep{yao2026cp}
+formulate the integrated problem as a constraint program and report that it
+remains computationally intensive on the harder instances, which is the usual
+motivation for learning-based approaches. The two lines are complementary
+rather than competing.
+
+Within the learning line, the decomposition varies. Hierarchical schemes
+separate a high-level dispatching policy from lower-level execution, either as
+a nested architecture~\citep{shi2025nested} or as an explicit layer
+stack~\citep{wang2025hierarchical}; Wang et al.~\citep{wang2025hierarchical}
+note that this design leans on the quality of the initial heuristic guidance
+and can converge prematurely when that guidance is biased. Flat schemes place
+all decisions in one policy, as Li et al.~\citep{li2025tsmc} do with a
+multi-agent formulation over tasks, machines, and vehicles. Our formulation is
+of the flat kind, and Section~\ref{sec:method:chain} gives the reason.
+
+The set of resources being co-scheduled also varies. Yuan et
+al.~\citep{yuan2026workers} schedule workers alongside AGVs in a distributed
+flexible job shop, so that two heterogeneous transport resources compete for
+the same jobs. We keep the resource set at machines and vehicles, which is the
+boundary the PLCSP literature uses, and treat the wider resource set as out of
+scope.
+
+Whether the two layers are learned together or apart has itself become a
+question. Link et al.~\citep{link2026coordination} compare joint and modular
+training for a job shop with transport resources and find a coordination gap:
+the modular arrangement does not recover what joint training obtains. That is
+the closest published statement of the argument we make in
+Section~\ref{sec:method:chain}, and it is about the training arrangement rather
+than the architecture. Dong et al.~\citep{dong2026handling} reach the same
+coupling from the exact-solution side, scheduling production together with
+material-handling robots and carrying the robot battery state as an explicit
+constraint. Dong et al.~\citep{dong2025heuristic} take the learning route on a
+similar problem, with a heuristic supplying the dispatch decisions the policy
+does not make.
+
+\paragraph{Exact and metaheuristic treatments of the same coupling.}
+A parallel line attacks the same production--logistics coupling with
+hand-designed search rather than with a learned policy, and two of its members
+are close enough to this paper to be worth stating precisely.
+Chen et al.~\citep{chen2025carseq} integrate car sequencing on a mixed-model
+assembly line with multi-trip vehicle routing and synchronized part supply; the
+production sequence determines the due dates of the parts, which in turn
+determine how the vehicles must be scheduled. That is the same asymmetric
+causal chain we describe in Section~\ref{sec:method:chain}, in which production
+creates the transport demand and fixes its deadlines. It is solved there
+by a multi-start adaptive large-neighbourhood search with variable-neighbourhood
+descent. Chen et al.~\citep{chen2026benders} couple order acceptance,
+two-dimensional packing, and parallel machine scheduling, three decision layers
+at once, and solve them by a nested logic-based Benders decomposition. Xu and
+Xie~\citep{xu2025forest} couple scheduling with route planning in an emergency
+setting, where the two layers also cannot be separated.
+
+The methods in this line are problem-specific: an encoding, a decomposition, or
+a set of cuts is designed per problem, and a change to the constraints
+generally requires redesigning them. The same is true of the related machine
+scheduling work in this line, where the algorithm is tailored to a
+problem variant rather than transferred across
+variants~\citep{chen2026upms}. The present work asks the complementary
+question, whether a single learned policy over a state representation can serve
+this class of coupled problems without per-problem algorithm design. We do not
+claim that a learned policy beats these methods on the problems they were built
+for; Section~\ref{sec:related:incomparable} explains why that comparison is not
+available here, and Section~\ref{sec:results} reports where our policy does and
+does not hold up against a metaheuristic on its own configuration.
+
+\subsection{Learning architectures}
+\label{sec:related:arch}
+
+The dominant representation in recent work is a heterogeneous graph.
+Xu et al.~\citep{taagnet2026} encode jobs, machines, and vehicles as three node
+types with graph attention and type-aware pooling. Yang et
+al.~\citep{yang2026hgamppo} combine heterogeneous graph attention with
+multi-policy PPO. Yue et al.~\citep{yue2027hchgnn} build a hub-centric graph
+for vehicle dispatching under finite-buffer constraints. Zhu et
+al.~\citep{zhu2026dfjspht} apply a graph neural network to a distributed
+flexible job shop with heterogeneous transport resources. Wu et
+al.~\citep{wu2026madappo} use a heterogeneous graph attention network with
+multi-head attention inside a two-agent PPO, for machine failures without
+transport. Geng et al.~\citep{geng2025dtdrl} drive a multi-agent PPO from a
+digital twin of the workshop, so the state is refreshed from a simulated copy
+of the plant rather than from the shop itself.
+
+A second line uses simpler sequence models. Li et al.~\citep{li2025plcsp} use a
+multi-agent PPO with fully connected networks of 128-64-64 units and resolve
+the final choice through a hand-written priority vector. Zhang et
+al.~\citep{zhang2025sgformer} replace the graph encoder with a single-layer
+simplified graph transformer to reach larger instances. Gao et
+al.~\citep{gao2026gnntransformer} combine a graph convolutional stack with a
+Transformer over task sequences. Wang et
+al.~\citep{wang2025multitarget} train one policy to serve several scheduling
+targets end to end, rather than one policy per target.
+
+Our encoder is a standard Transformer~\citep{vaswani2017} over a token sequence
+with no attention mask, and the novelty in this paper is not in the attention
+mechanism. It is in what the attention is given to read, which is the token set
+of Section~\ref{sec:method:state} and the transport-network-aware segment of
+it. We note that the encoder choice is not a regression: recent work has moved
+toward simplified representations and away from problem-specific graph
+structure. Xiao et al.~\citep{xiao2026resched} reduce the flexible job shop to a
+handful of state features behind a standard Transformer, and report that the
+simplification does not cost performance; Wang et al.~\citep{wang2025memory} and
+Zhang et al.~\citep{zhang2024improvement} keep a learned model in the loop but
+use it to guide an improvement heuristic rather than to construct a schedule in
+one pass. A plain attention encoder over a well-chosen token set sits within
+that direction rather than against it.
+
+Two further lines bear on how a policy is trained rather than what it reads.
+Self-supervision can replace the reward signal entirely for job shop
+scheduling~\citep{corsini2024selflabeling}, and a policy can be asked to serve
+several preferences at once with self-evolution~\citep{choi2025multipolicy} or
+to adapt per instance~\citep{qing2026instancewise}. Luttmann and
+Xie~\citep{luttmann2026multiagentself} treat a set of simultaneous actions as
+the object to improve, which is the closest formulation to our joint chain that
+we have found outside this problem class. Stochastic processing times enter the
+state through an attention encoder in~\citep{smit2025stochastic}. On the
+application side, Zhu et al.~\citep{zhu2025matrix} couple the shop layout
+itself to the scheduling policy, and Lee et
+al.~\citep{lee2026digitaltwin} drive a dynamic AGV system from a digital twin.
+
+What the representation must carry, however, is a substantive question and not
+a matter of taste. Gao et al.~\citep{gao2026gnntransformer} state that their
+encoder captures the static topology of the road network and therefore cannot
+detect congestion arising from multi-vehicle interaction. Xu et
+al.~\citep{taagnet2026} give vehicle features that contain neither coordinates
+nor distances, so distance enters only through two hand-written dispatch rules.
+Li et al.~\citep{li2025plcsp} use a network with no attention or graph
+structure at all. In each case the constraint is absent from the state space,
+and a policy cannot act on what its representation does not contain. The
+mechanisms in Section~\ref{sec:method} that add aisle-segment tokens and a
+distance bias to the attention score exist for this reason.
+
+\subsection{Constraints and objectives}
+\label{sec:related:constraints}
+
+The constraints modelled in this literature vary, and the variation is
+informative. Shi et al.~\citep{shi2025nested} state that machine breakdowns,
+path conflicts, and AGV charging are ignored. Li et al.~\citep{li2025jms} state
+that AGV failure is not considered and that time consumed by charging and
+collision avoidance is negligible. Tang et
+al.~\citep{tang2025lotstreaming} study static scheduling and do not consider
+path conflict during travel. Wu et al.~\citep{wu2026madappo} state that energy
+consumption is not involved and that workpieces and machines are all ready at
+time zero, so transport does not enter. Zhang et
+al.~\citep{zhang2026amr} treat maintenance of a deteriorating resource as
+future work. Zhu et al.~\citep{zhu2026dfjspht} exclude transport route
+conflicts and power replenishment. Yi et al.~\citep{yi2026petri} train without
+accounting for AGV recharging needs. Li et al.~\citep{li2025plcsp} list AGV
+charging, collision-avoidance-induced transport uncertainty, machine breakdown,
+and worker absence as future work, and note that a DRL algorithm trained on one
+workshop configuration needs retraining when the configuration changes.
+Section~\ref{sec:related:coverage} revisits the same exclusions constraint by
+constraint.
+
+
+
+Charging is the exception to that pattern: papers do model battery state and
+act on it, through a learned charging action~\citep{huang2025collaborative} or
+a closed-form optimal rule~\citep{dong2026handling}, so a
+claim that charging is unaddressed would be false. What is less often reported
+is whether the constraint is ever active under the parameter values used:
+whether a vehicle ever reaches the point where the decision matters.
+Section~\ref{sec:results:active} measures that for our configuration, and finds
+that it does not.
+
+On objectives, the recent literature is predominantly makespan-first, with
+energy entering either as a second objective or as a modelling contribution.
+Yuan et al.~\citep{yuan2025green} build a five-component energy model with
+multiple spindle speeds; Cheng et al.~\citep{cheng2025energy} combine deep
+reinforcement learning with a memetic algorithm for an energy-saving variant.
+Energy as a second objective also appears in the batch-processing line, where
+Zheng et al.~\citep{zheng2025biobjective} solve a bi-objective non-identical
+batch machine problem with makespan and energy exactly, and the batch
+scheduling literature more generally is concerned with how batches are formed
+and formulated~\citep{zheng2025formulations,xu2026autoclave,ding2024molding}. Energy is thus an established
+objective, and the energy parameters we use are taken from Yuan et
+al.~\citep{yuan2025green}. Multi-objective formulations appear in various
+forms: a weighted sum over makespan and logistics
+cost~\citep{shi2025nested}, and a Pareto-based hybrid that places a
+non-dominated sorting step inside a DQN loop~\citep{tang2025lotstreaming}.
+
+What we have not found in this line is a check on whether the reported
+objectives are in fact independent of one another.
+Section~\ref{sec:results:energy} runs that check. Preference conditioning is
+the other current answer to the same problem: Smit et
+al.~\citep{smit2026dcan} train a single policy over a preference vector and
+recover a whole front from it, which is the natural extension of what this
+paper reports for a fixed weight vector.
+
+Maintenance is treated separately. Decisions about when to maintain or replace
+a deteriorating system are studied in the reliability literature, where the
+decision variable is a replacement or ordering policy rather than a scheduling
+action~\citep{dong2024orderreplacement,dong2025sparepart}. Our maintenance
+mechanism is of the scheduling kind (the policy chooses when to take an idle
+machine out of service, within a forced threshold), and we are not aware of a
+scheduling formulation of that decision in this problem class.
+
+\subsection{How the ten constraints have been handled}
+\label{sec:related:coverage}
+
+Constraint coverage is set out below. The separation that matters is between a
+constraint prior work does not handle and one it handles differently: not
+having done something is weak evidence, whereas a treatment that differs in a
+way that changes what the policy can do is a claim of substance.
+
+\begin{description}\itemsep3pt
+\item \textbf{C1 --- congestion.} \emph{Prior work.} Eleven works in this line exclude
+      congestion or list it as future work. Three of them name the cause: the
+      encoder carries only static topology, so ``the model cannot detect or
+      avoid congestion that emerges in real time from multi-AGV
+      interactions''~\citep{gao2026gnntransformer}; the vehicle features contain
+      neither coordinates nor distances~\citep{taagnet2026}, and distance enters
+      only through hand-written dispatch rules; and one policy network has no
+      attention or graph structure at all~\citep{li2025plcsp}. Four works do
+      choose a route, but leave congestion awareness to the simulator or to a
+      rule. \emph{This paper.} The transport network enters the state: the aisle
+      segments become tokens, a distance bias enters the attention score, and
+      the route head reads the segments its candidate traverses
+      (Section~\ref{sec:method:state}). \emph{Relation.} Not handled, with the
+      cause stated by the authors. This is the strongest form of the claim
+      available here, because it is a statement about the representation rather
+      than about effort.
+\item \textbf{C2 --- finite buffers.} \emph{Prior work.} Finite output buffers with a
+      deadlock-aware priority mask that blocks all dispatching while any buffer
+      holds a finished part~\citep{yue2027hchgnn}; others assume infinite
+      capacity~\citep{taagnet2026,li2025plcsp}. \emph{This paper.} Buffer
+      occupancy is a machine-token feature, and the constraint is otherwise left
+      to the budget mechanism. \emph{Relation.} Handled differently: a
+      hand-written mask versus a learned policy over the same state.
+\item \textbf{C3 --- machine failure.} \emph{Prior work.} Memoryless failure at a fixed
+      rate, and in several studies a single fixed failure scenario rather than
+      a sampled process~\citep{wu2026madappo,geng2025dtdrl}. \emph{This paper.}
+      The failure rate rises with the maintenance clock along a Weibull hazard.
+      \emph{Relation.} Age dependence is not handled elsewhere. The rate law and
+      its shape parameter are assumed, not calibrated to plant data.
+\item \textbf{C4 --- rework.} \emph{Prior work.} A reworked operation returns to the task
+      pool and is reassigned to a machine and a vehicle~\citep{li2025tsmc}.
+      \emph{This paper.} Rework is performed in place on the same machine, as
+      the simulation defines it, so no decision point is introduced.
+      \emph{Relation.} Handled differently, by a modelling choice rather than by
+      a mechanism.
+\item \textbf{C5 --- setup.} \emph{Prior work.} Sequence-dependent setup as a
+      machine--job edge attribute in the graph, with a shortest-setup-time
+      baseline~\citep{yue2027hchgnn}; explicit setup tables in the general
+      job-shop setting. Others assume immediate setup~\citep{taagnet2026}.
+      \emph{This paper.} The setup time of a job change is a property of the
+      pair rather than of either entity, so it is supplied to the machine head
+      as a candidate feature. \emph{Relation.} Handled differently. Setup is the
+      largest lever in our ablation (Table~\ref{tab:ablation}), so the treatment
+      is consequential.
+\item \textbf{C6 --- due dates.} \emph{Prior work.} Work-content due dates of the TWK
+      family, with a per-job factor and an arrival term~\citep{taagnet2026,li2025plcsp};
+      one work treats tardiness as a constraint rather than an
+      objective~\citep{li2025plcsp}. \emph{This paper.} Due dates are exogenous,
+      per job, and anchored on a load lower bound, so they do not move when the
+      fleet configuration changes (Table~\ref{tab:duedates}). \emph{Relation.}
+      Handled differently; exogeneity with respect to the fleet is the point of
+      the design.
+\item \textbf{C7 --- vehicle failure.} \emph{Prior work.} A failed vehicle releases its
+      current task to the task pool and returns after
+      repair~\citep{li2025plcsp}; three failure scenarios distinguished by when
+      the failure occurs~\citep{shi2025nested}. \emph{This paper.} Tasks held by
+      a failed vehicle are handed to vehicles that are still running, at
+      checkpoints where the vehicle holds no aisle lock. \emph{Relation.}
+      Handled differently: hand-over rather than return to a shared pool, with
+      the target chosen by a rule rather than by the policy.
+\item \textbf{C8 --- fleet and batching.} \emph{Prior work.} Vehicle capacity appears as
+      a model parameter in five works, and none of them lets the policy decide
+      how many tasks a trip should combine. Batching is a decision elsewhere,
+      but a different one: in warehouse order batching the decision is which
+      orders to pick together, coupled to the picker route rather than to a
+      vehicle fleet~\citep{wang2025gphh}. We therefore do not claim that
+      batching as a decision is new, only that transport batching inside a job
+      shop is not where that decision has been studied. \emph{This paper.}
+      Capacity is operational: one trip collects every queued task at a
+      pick-up point and delivers to several drop points, and a separate head
+      decides how many further tasks to append. \emph{Relation.} Handled
+      differently, and the room the benchmark leaves for it is small
+      (Table~\ref{tab:batching}).
+\item \textbf{C9 --- charging.} \emph{Prior work.} Charging as a learned action over
+      no-charge, opportunity-charge, and full-charge, with charger selection, on
+      the same benchmark families~\citep{huang2025collaborative}; a closed-form
+      optimal charging rule for a single-station variant~\citep{dong2026handling}.
+      \emph{This paper.} A head chooses between not charging and each station
+      when a vehicle is idle, and a vehicle at zero battery becomes unavailable
+      until it recovers. \emph{Relation.} Handled differently, and not
+      evaluated here: the constraint does not activate under the reported
+      parameters (Table~\ref{tab:active}), so no claim is made about it.
+\item \textbf{C10 --- maintenance.} \emph{Prior work.} No work in this line makes
+      maintenance a decision. Four works list it as future work, and one models
+      equipment deterioration while leaving the maintenance action
+      open~\citep{zhang2026amr}. \emph{This paper.} A head chooses between
+      starting maintenance on an idle machine now and deferring it, with the
+      forced threshold as a hard floor. \emph{Relation.} Not handled elsewhere,
+      but the constraint does not activate on the instance used for the policy
+      results either, so the mechanism carries no measured effect here.
+\end{description}
+
+Two readings of this list are worth separating. The coverage claim itself: two
+constraints are handled here as policy decisions that no surveyed work handles
+that way, batch size and maintenance, and for congestion prior work not
+only omits the constraint but states why its representation cannot carry it.
+That last case is the substantive one, because it identifies a cause rather
+than an omission.
+
+The second reading is less comfortable. A constraint that no one has handled is
+not automatically a contribution, and a constraint handled differently is a
+difference rather than a novelty unless the difference changes what the policy
+can do. For C2, C4, C5, C6, and C7 our treatment differs in where the
+information enters, whether a candidate feature, a token, or a mask equivalent, and
+these are differences of degree. For C8 and C10 the difference is categorical,
+but the mechanisms carry no measured effect on the instance used here, so the
+coverage is a statement about the model rather than about a demonstrated
+result. What the list supports is that the model carries these constraints and
+that the policy can act on them, not that each action improves the outcome.
+
+\subsection{Where the field is moving}
+\label{sec:related:landscape}
+
+Four directions are visible in the most recent work on this problem, and our
+design choices sit differently against each of them.
+
+The heterogeneous graph with an attention encoder and a multi-policy PPO
+backbone has become the default: it is the shared structure of the works by
+Xu et al.~\citep{taagnet2026}, Yang et al.~\citep{yang2026hgamppo}, and Yue et
+al.~\citep{yue2027hchgnn}. We depart from it in the encoder, for the
+representation reasons given in Section~\ref{sec:related:arch}, and we keep the
+single-policy structure for the advantage reasons given in
+Section~\ref{sec:method:chain}.
+
+Constraint realism is increasing. Finite buffers and deadlock, charging,
+multi-trip load limits, deteriorating equipment, and worker availability now
+appear individually in various papers~\citep{yue2027hchgnn,zhang2026amr,yuan2026workers}.
+What is less common is a paper that carries many of them at once and reports
+which of them are active. That is the gap this paper addresses, and
+Section~\ref{sec:results:active} is the measurement.
+
+Finally, the evaluation standard is rising. Recent work reports multiple
+instance scales and, increasingly, real production data. Three current
+benchmarks make the point: ATLAS draws on production traces from a large
+manufacturing operator~\citep{jiang2026atlas}, DynaSchedBench calibrates
+dynamic instances by difficulty and reports what it calls an observability
+paradox in learned schedulers~\citep{cao2026dynaschedbench}, and FrontierCO
+evaluates solvers at a scale that rules of thumb do not
+reach~\citep{feng2026frontierco}. Our evaluation is the weakest part of this
+paper by that standard, and Section~\ref{sec:discussion} takes it up.

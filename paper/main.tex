@@ -1,0 +1,92 @@
+% =====================================================================
+%  PLCSP-DRL — 初稿
+%  模板：Elsevier 标准双栏（elsarticle, 5p = two-column, 数字制引用）
+%  编译：pdflatex -> bibtex -> pdflatex -> pdflatex
+% =====================================================================
+\documentclass[final,5p,times,twocolumn,number]{elsarticle}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{threeparttable}
+\usepackage{siunitx}
+% hyperref：bbl 用 \href{...}{\path{doi:...}} 排 DOI，而 \path 由 hyperref 提供。
+% 缺它时 bbl 会把 \path 退化成恒等宏，DOI 里的 "_" 就会触发数学模式报错。
+\usepackage[hidelinks]{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}
+
+% ---- 图路径 ----
+\graphicspath{{figures/}}
+
+% ---- 浮动体（8 图 + 12 表 + 1 算法框）----
+% ⚠️ 这里**不能放松**：`topfraction` 调到 0.9 以上会让 LaTeX 把浮动体
+% 全推到章末连堆四页，正文与图表脱节。用接近默认的保守值，逼它插进正文。
+\usepackage{placeins}          % 提供 \FloatBarrier
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+\renewcommand{\topfraction}{0.80}
+\renewcommand{\bottomfraction}{0.60}
+\renewcommand{\textfraction}{0.15}
+\renewcommand{\floatpagefraction}{0.75}
+
+% ---- 常用宏（只做缩写，不引入新概念；一律 \ensuremath 以便文本/数学两态通用）----
+\newcommand{\Cmax}{\ensuremath{C_{\max}}}
+\newcommand{\wj}{\ensuremath{w_j}}
+\newcommand{\TWT}{\ensuremath{\mathrm{TWT}}}
+\newcommand{\kWh}{\ensuremath{\mathrm{kWh}}}
+\newcommand{\logp}{\ensuremath{\log \pi}}
+
+\journal{Journal of Manufacturing Systems}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Joint-chain group-relative reinforcement learning for
+production--logistics collaborative scheduling}
+
+\author[a]{Yuan Wang}
+\author[a]{Naiming Xie\corref{cor1}}
+\author[b]{Mingshan Li}
+
+% TODO(投稿前): 通讯作者邮箱待填——本文件不代填。
+\cortext[cor1]{Corresponding author.}
+
+\address[a]{College of Economics and Management, Nanjing University of
+Aeronautics and Astronautics, 29 Jiangjun Avenue, Nanjing, 211106, China}
+\address[b]{Guangdong University of Petrochemical Technology, 139 Guanduer Rd,
+Maoming, 525011, China}
+
+\begin{abstract}
+\input{sections/00-abstract}
+\end{abstract}
+
+\begin{keyword}
+production--logistics collaborative scheduling \sep
+flexible job shop scheduling \sep
+automated guided vehicles \sep
+reinforcement learning \sep
+group-relative policy optimization \sep
+multi-objective optimization
+\end{keyword}
+
+\end{frontmatter}
+
+\input{sections/01-introduction}
+\input{sections/02-related-work}
+\input{sections/03-problem-formulation}
+\input{sections/04-method}
+\input{sections/05-experiments}
+\input{sections/06-conclusion}
+
+% 清空所有未决浮动体——否则 table*/figure* 会漂到参考文献之后。
+\clearpage
+
+\bibliographystyle{elsarticle-num}
+\bibliography{refs}
+
+\end{document}
