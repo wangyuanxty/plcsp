@@ -125,3 +125,80 @@ def test_rollout_energy_matches_cited_anchor_ratio(name):
     states = bd["agv_states_min"]
     assert sum(states.values()) == pytest.approx(r["makespan"] * SimConfig().n_agv, rel=1e-9), \
         "AGV 三态时长之和不等于 makespan×车数——空闲态残差算错了"
+
+
+# ── 分项导出（2026-10-06）：动机 = `energy/makespan` 近乎恒定（progress-log §52.9.3）──
+
+@pytest.mark.unit
+def test_machine_breakdown_sums_to_total_bit_exact():
+    """三态分项之和必须**逐位**等于 `machine_energy_kwh`（防"加了分项、总量漂了"）。"""
+    from plcsp.energy import machine_energy_breakdown_kwh
+
+    p = {"idle_kw": 0.74, "proc_kw": 0.951, "setup_kw": 0.74}     # GFJSPT-MMRS M1–M4 低速档
+    args = (12.5, 30.25, 3.75)
+    bd = machine_energy_breakdown_kwh(*args, **p)
+    assert set(bd) == {"proc", "idle", "setup"}
+    assert bd["proc"] + bd["idle"] + bd["setup"] == machine_energy_kwh(*args, **p)
+
+
+@pytest.mark.unit
+def test_agv_breakdown_sums_to_total_bit_exact():
+    """AGV 三态分项之和必须**逐位**等于 `agv_energy_kwh`。"""
+    from plcsp.energy import agv_energy_breakdown_kwh
+
+    bd = agv_energy_breakdown_kwh(11.0, 22.0, 33.0)
+    assert set(bd) == {"idle", "empty", "loaded"}
+    assert bd["idle"] + bd["empty"] + bd["loaded"] == agv_energy_kwh(11.0, 22.0, 33.0)
+
+
+@pytest.mark.unit
+def test_metrics_energy_bit_identical_after_breakdown_export():
+    """🔴 硬约束：分项导出**不得**动 `met["energy"]`（它是奖励的一项，动一位则读数全废）。
+
+    黄金值 = 本次导出**之前**（2026-10-06）用同一命令在本机捕获：
+    `rollout(mk01, seed_chain=1, cfg=SimConfig())["energy"]`。判据用 `==`（**不是**
+    `approx`）：approx 会放过 1e-12 级漂移，而本约束要的正是"一位都没动"。
+    """
+    from plcsp.env.des import SimConfig, rollout
+    from plcsp.env.instances import load_mk
+
+    r = rollout(load_mk("mk01"), seed_chain=1, cfg=SimConfig())
+    assert r["energy"] == 8.22896039621886          # ← 改前捕获（逐位）
+    bd = r["energy_breakdown"]
+    assert r["energy"] == bd["total_kwh"]           # 同一次计算，逐位
+    # 新键齐 + 非负
+    ms, ag = bd["machine_states_kwh"], bd["agv_states_kwh"]
+    assert set(ms) == {"proc", "idle", "setup"} and set(ag) == {"idle", "empty", "loaded"}
+    assert all(v >= 0.0 for v in (*ms.values(), *ag.values()))
+    # 分项闭合（跨机台是另一累加序，浮点上用 rel=1e-12 的近似）
+    assert sum(ms.values()) == pytest.approx(bd["machine_kwh"], rel=1e-12)
+    assert sum(ag.values()) == pytest.approx(bd["agv_kwh"], rel=1e-12)
+    # 车间固定项 = P0 × makespan（口径自明，防将来并项）
+    assert bd["shop_kwh"] == pytest.approx(SHOP_FIXED_KW * r["makespan"] / 60.0, rel=1e-12)
+    # 逐机台分钟（U 的原料）：三态闭合到 makespan（`idle` 是 `max(0, makespan−proc−setup)`）
+    mins = bd["machine_states_min"]
+    n_m = len(bd["machine_kwh_per_machine"])
+    assert len(mins["proc"]) == len(mins["idle"]) == len(mins["setup"]) == n_m
+    for p, i, s in zip(mins["proc"], mins["idle"], mins["setup"]):
+        assert p + i + s == pytest.approx(r["makespan"], rel=1e-12)
+
+
+@pytest.mark.unit
+def test_gated_path_exports_same_breakdown_keys():
+    """`run_gated` 与 `run` 共用 `_energy_report` ⟹ 两条返回路径的新键都在、都闭合。"""
+    from plcsp.env.corridors import build_corridor_graph, dock_distance_matrix
+    from plcsp.env.des import SimConfig, SimWorld
+    from plcsp.env.instances import load_mk
+    from plcsp.env.layout import sample_layout
+
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
+    g = build_corridor_graph(lay)
+    dm = dock_distance_matrix(g)
+    met = SimWorld(inst, lay, dm, cfg, graph=g).run_gated(seed_chain=1)
+    assert not met["horizon_hit"], "掐表 —— 本用例的能耗读数无意义"
+    bd = met["energy_breakdown"]
+    assert met["energy"] == bd["total_kwh"]
+    assert sum(bd["machine_states_kwh"].values()) == pytest.approx(bd["machine_kwh"], rel=1e-12)
+    assert sum(bd["agv_states_kwh"].values()) == pytest.approx(bd["agv_kwh"], rel=1e-12)

@@ -21,8 +21,10 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 import numpy as np
 import simpy
-from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, agv_energy_kwh,
-                      machine_energy_kwh, machine_params_for, total_energy_kwh)
+from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
+                      agv_energy_breakdown_kwh, agv_energy_kwh,
+                      machine_energy_breakdown_kwh, machine_energy_kwh,
+                      machine_params_for, total_energy_kwh)
 from .corridors import k_shortest_paths, shortest_node_path
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
@@ -1465,15 +1467,28 @@ class SimWorld:
           待命、等待取货、缓冲区满让步、区段争用等待一并归入空闲态（车辆静止即待机功率）。
 
         `horizon_hit` 时 makespan 可能小于某台机的加工结束时刻，故 `idle` 取 `max(0, ·)` 兜底。
+
+        **分项导出（2026-10-06，只加键）**：`machine_states_kwh` / `agv_states_kwh` 给出三态各自
+        的 [kWh]。动机是 `energy / makespan` 近乎恒定（`progress-log.md` §52.9.3 的前沿退化），
+        需要知道**哪一项**随 makespan 走。上面所有旧键的表达式一字未动 ⟹ `total_kwh`（=奖励里的
+        `energy`）**逐位不变**，有 `tests/test_energy.py` 的黄金值测试钉死。
         """
         proc, setup = stats["proc_min"], stats["setup_min"]
         per_machine = []
+        machine_states_kwh = {"proc": 0.0, "idle": 0.0, "setup": 0.0}
+        idle_by_machine = []
         for m in range(len(proc)):
             p = machine_params_for(m, len(proc))
             idle = max(0.0, makespan - proc[m] - setup[m])
+            idle_by_machine.append(idle)
             per_machine.append(machine_energy_kwh(proc[m], idle, setup[m],
                                                   idle_kw=p["idle_kw"], proc_kw=p["proc_kw"],
                                                   setup_kw=p["setup_kw"]))
+            by_state = machine_energy_breakdown_kwh(proc[m], idle, setup[m],
+                                                    idle_kw=p["idle_kw"], proc_kw=p["proc_kw"],
+                                                    setup_kw=p["setup_kw"])
+            for state, kwh in by_state.items():
+                machine_states_kwh[state] += kwh
         machine_kwh = float(sum(per_machine))
         agv_idle = max(0.0, makespan * self.cfg.n_agv
                        - stats["agv_empty_min"] - stats["agv_loaded_min"])
@@ -1483,7 +1498,13 @@ class SimWorld:
                 "total_kwh": total_energy_kwh(machine_kwh, agv_kwh, makespan),
                 "machine_kwh_per_machine": per_machine,
                 "agv_states_min": {"idle": agv_idle, "empty": stats["agv_empty_min"],
-                                   "loaded": stats["agv_loaded_min"]}}
+                                   "loaded": stats["agv_loaded_min"]},
+                # ── 分项（新键；旧键一字未动）──
+                "machine_states_kwh": machine_states_kwh,
+                "machine_states_min": {"proc": list(proc), "idle": idle_by_machine,
+                                       "setup": list(setup)},
+                "agv_states_kwh": agv_energy_breakdown_kwh(
+                    agv_idle, stats["agv_empty_min"], stats["agv_loaded_min"])}
 
     def snapshot(self) -> "Snapshot":
         """当时的活状态 → 纯数据快照（**只读**，不改变任何仿真状态）。

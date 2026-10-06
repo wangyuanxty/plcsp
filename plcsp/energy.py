@@ -80,6 +80,30 @@ def agv_energy_kwh(idle_min: float, empty_min: float, loaded_min: float) -> floa
             + _kwh(AGV_LOADED_KW, loaded_min))
 
 
+# ── 分项导出（2026-10-06）──
+# 动机：实测 `energy / makespan` 几乎恒定（progress-log §52.9.3 的 Pareto 前沿退化成两点）。
+# 要判断"哪一项随 makespan 走"，就得把三态各自的值拿出来。**只加函数，不改上面两条既有公式。**
+
+def machine_energy_breakdown_kwh(proc_min: float, idle_min: float, setup_min: float,
+                                 *, idle_kw: float, proc_kw: float, setup_kw: float) -> dict[str, float]:
+    """机床三态的**分项** [kWh]，键 = `proc` / `idle` / `setup`。
+
+    与 `machine_energy_kwh` **同一批浮点、同一累加序**（proc → idle → setup）：
+    `proc + idle + setup` 逐位等于该函数的返回值（防"分项加了、总量漂了"）。
+    """
+    return {"proc": _kwh(proc_kw, proc_min),
+            "idle": _kwh(idle_kw, idle_min),
+            "setup": _kwh(setup_kw, setup_min)}
+
+
+def agv_energy_breakdown_kwh(idle_min: float, empty_min: float,
+                             loaded_min: float) -> dict[str, float]:
+    """AGV 三态的**分项** [kWh]，键 = `idle` / `empty` / `loaded`（同上，求和 == `agv_energy_kwh`）。"""
+    return {"idle": _kwh(AGV_IDLE_KW, idle_min),
+            "empty": _kwh(AGV_EMPTY_KW, empty_min),
+            "loaded": _kwh(AGV_LOADED_KW, loaded_min)}
+
+
 def total_energy_kwh(machine_kwh: float, agv_kwh: float, makespan_min: float) -> float:
     """总能耗 = 机床 + AGV + 车间固定（固定项按 makespan 计）。"""
     return machine_kwh + agv_kwh + _kwh(SHOP_FIXED_KW, makespan_min)
