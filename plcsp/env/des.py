@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 import numpy as np
 import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
@@ -45,7 +45,8 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
             cfg: SimConfig | None = None, op_choices: list[list[int]] | None = None,
             aisle_width: float = 1.5,
             agv_phi: list[int] | None = None, constraints=None,
-            layout: Layout | None = None) -> dict:
+            layout: Layout | None = None,
+            seq_rank: list[list[int | None]] | None = None) -> dict:
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
     `layout_type` **保留但忽略**（旧调用方仍传）。
@@ -56,6 +57,12 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     `None`（默认）= 用 `seed_layout` 现采样 = **今日行为，逐位不变**（既有读数靠它）。
     给定时 `seed_layout` / `aisle_width` 不再参与布局构造（几何由该布局定死；`cfg` 仍定
     动力学，车队规模不符由 `SimWorld._fleet` 显式报错）。
+
+    ⚠️ **`seq_rank`（工序排序入口，2026-10-06）**：`seq_rank[job][oi] -> int`（越小越先；
+    `None` = 该工序未覆盖 = `+inf`）。**基线侧**（NSGA-II / HGS 的 OS 段）由此把外部算好的
+    工序顺序注入非延迟解码器——语义是"**缓冲内优先级**"（机台在已入缓冲的件里挑），
+    不是"等指定的下一件"（设计 §2）。`None`（默认）= 裸 FIFO 取件 = **逐位不变**。
+    契约与解码口径见 `docs/superpowers/specs/2026-10-06-sequencing-design.md` §5。
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
@@ -69,7 +76,7 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     g = build_corridor_graph(layout)
     dm = dock_distance_matrix(g)
     return SimWorld(inst, layout, dm, eff_cfg, graph=g, constraints=constraints).run(
-        seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi)
+        seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi, seq_rank=seq_rank)
 
 
 @dataclass
@@ -372,6 +379,92 @@ def drop_stops(batch: list) -> list[list]:
     return stops
 
 
+# ══ 工序排序入口（spec `docs/superpowers/specs/2026-10-06-sequencing-design.md` §3）══
+
+# 排序回调的契约（spec §3.2）：`decide(机台号, 候选作业元组) -> 候选**序号**`。
+# 候选 = 缓冲内各件、**按到达序**（与 `in_q.items` 同序；序号 0 = FIFO 队首）。
+# ⚠️ 动作是**序号**不是作业号：重复作业号在票面上仍有歧义，而序号永远唯一。
+SeqDecide = Callable[[int, "tuple[int, ...]"], int]
+
+
+def check_seq_rank(inst: Instance, seq_rank) -> list[list[float]]:
+    """校验外部工序优先表，并把未覆盖的工序填成 `+inf`（spec §5.1 的解码口径）。
+
+    `seq_rank[job][oi] -> int`（**越小越先**）；`None` 或行内缺口 = 该工序未覆盖 = `+inf`。
+    返回**规范化副本**（长度 = `n_jobs × 各作业工序数`，元素一律 `int` 或 `inf`）。
+
+    ⚠️ **形态不符即报错，绝不静默忽略**：静默忽略会把"基线的 OS 段没接上"伪装成
+    "接上了但没用"——正是本仓反复吃亏的那类**接线缺口**（spec §60.4②）。
+    故长度、逐行长度、元素类型三者逐条查，且错误信息带**具体下标**。
+    """
+    if not isinstance(seq_rank, (list, tuple)):
+        raise TypeError(f"seq_rank 必须是 list[list[int|None]]，得到 {type(seq_rank).__name__}")
+    if len(seq_rank) != inst.n_jobs:
+        raise ValueError(f"seq_rank 的行数 {len(seq_rank)} ≠ 实例作业数 {inst.n_jobs}"
+                         "（每个作业一行，行内按工序号索引）")
+    out: list[list[float]] = []
+    for j, row in enumerate(seq_rank):
+        if not isinstance(row, (list, tuple)):
+            raise TypeError(f"seq_rank[{j}] 必须是 list[int|None]，得到 {type(row).__name__}")
+        n_ops = len(inst.jobs[j])
+        if len(row) != n_ops:
+            raise ValueError(f"seq_rank[{j}] 长度 {len(row)} ≠ 作业 {j} 的工序数 {n_ops}")
+        vals: list[float] = []
+        for oi, v in enumerate(row):
+            if v is None:
+                vals.append(float("inf"))
+            elif isinstance(v, int) and not isinstance(v, bool):
+                vals.append(float(v))
+            else:
+                raise TypeError(f"seq_rank[{j}][{oi}] 必须是 int 或 None（+inf），"
+                                f"得到 {type(v).__name__}：{v!r}")
+        out.append(vals)
+    return out
+
+
+class _PriorityStore(simpy.Store):
+    """**可重排**的输入缓冲（spec §3.2）：只在给了排序入口时才替换裸 `simpy.Store`。
+
+    覆写 `_do_get`——SimPy 4.1.2 的真实签名是 `_do_get(self, event)`（源码已核）。
+    它是**唯一**的弹件点：`StoreGet.__init__`（机台空闲、缓冲已有件）与 `StorePut` 事件的
+    回调 `_trigger_get`（机台在等、件刚到）两条路径都经过它 ⟹ 一处覆写覆盖两种情形。
+
+    ⚠️ **决策在"取件这一刻"做**，候选集 = 当时 `items` 里的件。**不得**改成"投递时冻结的
+    逐件优先级"（spec §3.1）：那是**另一个时刻**的状态，且会让候选打分失去归一化——本仓
+    骨架是"一组候选一次 softmax"，逐件独立算分再比大小不是概率分布。
+    ⚠️ `capacity` **必须**透传给 `super().__init__`：AGV 侧"缓冲满则让步重试"的两处循环
+    （`_deliver_multi` / `run` 的单卸货点段）读 `in_q.items` 与 `in_q.capacity`；不透传时
+    `capacity` 静默变 `inf`，② 有限缓冲**静默失效**。
+    ⚠️ **`LuStation.in_q` 不得换成本类**（spec §3.3 第 8 行）：装卸站到站即完工，不是加工缓冲。
+    """
+
+    def __init__(self, env, capacity, decide: SeqDecide, mach: int, stats: dict) -> None:
+        super().__init__(env, capacity=capacity)
+        self.decide, self.mach, self.stats = decide, mach, stats
+
+    def _do_get(self, event) -> None:
+        n = len(self.items)
+        if n >= 2:
+            # 只在**真有得选**（≥ 2 件）时调回调（spec §3.2）——由 Store 侧强制，
+            # 不由基线/策略侧自觉（同 R/B 头的"候选 < 2 不记决策"纪律）。
+            idx = self.decide(self.mach, tuple(it[0] for it in self.items))
+            if type(idx) is not int or not 0 <= idx < n:
+                # 非候选动作**显式报错**（同其余六头的写法）：静默回退会掩盖
+                # "调用方与候选集不一致"这类错。
+                raise ValueError(
+                    f"排序回调返回的动作码非法：{idx!r}（机台 {self.mach}，候选 {n} 件）。"
+                    f"动作 = 候选序号，取值域 [0, {n})。")
+            if idx != 0:
+                # `seq_reorders` = 真选了非 FIFO 队首的次数（"决策真的发生了"的硬证据，
+                # 不是"回调被调了"）。`.get` 兜底：手搓 stats 的夹具不带新键。
+                self.stats["seq_reorders"] = self.stats.get("seq_reorders", 0) + 1
+            event.succeed(self.items.pop(idx))
+        elif n == 1:
+            event.succeed(self.items.pop(0))
+        # n == 0：不 succeed（事件留在 `get_queue` 里等件）——与 `Store._do_get` 同语义。
+        return None
+
+
 class MachineSim:
     """机台：输入缓冲 → 换型 → 加工（故障中断-恢复）→ 保养 → 输出缓冲（满则阻塞）。
 
@@ -382,20 +475,30 @@ class MachineSim:
     ——逐位等于今日行为；非 None = 策略驱动，一道工序加工完毕、下一件尚未上机时问它
     {现在保养, 不保养}（见 `_pm_after_op`）。回调只拿机台号，快照与特征由 `algo/` 层自取
     （层次纪律：`env/` 不得依赖 `nn/`）。
+
+    ⚠️ **`seq`（工序排序入口，2026-10-06）**：`None`（默认）= 输入缓冲是**裸 `simpy.Store`**
+    （FIFO 取件，逐位等于今日行为）；非 None = `_PriorityStore`，取件那刻在已入缓冲的件里
+    挑回调指定的那件。**关态在构造层面就不出现 `_PriorityStore`**（spec §3.4）——
+    判据可写成 `type(m.in_q) is simpy.Store`。
     """
 
     def __init__(self, env, pad: MachinePad, rng, cfg: SimConfig, stats: dict, completes: dict,
-                 events_q: simpy.Store, constraints, track: SimTrack, pm=None):
+                 events_q: simpy.Store, constraints, track: SimTrack, pm=None,
+                 seq: SeqDecide | None = None):
         self.env, self.pad, self.rng, self.cfg, self.stats = env, pad, rng, cfg, stats
         self.completes = completes
         self.events_q = events_q
         self.con = constraints
         self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
         self.pm = pm                    # ⑫ 维护头回调（None = 规则驱动，见类 docstring）
+        self.seq = seq                  # 工序排序回调（None = 裸 FIFO，见类 docstring）
         # SimPy 的 Store 不接受 capacity=None；无界用 inf（且下游的"缓冲满"检查须能识别 inf）
         cap_in = pad.in_cap if constraints.finite_buffer else float("inf")
         cap_out = pad.out_cap if constraints.finite_buffer else float("inf")
-        self.in_q = simpy.Store(env, capacity=cap_in)
+        # ⚠️ 关态必须是**裸 `simpy.Store`**（同一个类），不是"忠实做同样事的子类"——
+        #    这是最强形式的"默认关 ⟹ 逐位不变"（spec §3.4）。
+        self.in_q = (simpy.Store(env, capacity=cap_in) if seq is None else
+                     _PriorityStore(env, capacity=cap_in, decide=seq, mach=pad.id, stats=stats))
         self.out_q = simpy.Store(env, capacity=cap_out)
         self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障/保养期间占用）
         self.prev_job: int | None = None     # ⑤ 换型：本机上一件加工的作业
@@ -480,9 +583,26 @@ class MachineSim:
             self.stats["pm_events_chosen"] = self.stats.get("pm_events_chosen", 0) + 1
             self.pm_clock = 0.0
 
+    def _take_in(self):
+        """从输入缓冲取件，顺带记**排序机会率**（spec §3.6：关态也要计）。
+
+        `seq_gets_ge2` 的口径 = **取件这一刻**缓冲内的件数 ≥ 2（候选集 = 弹件前的 `items`）。
+        缓冲非空时 `simpy.Store.get()` **同步**跑完 `_do_get`（`StoreGet.__init__` →
+        `_trigger_get`）且机台不挂起 ⟹ 此处读到的 `len(items)` 与 `_do_get` 看到的候选集
+        **逐位相同**；缓冲空时 `get()` 排队、件到达后在**事件帧**里弹件，裸 `Store` 上读不到
+        弹件前的长度（spec §3.4 明令关态不得引入子类）⟹ 该路径按"刚到的那 1 件"计。
+        ⚠️ 于是**同刻多件到达且机台在等**时本键会**少计**（spec §3.7 第 3 条的场景）；
+        代价只是机会率略偏保守，不影响"机制是不是死的"的判断（⑩ 拼批头的教训）。
+        """
+        n = len(self.in_q.items)                # ⚠️ 必须在 `get()` **之前**读
+        item = yield self.in_q.get()
+        if n >= 2:
+            self.stats["seq_gets_ge2"] = self.stats.get("seq_gets_ge2", 0) + 1
+        return item
+
     def run(self):
         while True:
-            job, oi, op, is_last = yield self.in_q.get()
+            job, oi, op, is_last = yield from self._take_in()
             self.stats["in_q_gets"] = self.stats.get("in_q_gets", 0) + 1
             # 快照跟踪（P2 Task 1）：工件上机 → 记在制工序、上机时刻与所在地
             # ⚠️ 上机时刻 = 此刻（换型/故障修复的墙钟延长都不计入剩余——标称口径）
@@ -1322,7 +1442,7 @@ class SimWorld:
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
                         seed_chain: int = 0, charger_res=(), route=None, pm=None,
-                        charge=None, batch=None) -> tuple[
+                        charge=None, batch=None, seq: SeqDecide | None = None) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -1346,6 +1466,9 @@ class SimWorld:
         的返回值。透传给每台 `AgvSim`，`_collect_batch` 消费。
         ⚠️ `charger_res` 存成活引用（`self.charger_res`）：`snapshot()` 要按它报**当时**的桩占用
         （C 头的候选特征原料）——不存的话快照只能看到空表，占用维恒 0（静默死维）。
+        ⚠️ `seq`（工序排序）：`None` = 输入缓冲是裸 `simpy.Store`（逐位等于今日行为）；
+        `run()` 传 `_make_seq_decide(...)` 的返回值。透传给每台 `MachineSim`，
+        **⚠️ 明确不传 `LuStation`**（spec §3.3 第 8 行：装卸站到站即完工，不是加工缓冲）。
         """
         specs = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -1353,7 +1476,7 @@ class SimWorld:
         events_q = simpy.Store(env)
         track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints, track, pm=pm)
+                               events_q, self.constraints, track, pm=pm, seq=seq)
                     for i in range(self.inst.n_machines)]
         lu = LuStation(env, self.layout.lu, self.inst.n_machines, completes, track)
         entities = machines + [lu]
@@ -1612,16 +1735,49 @@ class SimWorld:
                     out[int(z)] = w
         return tuple(out)
 
+    def _make_seq_decide(self, rank: list[list[float]]) -> SeqDecide:
+        """把**静态工序优先表**编成 `decide(mach, jobs) -> 候选序号`（spec §5.1）。
+
+        `rank[job][oi]` 越小越先；`+inf` = 未覆盖（`check_seq_rank` 已规范化）。
+        候选 = 缓冲内各件、按到达序；**同 rank 取序号最小的**（= FIFO 队首）——
+        确定性由 `min` 的"首个最小"语义保证，不另设随机源。
+        `oi` 从 `SimTrack.job_progress` 取（**与 `_job_progress` 同源、不新增记账**）；
+        `self.track` 由 `_build_entities` 建出，故这里**惰性**读属性、不预取。
+        ⚠️ 本函数是**纯函数**：只看 `rank` 与"各作业进行到第几道工序"，不读仿真状态
+        （缓冲件数、机台工况一概不看）——静态表天然如此；在线路径走 `policy_q` 闭包（§5.1）。
+        """
+        def decide(mach: int, jobs: tuple[int, ...]) -> int:
+            # ⚠️ `mach` 在本解码下用不到（静态表与机台无关）；保留形参是为了与在线 Q 头
+            #    同型（spec §3.2 的契约只有一份），也让"机台"进得了将来的状态依赖规则。
+            _ = mach
+            prog = self.track.job_progress
+            return min(range(len(jobs)), key=lambda i: rank[jobs[i]][prog[jobs[i]]])
+        return decide
+
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
-            agv_phi: list[int] | None = None) -> dict:
+            agv_phi: list[int] | None = None,
+            seq_rank: list[list[int | None]] | None = None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
 
         agv_phi[task_i] = 第 task_i 个运输任务的 AGV id（L 层决策的载体；None=旧 FIFO 规则）。
           task_i 按 transporter 生成序 0,1,2,...；未覆盖的采用轮询 (i % n_agv)（确定性兜底）。
           绑定模式：每台车一个任务队列（bound 路径）—— 与旧"空闲车接活"语义不同（基线数字仅
           None 路径口径，论文对照会注明）。
-        返回 metrics：makespan / energy / fail_events / tardy / moves / deliveries。
+
+        `seq_rank[job][oi]` = 该工序的**优先级**（越小越先；`None` = 未覆盖 = `+inf`）。
+          **None（默认）= 输入缓冲是裸 `simpy.Store`，FIFO 取件，逐位不变**（spec §3.4）。
+          非 None = 机台在**已入缓冲的件**里挑 rank 最小的先加工（同 rank 取 FIFO 队首）——
+          即"缓冲内优先级"，机台只要缓冲非空就永不闲置（非延迟解码器，spec §2.1(A)）。
+          形态不符由 `check_seq_rank` **显式报错**（不静默忽略）。
+        ⚠️ `seq_rank` **不进 `SimConfig`**（同 `op_choices` 的同类处置，spec §3.5）：
+          进 cfg 就会进 `_cfg_key` ⟹ 参考运行缓存 `M_ref` 全部失效，且
+          `EvalSpec.from_cfg` / `check_same_dynamics` 按名枚举、看不见新字段（静默缺口）。
+          实例规模的数据不是运行时标度参数。
+
+        返回 metrics：makespan / energy / fail_events / tardy / moves / deliveries / seq_*。
         """
+        seq_decide = (None if seq_rank is None
+                      else self._make_seq_decide(check_seq_rank(self.inst, seq_rank)))
         rng = np.random.default_rng(seed_chain)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
@@ -1646,7 +1802,10 @@ class SimWorld:
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
                  # P4-B：矩阵覆盖不到的端点（充电桩）走几何降级时的**留痕**（段数与分钟数）
-                 "unmapped_legs": 0, "unmapped_min": 0.0}
+                 "unmapped_legs": 0, "unmapped_min": 0.0,
+                 # 工序排序入口的记账（spec §3.6）。**关态也计**：机会率要在关态测
+                 # （开着测会与策略/优先级表的实际选择混淆）。
+                 "seq_gets_ge2": 0, "seq_reorders": 0}
         env = simpy.Environment()
         inst = self.inst
         lu_idx = inst.n_machines             # 端点号约定：机台 0..m-1、装卸站 = m
@@ -1666,7 +1825,8 @@ class SimWorld:
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=bound,
-                                          seed_chain=seed_chain, charger_res=charger_res)
+                                          seed_chain=seed_chain, charger_res=charger_res,
+                                          seq=seq_decide)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1722,6 +1882,12 @@ class SimWorld:
                 "tardy": self._tardy(plans, completes, due)[0],
                 "tardy_twt": self._tardy(plans, completes, due)[1],
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
+                # 工序排序入口的读数（spec §3.6）：机会率 = `seq_gets_ge2 / dbg["in_q_gets"]`；
+                # `seq_reorders` = 真选了非 FIFO 队首的次数（"决策真的发生了"的硬证据）。
+                # 两条路径的 keyset 必须一致，故此处与本入口同键；`run_gated` 没有排序回调
+                # ⟹ 它的 `seq_reorders` 恒 0，而 `seq_gets_ge2` 照计（机台侧无条件记账）。
+                "seq_gets_ge2": stats.get("seq_gets_ge2", 0),
+                "seq_reorders": stats.get("seq_reorders", 0),
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
@@ -1858,7 +2024,10 @@ class SimWorld:
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
                  # P4-B：矩阵覆盖不到的端点（充电桩）走几何降级时的**留痕**（段数与分钟数）
-                 "unmapped_legs": 0, "unmapped_min": 0.0}
+                 "unmapped_legs": 0, "unmapped_min": 0.0,
+                 # 工序排序入口的记账（spec §3.6）。**关态也计**：机会率要在关态测
+                 # （开着测会与策略/优先级表的实际选择混淆）。
+                 "seq_gets_ge2": 0, "seq_reorders": 0}
         env = simpy.Environment()
         inst = self.inst
         lu_idx = inst.n_machines             # 端点号约定：机台 0..m-1、装卸站 = m（同 run()）
@@ -1935,6 +2104,12 @@ class SimWorld:
                 "tardy": self._tardy(plans, completes, due)[0],
                 "tardy_twt": self._tardy(plans, completes, due)[1],
                 "moves": stats["moves"], "deliveries": stats["deliveries"],
+                # 工序排序入口的读数（spec §3.6）：机会率 = `seq_gets_ge2 / dbg["in_q_gets"]`；
+                # `seq_reorders` = 真选了非 FIFO 队首的次数（"决策真的发生了"的硬证据）。
+                # 两条路径的 keyset 必须一致，故此处与本入口同键；`run_gated` 没有排序回调
+                # ⟹ 它的 `seq_reorders` 恒 0，而 `seq_gets_ge2` 照计（机台侧无条件记账）。
+                "seq_gets_ge2": stats.get("seq_gets_ge2", 0),
+                "seq_reorders": stats.get("seq_reorders", 0),
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
