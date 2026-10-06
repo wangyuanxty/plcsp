@@ -137,9 +137,10 @@ makespan, because most of it is tied to the horizon by definition
       obtains~\citep{link2026coordination}.
 
 \item \textbf{A transport-network-aware encoding, and a mechanism for each of
-      ten constraints.} The encoders in this literature carry topology without
-      space: three papers state that theirs cannot represent congestion, and
-      that the vehicle features contain neither coordinates nor distances. We
+      ten constraints.} The encoders in this literature carry the network's
+      structure but not its live state: three papers state that theirs cannot
+      represent congestion, so a policy using one cannot learn to avoid it.
+      Where the network does enter an encoder it enters as static topology. We
       therefore make the transport network itself part of the state. The
       aisle segments become tokens carrying their own occupancy, a
       distance-dependent bias enters the attention score, and the route head
