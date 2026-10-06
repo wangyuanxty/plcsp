@@ -73,13 +73,39 @@
 
 ## 7. 格式（用户 2026-10-06 定）
 
-- **LaTeX 双栏**（documentclass **待定**——目标期刊未定）
+- **LaTeX 双栏**：**Elsevier 标准双栏模板**（`elsarticle`，`twocolumn` 选项）
+  ⟹ 引用格式用 **Elsevier 编号制**（`elsarticle-num`）
 - **不自创术语**（术语表在 `experiment-plan.md` 顶部）
 - **无比喻、无拟人、无过度修辞、无 AI 味**
 - **图表一律用 `/scientific-figure-making`**
 
-## 8. ⚠️ 未决
+## 8. ✅ 入口两件已定（2026-10-06）
 
-- **目标期刊未定**（决定 documentclass / 篇幅 / citation 格式）
-- **"结果"章的"三目标"那一节**：现在按现口径写，还是等 C 重跑
-- 管道已到 **Stage 2 入口**（`academic-pipeline`），**等上面两件确认后 dispatch**
+1. **目标期刊/模板**：**Elsevier 标准双栏**（`elsarticle`）——期刊名仍未定，模板先用通用的。
+2. **"结果"章的"三目标"那一节**：**按现口径写**（总能耗 + 净能耗 A 都报），
+   **正文里把问题记下来**（总能耗与 makespan 近秩等价、ρ=0.978；待机功率待修），
+   **后面 C 重跑再改数**。⟹ **不留白。**
+
+**⟹ Stage 2 可以 dispatch。**
+
+## 9. 初稿状态（2026-10-06 出稿）
+
+**产物**：`paper/`（`main.tex` + `sections/00–08` + `refs.bib` + `figures/`）。
+**模板实测**：`elsarticle` 的 **`5p` 才是双栏**（`3p` 是单栏，`\textwidth`=522pt、
+`\columnwidth`=252pt）。编译 `pdflatex → bibtex → pdflatex ×2`，17 页，0 处未定义引用。
+
+⚠️ **两处占位未填（需作者定，不得代填）**：
+
+| 项 | 现状 |
+|---|---|
+| **通讯作者邮箱** | `main.tex` 里**没有** `\ead{}`——缺投稿必填项 |
+| **期刊名** | `\journal{}` 现填 `Journal of Manufacturing Systems`（占位） |
+
+**本次新增/修正的引用纪律**：
+- 四条核心题录已核（Brandimarte 1993 = *Annals of OR* 41(3):157–183, DOI 10.1007/BF02023073；
+  Ulusoy **在前**、Bilge 在后；GRPO = arXiv 2402.03300；Transformer = NIPS 2017）。
+  ⚠️ Vaswani 页码 5998–6008 **只有聚合库来源**，官方 proceedings 页不印页码——已在 `.bib` 注释标明。
+- **不得**在正文把已发表数字与我方并排（§3），改设 §2.4 专节讲四条不可比原因。
+- 图表生成脚本：`paper/figures/make_figures.py`（数据逐项对应 `progress-log` §52）。
+  ⚠️ 图 3 的 ρ 报的是 **makespan 与能耗本身**的秩相关（0.978 / 0.582），
+  **不是**比值的秩相关（那会得到 −0.73）——两个量同名易混，改动时注意。
