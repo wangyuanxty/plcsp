@@ -560,12 +560,12 @@ is measured in minutes, maintenance in events --- which is why the ratio form
 is used rather than the raw quantity.
 
 Calibration is done in a configuration in which all six constraints activate,
-because on the standard parameters two of them never do
-(Section~\ref{sec:results:active}) and a ratio with a zero denominator is
-undefined. On the geometric caliber all ten instances yield six live
-constraints. On the matrix caliber only four of the ten instances do, because
-in the remaining six the buffer-blocking quantity is identically zero on the
-reference schedule; those instances are excluded from the table rather than
+because on the standard parameters three of them do not on the instance the
+results come from (Section~\ref{sec:results:active}) and a ratio with a zero
+denominator is undefined. On the geometric caliber all ten instances yield six
+live constraints. On the matrix caliber only four of the ten instances do,
+because in the remaining six the buffer-blocking quantity is identically zero on
+the reference schedule; those instances are excluded from the table rather than
 entering it with an undefined reference, and a lookup on an absent instance
 raises an error instead of falling back.
 
@@ -574,8 +574,9 @@ The penalty is computed from the activation of constraints in the
 configuration being trained, not from the calibration configuration. If a
 constraint never activates in training, its normalized activation is zero while
 its reference is not, so its multiplier stays at zero and the constraint is not
-penalized. Under the standard parameters this happens for two of the six
-constraints, so the budget in practice acts on four of them. This is stated in
+penalized. On the instance the results come from this happens for three of the
+six constraints --- charging, machine failure, and maintenance --- so the budget
+in practice acts on three of them. This is stated in
 Section~\ref{sec:results:active} and is reflected in the way the budget arm is
 described there.
 

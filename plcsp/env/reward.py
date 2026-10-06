@@ -37,7 +37,8 @@ def _incomplete_objectives(r: dict) -> tuple[float, float, float]:
 
     三条界的来历（都用 `des.py` 自己的定义，不引新假设）：
 
-    1. **makespan** ≤ `horizon`（episode 在 `env.run(until=horizon)` 处停）⟹ 取 `horizon + 1`。
+    1. **makespan** ≤ `horizon`（停表条件 = `done | timeout(horizon)`：末件到站即停、只有真死锁
+       才走到护栏；护栏仍是一切完工时刻的上界，`des.LuStation.run` 的完成事件）⟹ 取 `horizon + 1`。
     2. **energy** ≤ (最贵机床功率 × 机台数 + 最贵 AGV 功率 × 车数 + 车间固定) × makespan ÷ 60
        ——机床三态时长之和与 AGV 三态时长之和都**恒等于 makespan**（`_energy_report` 的
        闭合口径）⟹ 再取 `horizon + 1` 得严格上界。

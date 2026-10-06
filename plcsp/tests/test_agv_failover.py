@@ -33,11 +33,16 @@ HOT = dict(agv_mtbf=12.0, agv_mttr=5.0)
 # 改造前捕获的四个摘要（bound/fifo × 默认/高频，failover 关）。
 # ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
 # 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+# ⚠️ 2026-10-07 重捕（progress-log §64）：episode 停表由**死锁护栏**改为**末件到站**
+# （`des.SimWorld.run`：`until=done | timeout(horizon)`，`horizon` 只兜真死锁）。
+# 停表窗口缩短 ⟹ `agv_fail_events`（护栏窗口里照抽照记的 Poisson 计数）变小，其余字段不动。
+# 已逐位实证：把**旧计数**换回新读数即命中全部 4 条旧 pin（旧 17/17/277/277 → 新 1/1/30/28），
+# 决策链指纹与 n_dec 亦逐位不变 ⟹ 动的是**量窗**，不是轨迹。
 DIGESTS = {
-    ("bound", "default"): "9e945df7c1db3abc24ef7f70ae811cb9d5d4f4e12c848dc28d2cb4c4483e0136",
-    ("fifo", "default"): "39d774ce3ec6b47136d105be804af0a4452573b2167168e1ccacf193ab474a85",
-    ("bound", "hot"): "e5c9b41ef3f8f0533f50fadd6b165eceeccdc3f9f31f8f63f7f7cffc372da359",
-    ("fifo", "hot"): "0d0723e2363a2dc49dda1acd0ab46a3f03753dd235e4228287d15bb02850fe47",
+    ("bound", "default"): "eec6607bee8fbfda49816a521e130746cf14706739e79523dd446ea25cc192b0",
+    ("fifo", "default"): "83567fb39ca361f1bc7b1c717cd8bbe1b72be40f5944816bb5c600a1f4c037a4",
+    ("bound", "hot"): "61e4a4d7895506ad12b69492c226ddaeb586499e4ba0919e580d8d7cf81fe03d",
+    ("fifo", "hot"): "3de7358a5a5ea09b33332e20f85d90a82fd090072439bfc3132932e0c3cf1fab",
 }
 
 

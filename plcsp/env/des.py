@@ -13,6 +13,10 @@
 - 完成时刻以**工件运抵装卸站**为准（P4-B Task 2b）：作业在装卸站入场、末工序完工后回站，
   `completes[j]` = 到站时刻 ⟹ makespan **含入场段与回站段的运输**（不是"末工序下机即完工"）。
   ⚠️ 已发表 MKT 数字的 `Cmax` 止于**末工序完工**且数据管线**丢 LU**——两者的边界不同。
+- **停表条件 = 完工**（2026-10-07 修复）：`env.run(until=done | timeout(horizon))`——末件到站即停，
+  `horizon`（6×工时+500）退居真·死锁护栏。此前 `until=horizon` 会把完工后的空转尾巴跑完，
+  事件计数（实测 `agv_fail_events`、`charge_events`）按护栏而非按 episode 累积——详见
+  `SimWorld.run` 的停表注释；停表时刻由 metrics 的 `stop_time` 自报。
 """
 from __future__ import annotations
 
@@ -649,12 +653,19 @@ class LuStation:
     1. **回站落点**：AGV 把回站工件投递进 `in_q`，**到达时刻即 `completes[j]`**（makespan 口径）；
     2. **与机台共用端点号空间**：机台 `0..m-1`、装卸站 = `m`（= `machines` 表的末位），
        于是 `_transporter` / `AgvSim` 的既有索引逻辑对两类端点一视同仁。
+
+    ⚠️ **完工事件（2026-10-07，停表修复）**：`done` 非空时，末件到站**当场** `succeed()` 它。
+    这是"episode 到此为止"的**唯一**判据——`run()` / `run_gated()` 拿它当 `env.run(until=…)`
+    的停表条件（`horizon` 退居真·死锁护栏）。理由与护栏的关系见 `SimWorld.run` 的模块注释。
+    `n_jobs=None` = 不装这个事件（手搓夹具的既有用法逐字不变）。
     """
 
-    def __init__(self, env, pad, idx: int, completes: dict, track: SimTrack):
+    def __init__(self, env, pad, idx: int, completes: dict, track: SimTrack,
+                 done=None, n_jobs: int | None = None):
         self.env, self.id = env, idx
         self.pad = _StationPad(pad.node)     # ⚠️ 站自己的节点号（格点外），不是它接入的交叉口
         self.completes, self.track = completes, track
+        self.done, self.n_jobs = done, n_jobs
         self.in_q = simpy.Store(env)         # 回站落点：无容量上限（站是终点，永不阻塞 AGV）
         self.out_q = simpy.Store(env)        # 形状与 MachineSim 对齐（transporter 只读机台的）
 
@@ -664,6 +675,11 @@ class LuStation:
             self.completes[job] = self.env.now      # 完工 = **到达装卸站**（不是末工序下机）
             self.track.job_agv[job] = -1
             self.track.job_loc[job] = -1
+            # ⚠️ 末件到站 ⟹ 没有活可派了：成功的**是 simpy.Event 不是进程**，同刻后续事件
+            #    照常入队；`triggered` 守卫使重复成功不可能（重复 `succeed()` 会 raise）。
+            if (self.done is not None and not self.done.triggered
+                    and len(self.completes) >= self.n_jobs):
+                self.done.succeed()
 
 
 def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
@@ -1442,7 +1458,8 @@ class SimWorld:
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
                         seed_chain: int = 0, charger_res=(), route=None, pm=None,
-                        charge=None, batch=None, seq: SeqDecide | None = None) -> tuple[
+                        charge=None, batch=None, seq: SeqDecide | None = None,
+                        done=None) -> tuple[
                             list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -1469,6 +1486,8 @@ class SimWorld:
         ⚠️ `seq`（工序排序）：`None` = 输入缓冲是裸 `simpy.Store`（逐位等于今日行为）；
         `run()` 传 `_make_seq_decide(...)` 的返回值。透传给每台 `MachineSim`，
         **⚠️ 明确不传 `LuStation`**（spec §3.3 第 8 行：装卸站到站即完工，不是加工缓冲）。
+        ⚠️ `done`（完工事件）：透传给 `LuStation`，末件到站时成功；调用方拿它当停表条件。
+        `None` = 不装（手搓夹具的既有用法逐字不变）。
         """
         specs = self._fleet()
         zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
@@ -1478,7 +1497,8 @@ class SimWorld:
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
                                events_q, self.constraints, track, pm=pm, seq=seq)
                     for i in range(self.inst.n_machines)]
-        lu = LuStation(env, self.layout.lu, self.inst.n_machines, completes, track)
+        lu = LuStation(env, self.layout.lu, self.inst.n_machines, completes, track,
+                       done=done, n_jobs=self.inst.n_jobs)
         entities = machines + [lu]
         if bound:
             tasks_in = [simpy.Store(env) for _ in range(self.cfg.n_agv)]   # L 层绑定：每车一队列
@@ -1821,12 +1841,13 @@ class SimWorld:
             plans[j] = [job_ops[oi][plan[oi]][0] for oi in range(len(job_ops))]
             chosen_times.extend(job_ops[oi][plan[oi]][1] for oi in range(len(job_ops)))
         completes: dict[int, float] = {}
+        done = env.event()                      # 完工事件：末件到站即成功（见下"停表"注释）
         bound = agv_phi is not None
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=bound,
                                           seed_chain=seed_chain, charger_res=charger_res,
-                                          seq=seq_decide)
+                                          seq=seq_decide, done=done)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1843,7 +1864,20 @@ class SimWorld:
         horizon = float(total_work * 6 + 500)   # v0 护栏升格：B 层门控（cap=2）下运行可远长于
                                                 # 无门控（波形化串行）；3× 护栏曾把门控运行掐
                                                 # 表截断（实测 9/10 假死——horizon 不足非死锁）
-        env.run(until=horizon)
+        # ⚠️ **停表修复（2026-10-07）：完工即停，horizon 退居真·死锁护栏。**
+        # 缺陷：`env.run(until=horizon)` 总把仿真时间**推到护栏**才停。报告档 B（矩阵口径）
+        # 实测 MK01 makespan 711 min / horizon 1418 min ⟹ 完工后还空转 ~707 min。空转期间
+        # **事件进程照跑**：`AgvSim._failures` 每抽一次就 `agv_fail_events += 1`（每车一条独立
+        # 泊松流）⟹ 该计数按**护栏**累积而非按 episode：n_agv=6 时实测 25 次，真 episode 的
+        # 期望仅 6×711/485 ≈ 8.8 次（MK07 更甚：44 次 vs 5×1527/485 ≈ 15.7）。
+        # 受影响的是**尾巴里还会触发的事件计数**（AGV 故障；以及尾巴里仍在跑的行程/充电记账）；
+        # `fail_events`/`rework_events`/`pm_events` 只在加工中触发，末件回站前全部结束 ⟹ 不动。
+        # 修法：末件到站（`LuStation.run` 记 `completes` 处）成功 `done`；停表条件用 simpy 的
+        # `|` 合成（`done | env.timeout(horizon)`）——跑完即停，永不到站的真死锁仍由护栏兜住。
+        # ⚠️ `horizon_hit` 的判据**不变**（`len(completes) < n_jobs`）：完成度是"做完没有"，
+        # 不是"停表条件谁触发"——护栏那一刻到站的末件照样算跑完（SimPy 的 run 必然推进到
+        # `until`，旧的"时间到即掐表"写法恒真，见 run_gated 同注释）。
+        env.run(until=done | env.timeout(horizon))
         stats["horizon_hit"] = len(completes) < inst.n_jobs   # 掐表=未完成（SimPy run 必然推进至
                                                               # until：时间比较恒真，须以完成度判）
         due = self._due(plans)
@@ -1875,8 +1909,12 @@ class SimWorld:
                                     else stats["battery_min_kwh"]),
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
                 # 完成度守卫（`reward._incomplete_objectives`）用的三个量：掐表时长 + 规模。
-                # `horizon` = 本次 `env.run(until=…)` 的停表时刻（完工时刻必 ≤ 它）。
+                # `horizon` = 本次运行的**护栏**（6×工时+500），是全部完工时刻的严格上界——
+                # 跑完时它**不被取到**（停表在 makespan），故它是一个上界而不是实测值。
+                # `stop_time` = `env.run` 的**实际停表时刻**（跑完 = makespan；掐表 = horizon）：
+                # 停表修复后"仿真跑到哪儿"这件事必须可观测，否则护栏与实测分不开。
                 "horizon": float(horizon),
+                "stop_time": float(env.now),
                 "n_jobs": self.inst.n_jobs, "n_machines": self.inst.n_machines,
                 "fail_events": stats["fail_events"],
                 "tardy": self._tardy(plans, completes, due)[0],
@@ -1938,6 +1976,9 @@ class SimWorld:
         不产生决策：规则是硬底线，策略只能把保养提前、不能推迟过点。
         ⚠️ `policy_m` 非空但 ⑫ `maintenance` 关闭 → **显式报错**：⑫ 关时 `pm_clock` 根本
         不累加（决策点不存在），给策略一个死动作只会污染链 logp。同 `policy_r` 的形态。
+        ⚠️ **报告配置（`REPORT_TIERS` 的 `B-8` 档）关 ⑫ ⟹ 本头在报告配置里不可达**
+        （非空即报错）。代码**保留**：消融 / 机制验证档（短 `pm_interval`）仍可显式打开 ⑫
+        用她；报告结果里没有她——这是"两机制从不激活、移出报告配置"的代价，如实声明。
 
         ⚠️ **`policy_c`（⑪ 充电头，C）**：`None`（默认）= 规则驱动（低电 → 最近空闲桩）
         ⟹ 逐位等于今日行为；非空 = **策略驱动**：AGV 在每个**空闲待命点**
@@ -1946,6 +1987,9 @@ class SimWorld:
         `charge_cands`：0 = 不去充、码 i≥1 = 第 i−1 号桩）。
         ⚠️ `policy_c` 非空但 ⑪ `charging` 关闭 → **显式报错**：⑪ 关时电池从不增减、
         充电桩机制根本不存在（决策点不存在），给策略一个死动作只会污染链 logp。
+        ⚠️ **报告配置（`REPORT_TIERS` 的 `B-8` 档）关 ⑪ ⟹ 本头在报告配置里不可达**
+        （非空即报错）。代码**保留**：机制验证档（`battery_low=0` + 小电池）仍可显式打开 ⑪
+        用她；报告结果里没有她——同 `policy_m` 一句。
 
         ⚠️ **`policy_b`（⑩ 拼批头，B）**：`None`（默认）= **规则配置**——`SimConfig.multi_drop`
         打开时 `AgvSim._collect_multi` 按"全队列同取货点、队列序、取满容量"拼批；
@@ -2042,12 +2086,13 @@ class SimWorld:
                     int(np.argmin([t for _, t in alts])) for alts in job_ops]
                 plans[j] = [job_ops[oi][plan[oi]][0] for oi in range(len(job_ops))]
         completes: dict[int, float] = {}
+        done = env.event()                      # 完工事件（同 run()：末件到站即成功）
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
         (entities, tasks_in, zm,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
                                           route=route_fn, pm=pm_fn, charge=charge_fn,
-                                          batch=batch_fn)
+                                          batch=batch_fn, done=done)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -2063,7 +2108,9 @@ class SimWorld:
         # 实际选择可能更长，靠下面的 6× 余量兜底——掐表时 horizon_hit 如实置位。
         total_work = sum(min(t for _m, t in op) for job in inst.jobs for op in job)
         horizon = float(total_work * 6 + 500)   # 同 run()：门控掐表护栏（原 3× 截断 9/10 假死）
-        env.run(until=horizon)
+        # 停表条件同 run()：`done | timeout(horizon)`（末件到站即停，护栏只兜真死锁）。
+        # ⚠️ 两处调用点的停表形状**必须一致**——只改一处 = 另一条路径的计数继续按护栏虚增。
+        env.run(until=done | env.timeout(horizon))
         stats["horizon_hit"] = len(completes) < inst.n_jobs   # 同 run()（原：run_gated 漏设旗标）
         due = self._due(plans)
         makespan = (max(completes.values()) if completes else env.now)
@@ -2098,7 +2145,10 @@ class SimWorld:
                 # ⚠️ `n_agv` / `fleet_size` 此前只在 `run()` 里有——两条路径的 metrics 键集
                 #    必须一致（奖励守卫读 run_gated 的返回）。
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
+                # ⚠️ 与 run() 同键同义：`horizon` = 护栏上界、`stop_time` = 实际停表时刻
+                # （停表修复：跑完时停在 makespan，不再推进到护栏）。
                 "horizon": float(horizon),
+                "stop_time": float(env.now),
                 "n_jobs": self.inst.n_jobs, "n_machines": self.inst.n_machines,
                 "fail_events": stats["fail_events"],
                 "tardy": self._tardy(plans, completes, due)[0],

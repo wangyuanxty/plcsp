@@ -37,9 +37,10 @@ is the baseline a reviewer would most reasonably ask for; adapting one to this
 simulation is substantial work, and Section~\ref{sec:related:incomparable}
 explains the boundary conditions under which any such number could be compared.
 A state-of-the-art metaheuristic for the flexible job shop is absent for the
-same reason. On the constraint side, two of the ten do not activate under the
-reported parameters: the charging constraint never fires across the benchmark,
-and maintenance does not trigger on MK01, so the budget mechanism penalizes four
+same reason. On the constraint side, three of the ten do not activate on the
+instance the policy results come from: the charging constraint never fires
+across the benchmark, machine failure does not fire on MK01, and maintenance
+does not trigger there either, so the budget mechanism penalizes three
 constraints in practice rather than the six it is configured with. The
 consequence is stated plainly: this paper reports no evidence on whether the
 charging mechanism works, and establishes that only in a configuration where

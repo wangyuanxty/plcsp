@@ -33,10 +33,15 @@ from plcsp.nn.encoder import LayoutEncoder
 # 抬到 0.05/min，让故障真的发生）。
 # ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
 # 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+# ⚠️ 2026-10-07 重捕（progress-log §64）：episode 停表由**死锁护栏**改为**末件到站**
+# （`des.SimWorld.run`：`until=done | timeout(horizon)`，`horizon` 只兜真死锁）。
+# 停表窗口缩短 ⟹ `agv_fail_events`（护栏窗口里照抽照记的 Poisson 计数）变小，其余字段不动。
+# 已逐位实证：把**旧计数**换回新读数即命中全部 3 条旧 pin（旧 17/17/17 → 新 1/2/2），
+# 决策链指纹与 n_dec 亦逐位不变 ⟹ 动的是**量窗**，不是轨迹。
 DIGESTS = {
-    "default": "69528db4a63bdc84b6f02e611bcf2a6f7b09f720c1876a93b6898199caa09406",
-    "pm20": "0b4a8cb1dd30ecd261148fdb8a6d8a0ebd3d96e510e23c305cbeba317991de59",
-    "hotfail": "6b1e985ead6a21e256156239efbbd364d4b83a02e8b3d05171be80b6001b8886",
+    "default": "04148503fd8971e0e7a2670160794c739ec6fe7ff3788e0e0e6885df906a01fe",
+    "pm20": "3469ab5fa65a2b7e24660eca63d1846b1a623eebd68495c160d0cf8805edfc79",
+    "hotfail": "53d5ce34cb01b598781d573df7252b54e02a200ee456b3c2c64a550583fe3db8",
 }
 
 
