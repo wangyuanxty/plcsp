@@ -42,11 +42,18 @@ SECONDS_PER_MIN = 60.0
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
             cfg: SimConfig | None = None, op_choices: list[list[int]] | None = None,
             aisle_width: float = 1.5,
-            agv_phi: list[int] | None = None, constraints=None) -> dict:
+            agv_phi: list[int] | None = None, constraints=None,
+            layout: Layout | None = None) -> dict:
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
     `layout_type` **保留但忽略**（旧调用方仍传）。
     `constraints` = `ConstraintConfig`（十约束开关，spec §3.3）；None → 全开。
+
+    ⚠️ **`layout`（布局覆盖，2026-10-06）**：给定时用它，**不再现采样**——布局级属性
+    （`AgvSpec.battery_kwh`、`MachinePad.fail_rate`…）这才进得了本入口。
+    `None`（默认）= 用 `seed_layout` 现采样 = **今日行为，逐位不变**（既有读数靠它）。
+    给定时 `seed_layout` / `aisle_width` 不再参与布局构造（几何由该布局定死；`cfg` 仍定
+    动力学，车队规模不符由 `SimWorld._fleet` 显式报错）。
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
@@ -54,8 +61,9 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     # 否则 `rollout(aisle_width=1.0)` 只改几何、不改速度，窄道敏感性实验**静默失效**。
     eff_cfg = cfg if cfg is not None else SimConfig(aisle_width=aisle_width)
     # ⚠️ 车队规模与载量上限必须**同步进布局**，否则布局车队 ≠ 仿真车队（静默错误）。
-    layout = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=aisle_width,
-                           n_agv=eff_cfg.n_agv, max_agv_capacity=eff_cfg.max_agv_capacity)
+    if layout is None:
+        layout = sample_layout(inst.n_machines, seed=seed_layout, aisle_w=aisle_width,
+                               n_agv=eff_cfg.n_agv, max_agv_capacity=eff_cfg.max_agv_capacity)
     g = build_corridor_graph(layout)
     dm = dock_distance_matrix(g)
     return SimWorld(inst, layout, dm, eff_cfg, graph=g, constraints=constraints).run(
@@ -1685,6 +1693,10 @@ class SimWorld:
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
                 "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
+                # 完成度守卫（`reward._incomplete_objectives`）用的三个量：掐表时长 + 规模。
+                # `horizon` = 本次 `env.run(until=…)` 的停表时刻（完工时刻必 ≤ 它）。
+                "horizon": float(horizon),
+                "n_jobs": self.inst.n_jobs, "n_machines": self.inst.n_machines,
                 "fail_events": stats["fail_events"],
                 "tardy": self._tardy(plans, completes, due)[0],
                 "tardy_twt": self._tardy(plans, completes, due)[1],
@@ -1892,6 +1904,12 @@ class SimWorld:
                 "batch_ge2": stats.get("batch_ge2", 0),
                 "battery_min_kwh": (0.0 if stats["battery_min_kwh"] == float("inf")
                                     else stats["battery_min_kwh"]),
+                # 车队规模 + 完成度守卫（`reward._incomplete_objectives`）需要的三个量。
+                # ⚠️ `n_agv` / `fleet_size` 此前只在 `run()` 里有——两条路径的 metrics 键集
+                #    必须一致（奖励守卫读 run_gated 的返回）。
+                "n_agv": self.cfg.n_agv, "fleet_size": self.layout.n_agv,
+                "horizon": float(horizon),
+                "n_jobs": self.inst.n_jobs, "n_machines": self.inst.n_machines,
                 "fail_events": stats["fail_events"],
                 "tardy": self._tardy(plans, completes, due)[0],
                 "tardy_twt": self._tardy(plans, completes, due)[1],

@@ -12,14 +12,73 @@
 `ReferenceObjectives` 同时存**实例指纹与 cfg 指纹**，`matches(inst, cfg)` 可断言。
 
 期末一次性结算，无中间奖励（→ §4.4 的切比雪夫可加性问题不存在）。
+
+⚠️ **完成度守卫**（2026-10-06）：`horizon_hit=True`（episode 没跑完）时，`objective_vector`
+返回三个**结构上界**，不返回实测值。理由与三条界的来历见 `_incomplete_objectives`。
+`horizon_hit=False` 时逐位等于今日读数——**全部既有读数靠这一条**（有测试钉住）。
+
+⚠️ `ReferenceObjectives.of` **不走** `objective_vector`（它从同一次参考运行的 `completes`
+另算 TWT）⟹ 本次守卫**不影响** `f^ref` / 奖励权重 `w`。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..energy import AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, MACHINE_TIERS, SHOP_FIXED_KW
+
+# 上限界用的功率常数（与 `energy.py` 同源；只用于构造**上界**，不是新参数）。
+# 取各档区间的**上端**（比模型实际用的低端更保守）⟹ 该界对"换高端值"的敏感性扫描也成立。
+_MAX_MACHINE_KW = max(max(t["proc"][1], t["idle"][1]) for t in MACHINE_TIERS.values())
+_MAX_AGV_KW = max(AGV_IDLE_KW, AGV_EMPTY_KW, AGV_LOADED_KW)
+
+
+def _incomplete_objectives(r: dict) -> tuple[float, float, float]:
+    """未跑完的 episode → 三个**占优上界**：每个分量都严格大于任何跑完 episode 的同名分量。
+
+    三条界的来历（都用 `des.py` 自己的定义，不引新假设）：
+
+    1. **makespan** ≤ `horizon`（episode 在 `env.run(until=horizon)` 处停）⟹ 取 `horizon + 1`。
+    2. **energy** ≤ (最贵机床功率 × 机台数 + 最贵 AGV 功率 × 车数 + 车间固定) × makespan ÷ 60
+       ——机床三态时长之和与 AGV 三态时长之和都**恒等于 makespan**（`_energy_report` 的
+       闭合口径）⟹ 再取 `horizon + 1` 得严格上界。
+    3. **TWT** = Σ_j w_j·max(0, C_j − d_j) ≤ Σ_j C_j ≤ 作业数 × makespan（等权）⟹ 同取 `+1`。
+
+    ⚠️ 三项都用 `horizon + 1`，不用 `horizon`：完工时刻 ≤ horizon，`+1` 保证**严格**大于，
+    不依赖"某个事件不会恰好发生在 horizon 这一刻"。
+    ⚠️ 缺键时**显式报错**，不静默退回实测值——静默退回正是本守卫要修的那个 bug。
+    """
+    missing = [k for k in ("horizon", "n_machines", "n_agv", "n_jobs") if k not in r]
+    if missing:
+        raise ValueError(
+            f"完成度守卫缺少 metrics 键 {missing}（`horizon_hit=True` 时必需）——"
+            "`des.SimWorld.run` / `run_gated` 的返回都带这些键；手搓 metrics 请补齐。")
+    h = float(r["horizon"]) + 1.0
+    p_kw = (_MAX_MACHINE_KW * int(r["n_machines"]) + _MAX_AGV_KW * int(r["n_agv"])
+            + SHOP_FIXED_KW)
+    return (h, p_kw * h / 60.0, float(r["n_jobs"]) * h)
+
 
 def objective_vector(r: dict) -> tuple[float, float, float]:
-    """评测返回 dict → (makespan, energy, TWT)。三者都是"越小越好"。"""
+    """评测返回 dict → (makespan, energy, TWT)。三者都是"越小越好"。
+
+    ⚠️ **完成度守卫**（2026-10-06）：`r["horizon_hit"]` 为真时返回 `_incomplete_objectives(r)`
+    的上界三元组；为假时返回实测三元组（**逐位不变**）。
+
+    **为什么必须守**：没跑完时三项全都"看起来更好"——makespan 是**部分完工的最大值**、
+    energy 按（更小的）makespan 计、TWT 只算已完工的作业（甚至可以为 0）。
+    ⟹ **"少干活 / 让车队趴窝"是奖励吸引子**（⑪ 验证档实测：2/10 完工却报 46.22，
+    见 `progress-log.md` §52.9.2）。
+
+    **为什么用分量上界**，而不是"makespan 取 horizon"（只罚一项）、固定大罚、或按完成比例缩放：
+    奖励是三项的**非负加权和**（`scalar_reward`）。只有**每个分量都严格更差**，才能保证
+    "未跑完的奖励严格差于**任何**跑完的 episode"——只罚一项时，另外两项的"假改善"
+    （尤其 energy 权重在 MK01 上占 ~0.89）仍可能把总奖励拉回去。固定大罚要选一个跨实例的
+    魔数；按完成比例缩放不给出绝对序。本做法只用到实例自己的量与 `energy.py` 的引证常数。
+
+    ⚠️ 缺 `horizon_hit` 键的 dict（手搓的）按"跑完"处理——与今日行为一致。
+    """
+    if r.get("horizon_hit", False):
+        return _incomplete_objectives(r)
     return (float(r["makespan"]), float(r["energy"]), float(r["tardy_twt"]))
 
 

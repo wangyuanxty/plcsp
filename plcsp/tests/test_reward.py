@@ -15,6 +15,150 @@ def test_objective_vector_reads_three_objectives():
     assert objective_vector(r) == (100.0, 8.0, 12.5)
 
 
+# ─────────────────── 完成度守卫（2026-10-06，`progress-log` §52.9） ───────────────────
+# Bug：`objective_vector` 只读三项实测值。episode 没跑完时三项全都"看起来更好"
+# （makespan 是部分完工的最大值、energy 按更小的 makespan 计、TWT 只算已完工的作业）
+# ⟹ "少干活 / 让车队趴窝"是奖励吸引子（⑪ 验证档实测：2/10 完工却报 46.22）。
+
+
+def _dead_fleet_and_rule(inst, cfg, lay, dm, seed_chain=3):
+    """同一 (inst, cfg, 布局) 下的两条真实 episode：规则补电（跑完）vs 恒不充（趴窝）。
+
+    口径与 `test_t3_lagrangian` 的退化守卫一致（小电池 + `battery_low=0` + 恒不充）。
+    实测（mk01、0.15 kWh、seed_chain=3）趴窝臂停在 **8/10**——正是奖励吸引子的形态：
+    部分完工的 makespan/energy/TWT 三项都更小，**原始奖励反而更好**。
+    """
+    from plcsp.env.des import CHARGE_CAND_SKIP, SimWorld
+
+    pick_first = lambda snap, job, frm, to, oi, cand: cand[0]        # noqa: E731
+    done = SimWorld(inst, lay, dm, cfg).run_gated(seed_chain=seed_chain, policy_l=pick_first)
+    dead = SimWorld(inst, lay, dm, cfg).run_gated(
+        seed_chain=seed_chain, policy_l=pick_first,
+        policy_c=lambda snap, aid, cands: CHARGE_CAND_SKIP)
+    return done, dead
+
+
+def _raw_reward(met, w) -> float:
+    """**旧式**奖励（三项实测值直接加权）——守卫之前的口径，用来证明吸引子真的存在。"""
+    return -sum(wi * float(met[k]) for wi, k in
+                zip(w, ("makespan", "energy", "tardy_twt")))
+
+
+def _small_battery_world(inst, kwh: float = 0.15):
+    from plcsp.algo.setup import build_layout_and_dm
+    from plcsp.env.layout import AgvSpec
+
+    cfg = SimConfig(battery_low=0.0)               # 规则档到 0 才补电（同 §33.4 口径）
+    lay, dm = build_layout_and_dm(inst, cfg)
+    for i, a in enumerate(lay.agvs):
+        lay.agvs[i] = AgvSpec(id=a.id, speed_factor=a.speed_factor, capacity=a.capacity,
+                              battery_kwh=kwh)     # 小电池验证档（同 test_charge_head）
+    return cfg, lay, dm
+
+
+@pytest.mark.unit
+def test_guard_is_bit_identical_when_episode_finished():
+    """① **跑完的 episode 奖励逐位不变**——全部既有读数（A 主表、13 个消融 run、D/E/F）靠它。
+
+    ⚠️ 断言用 `==`（不是 approx）：守卫是**分支**，跑完时一个浮点运算都不许多做。
+    """
+    inst = load_mk("mk01")
+    w = reward_weights(ReferenceObjectives.of(inst, SimConfig()).as_tuple())
+    r = rollout(inst, seed_chain=1, cfg=SimConfig())
+    assert not r["horizon_hit"] and r["jobs_done"] == inst.n_jobs, "本判据的前提（跑完）不成立"
+
+    raw = (float(r["makespan"]), float(r["energy"]), float(r["tardy_twt"]))
+    assert objective_vector(r) == raw, "跑完的 episode 被守卫动了——既有读数作废"
+    # 与"今日"表达式逐位相同（旧式 = 三项实测值直接加权）
+    today = -sum(wi * fi for wi, fi in zip(w, raw))
+    assert scalar_reward(objective_vector(r), w) == today
+    # 手搓 metrics（无 `horizon_hit` 键）按"跑完"处理——与今日行为一致
+    assert objective_vector({"makespan": 1.0, "energy": 2.0, "tardy_twt": 3.0}) == (1.0, 2.0, 3.0)
+
+
+@pytest.mark.unit
+def test_guard_makes_a_real_incomplete_episode_strictly_worse():
+    """② 未跑完的奖励**严格更差**——同一 (实例, cfg, 布局) 上：规则补电（跑完）vs 恒不充（趴窝）。
+
+    ⚠️ 本判据同时钉住**吸引子真的存在**（旧式奖励下趴窝臂反而更好）——否则本测试
+    失去区分力（"趴窝恰好更差"不能证明守卫在起作用）。
+    """
+    inst = load_mk("mk01")
+    cfg, lay, dm = _small_battery_world(inst)
+    done, dead = _dead_fleet_and_rule(inst, cfg, lay, dm)
+
+    assert not done["horizon_hit"] and done["jobs_done"] == inst.n_jobs, "对照臂没跑完"
+    assert dead["horizon_hit"], "趴窝臂竟然跑完了"
+    assert 0 < dead["jobs_done"] < inst.n_jobs, (
+        f"趴窝臂只完成 {dead['jobs_done']}/{inst.n_jobs}——本判据要的是**部分完工**的吸引子")
+    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    # 吸引子：旧口径下趴窝臂的奖励**更好**（三项都因少干活而变小）
+    assert _raw_reward(dead, w) > _raw_reward(done, w), "本判据失去区分力（旧口径下没有吸引子）"
+    r_done = scalar_reward(objective_vector(done), w)
+    r_dead = scalar_reward(objective_vector(dead), w)
+    assert r_dead < r_done, f"未跑完的奖励 {r_dead} 不严格差于跑完的 {r_done}"
+    assert r_done == _raw_reward(done, w), "跑完的奖励被守卫动了"
+
+
+@pytest.mark.unit
+def test_guard_dominates_a_worst_case_finished_episode():
+    """② 的强形式：**任何**跑完的 episode 都严格更优。
+
+    用 `des.py` 自己的定义造一个"最差的跑完"字典：完工时刻 ≤ `horizon`；
+    能耗 ≤ 能量模型的**结构上界**（机床/AGV 三态时长之和恒等于 makespan，功率取各档上端）；
+    TWT ≤ 作业数 × makespan（等权）。守卫必须严格大于这三条界。
+    """
+    from plcsp.energy import AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW, MACHINE_TIERS, SHOP_FIXED_KW
+
+    inst = load_mk("mk01")
+    cfg = SimConfig()
+    r = rollout(inst, seed_chain=1, cfg=cfg)
+    h = float(r["horizon"])
+    max_m_kw = max(max(t["proc"][1], t["idle"][1]) for t in MACHINE_TIERS.values())
+    max_a_kw = max(AGV_IDLE_KW, AGV_EMPTY_KW, AGV_LOADED_KW)
+    worst = dict(r, horizon_hit=False, makespan=h,
+                 energy=(max_m_kw * inst.n_machines + max_a_kw * cfg.n_agv
+                         + SHOP_FIXED_KW) * h / 60.0,
+                 tardy_twt=float(inst.n_jobs) * h)
+    hit = dict(r, horizon_hit=True)
+
+    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    assert scalar_reward(objective_vector(hit), w) < scalar_reward(objective_vector(worst), w), (
+        "守卫没有严格压过'最差跑完'——上界三元组不够大")
+    # 分量级：三项都必须严格更大（分量级占优才是"任何权重下都成立"的保证）
+    f_hit, f_worst = objective_vector(hit), objective_vector(worst)
+    assert all(a > b for a, b in zip(f_hit, f_worst))
+
+
+@pytest.mark.unit
+def test_guard_survives_t3_penalty():
+    """③ 与 T3 罚项共存：`r' = r − Σλᵢâᵢ` 加在守卫**之后**，且 `λ ≤ T3_LAMBDA_MAX`（clip 上界）。
+
+    用真实两条 metrics + 真实 T3 归一化；λ 取算法**能达到的最大值**（对偶上升被 clip 到
+    `T3_LAMBDA_MAX`）——罚项差因此有界，守卫的差远大于它。
+    """
+    from plcsp.env.t3_budget import T3_LAMBDA_MAX, T3Budget, normalized_activation
+
+    inst = load_mk("mk01")
+    cfg, lay, dm = _small_battery_world(inst)
+    done, dead = _dead_fleet_and_rule(inst, cfg, lay, dm)
+    budget = T3Budget(inst)                      # 几何口径 mk01 六条全在冻结表里
+    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    lam = T3_LAMBDA_MAX
+    pen_done = lam * float(normalized_activation(done, budget.a_ref, budget.keep).sum())
+    pen_dead = lam * float(normalized_activation(dead, budget.a_ref, budget.keep).sum())
+    assert (scalar_reward(objective_vector(dead), w) - pen_dead
+            < scalar_reward(objective_vector(done), w) - pen_done), \
+        "T3 罚项把守卫的序翻过来了（λ 的 clip 上界没有兜住）"
+
+
+@pytest.mark.unit
+def test_guard_requires_horizon_keys():
+    """守卫要的四个键缺一不可——**显式报错**，不静默退回实测值（静默退回就是原 bug）。"""
+    with pytest.raises(ValueError, match="完成度守卫"):
+        objective_vector({"makespan": 1.0, "energy": 1.0, "tardy_twt": 1.0, "horizon_hit": True})
+
+
 @pytest.mark.unit
 def test_weights_are_inverse_reference_and_sum_to_one():
     w = reward_weights((100.0, 8.0, 20.0))

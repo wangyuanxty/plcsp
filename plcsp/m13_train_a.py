@@ -161,10 +161,13 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
     - `rule_makespan` = 调用方传入的 `rule`，锚在**十约束全开**的参考运行（`des.rollout` 的
       默认口径）。它是 `f^ref` / `m_ref` 的锚，**不随 constraints 漂**（刻意的，勿改）。
     - `rule_makespan_same_constraints` = **同约束集**的规则 rollout（`constraints=` 与训练
-      同一份）。约束组消融（B）里 policy 跑的是"关掉几条"的问题，拿"全开"的规则当基线
-      是**易问题比难问题**（`progress-log.md` §52.2 第 2 条）——本栏补上同口径的对照。
-      报告档 B（全开）两栏相等；报告档 A（全关）两栏差很大（mk01：117.8 vs 73.0）。
+      同一份，**`layout=lay` 也用同一份**）。约束组消融（B）里 policy 跑的是"关掉几条"的问题，
+      拿"全开"的规则当基线是**易问题比难问题**（`progress-log.md` §52.2 第 2 条）——本栏补上
+      同口径的对照。报告档 B（全开）两栏相等；报告档 A（全关）两栏差很大（mk01：117.8 vs 73.0）。
     ⚠️ 两栏都**必须**报：删掉 `rule_makespan` 会切断 f^ref 的锚，删掉同约束栏则消融对照失真。
+    ⚠️ **两栏的口径仍不同**（2026-10-06）：`rule_makespan`（与 `f^ref` / `m_ref`）取自
+      **现采样的默认布局**，看不见 `--agv-battery-kwh` 这类**布局级覆盖**；同约束栏已随
+      `lay` 走。验证档的读数必须按这条声明（见 `main` 的警告行与 `progress-log.md` §52.9）。
     """
     # 同约束集规则的惰性缓存：一次 rollout、全部评估轮次复用（规则是确定性的，不需重算）。
     rule_same: list[float] = []
@@ -174,10 +177,16 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
 
         ⚠️ 与 `rule` 形参（全约束锚）是两个不同的量：只在报告档 B（全开）下两者相等。
         用 `seed_chain=0` 与 `rule` 同一条随机链——两栏的差只来自约束集。
+
+        ⚠️ **`layout=lay`（2026-10-06）**：`rollout` 自己会重采样布局 ⟹ 布局级覆盖
+        （`--agv-battery-kwh` 换的电池、`fail_rate` 等）根本进不了这一栏——⑪ 验证档实测
+        三行都报 **109.05 = 默认电池档**的数（`progress-log.md` §52.9.2）。
+        传**任务那一份布局**（训练/评估策略用的同一份）才是真同口径。
+        `lay=None`（单测替身）时退回现采样，与今日行为逐位相同。
         """
         if not rule_same:
             rule_same.append(float(rollout(inst, seed_chain=0, cfg=cfg,
-                                           constraints=constraints)["makespan"]))
+                                           constraints=constraints, layout=lay)["makespan"]))
         return rule_same[0]
 
     def eval_fn(policy) -> dict:
@@ -443,6 +452,10 @@ def main() -> None:
     if args.agv_battery_kwh is not None:
         print(f"[m13] ⚠️ 小电池验证档：车队电池全换 {args.agv_battery_kwh} kWh、battery_low=0 "
               f"（电池是**布局**属性 ⟹ 改动力学，与默认配置读数不可比；⑪ 这才可能跑到耗尽）")
+        print("[m13] ⚠️ 布局级覆盖只落在**训练/评估策略**与**同约束规则栏**（两处都用同一份 "
+              "layout）上；锚三件套 `rule_makespan` / `f^ref` / `m_ref` 仍取自 seed_layout=0 "
+              "的**现采样默认布局**（2–4 kWh）——本档的奖励归一化与锚列**不是**同布局口径，"
+              "读数时必须声明（见 progress-log §52.9.6 线索 2）")
     if args.pm_interval is not None:
         print(f"[m13] ⚠️ 短保养间隔验证档：pm_interval={args.pm_interval}（改动力学；⑫ 的被迫激活量"
               f" `pm_events_forced` 这才可能非零）")
