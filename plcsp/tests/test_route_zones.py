@@ -38,7 +38,9 @@ from plcsp.nn.state_emb import build_tok, zone_features
 # 同一次捕获还复算了 `route_k=1` 的摘要（与 test_route_choice.GOLDEN_CHAIN_DIGEST 同源口径的
 # 独立脚本，值为 4241fec403248727280c2aacc888569f03b7d3b5b50a53dc10f2fc0031479228，
 # 与改造前逐位相同——默认配置的保证由既有黄金摘要继续守着，这里只钉 route_k=2 关态）。
-R2_OFF_CHAIN_DIGEST = "9fe15b4f293e74bf43e47652c079a13f54395a066dc6e03f4c1eff1c88b0a7c8"
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+R2_OFF_CHAIN_DIGEST = "ce6b0e99cf162079f2458322cfb2c107f56db91f3560312096291d5f6af9b823"
 
 
 def _setup(name="mk01"):

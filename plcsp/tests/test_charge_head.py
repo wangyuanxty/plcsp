@@ -55,12 +55,14 @@ from plcsp.nn.features import F_MAX, SEG_SLICE
 # 并与 `test_maintenance_head.PM_HEAD_OFF_DIGEST` **同值**——这两条钉的是同一条默认路径，
 # 一个改变该配置行为的改动会同时翻红两处。
 #   kinds={'S':55,'L':65} n=120，makespan=118.8647282376667
-CHARGE_HEAD_OFF_DIGEST = "5a06255d6d57d2f507c7186a198c11ec056454a359265809c80da40c98f4c5ae"
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+CHARGE_HEAD_OFF_DIGEST = "8b34cc3d5c459df338cae0fa487fa58d61224c78ca964d49b9d069cd7eab49b0"
 
 # ⑪ 关态的链路指纹——**同样捕获自改造前的树**。本修复的"不可能触发"由此证明：
 # 关掉 ⑪ 后电池恒为 `battery_cap`（`_drain` / `_drain_idle` / `_maybe_charge` 全部直接返回），
 # `battery <= 0` 恒不成立，耗尽门永不生效 ⟹ 链路逐位不变。
-CHARGING_OFF_DIGEST = "dc766fd04a6d042cd65ca924e3e2727311f49cf19072ad739a7847551b8304d5"
+CHARGING_OFF_DIGEST = "2e8f14da0dd0381e40191da4c10f509e9d07b0383179e8afbab4942e63c0e5ec"
 
 # 验证用的**小电池验证档**：电池 0.10 kWh + `battery_low=0.0`。
 # ⚠️ `battery_low` 必须为 0：默认 0.20 时规则在 0.02 kWh 就补电，电池**到不了 0**

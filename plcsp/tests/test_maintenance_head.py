@@ -52,7 +52,9 @@ PM_SHORT = 10.0
 # 复算一次，两处同值——它不是实现完之后现编的基准：
 #   kinds={'S':55,'L':65,'R':0} n=120，makespan=118.8647282376667
 # 任何"多抽一个随机数 / 多取一次快照 / 下标映射变了"的关态漂移都会翻红。
-PM_HEAD_OFF_DIGEST = "5a06255d6d57d2f507c7186a198c11ec056454a359265809c80da40c98f4c5ae"
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+PM_HEAD_OFF_DIGEST = "8b34cc3d5c459df338cae0fa487fa58d61224c78ca964d49b9d069cd7eab49b0"
 
 
 def _setup(interval=PM_SHORT):

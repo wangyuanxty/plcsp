@@ -98,6 +98,43 @@ class EvalSpec:
                          multi_drop=self.multi_drop, agv_failover=self.agv_failover,
                          machine_age_failure=self.machine_age_failure)
 
+    @classmethod
+    def from_cfg(cls, cfg: SimConfig, **overrides) -> "EvalSpec":
+        """从**实际的 DRL `SimConfig`** 建 spec —— 三个动力学开关随之复制（2026-10-06）。
+
+        🔴 **建立基线的唯一正确入口。** `multi_drop` / `agv_failover` /
+        `machine_age_failure` 改的是**动力学**（交付模型、⑨ 停机期间的任务归属、③ 的故障率），
+        不是"少开一个开关"——缺一个就是**两个问题各跑各的**，与 DRL 的读数不可比。
+
+        它们**与约束档（`tier`）不是一个轴**：`tier` 选的是 `REPORT_TIERS`，这三个来自
+        `m13` 的 CLI（`--multi-drop` / `--agv-failover` / `--machine-age-failure`），
+        默认全 `False`。所以**不能靠 tier 推断**，只能从 cfg 复制。
+        """
+        fields = {"multi_drop": cfg.multi_drop, "agv_failover": cfg.agv_failover,
+                  "machine_age_failure": cfg.machine_age_failure,
+                  "n_agv": cfg.n_agv, "transport_unmapped": cfg.transport_unmapped}
+        fields.update(overrides)
+        return cls(**fields)
+
+    def check_same_dynamics(self, cfg: SimConfig) -> None:
+        """🔴 与一份 DRL `SimConfig` 逐字段比对动力学开关；不一致即报错（不静默）。
+
+        基线表要把基线与 DRL 并排报 ⟹ **两边的动力学必须同一套**。
+        本方法就是那条断言的单一实现；跑基线前调它一次。
+        """
+        mine = {"multi_drop": self.multi_drop, "agv_failover": self.agv_failover,
+                "machine_age_failure": self.machine_age_failure,
+                "n_agv": self.n_agv, "transport_unmapped": self.transport_unmapped}
+        theirs = {"multi_drop": cfg.multi_drop, "agv_failover": cfg.agv_failover,
+                  "machine_age_failure": cfg.machine_age_failure,
+                  "n_agv": cfg.n_agv, "transport_unmapped": cfg.transport_unmapped}
+        bad = {k: (theirs[k], mine[k]) for k in mine if theirs[k] != mine[k]}
+        if bad:
+            detail = "；".join(f"{k}: DRL={v[0]!r} vs 基线={v[1]!r}" for k, v in bad.items())
+            raise ValueError(
+                f"基线与 DRL 的动力学口径不一致：{detail}——"
+                "两边会解**不同的问题**，读数不可并排。用 `EvalSpec.from_cfg(drl_cfg)` 重建 spec。")
+
 
 def transport_task_count(inst: Instance) -> int:
     """运输任务总数 = Σ每作业(工序数 + 1)。

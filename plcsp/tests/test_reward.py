@@ -243,6 +243,10 @@ def test_reference_weights_are_pinned_to_the_due_date_caliber():
     ① 作业改为**在装卸站入场、完工回站** ⟹ 参考 makespan 103.42 → **117.66**、运输时长
        7.73 → 8.77（每个作业多两条 LU 负载段）；
     ② 几何口径的 `TF_RDD` 随之**重标**（mk01 的 τ/R：2.45/0.2 → 2.75/0.3）⟹ TWT 124.05 → 161.52。
+    ⚠️ **2026-10-06 第三处变更**：机床待机功率由 **P^u**（0.74/0.24/0.16 kW）改为
+    **Table 9 的 Standby Power**（0.54/0.08/0.08 kW）⟹ 参考能耗 **8.77 → 7.09**，
+    权重 **w = (0.0660, 0.8859, 0.0481) → (0.0546, 0.9057, 0.0398)**。
+    **这一处直接改奖励函数**（不只是能耗读数），历史训练读数随之全部作废。
     历史（供追溯，**均已作废**）：旧口径 `d_j = τ·M_ref` 下 `f^ref = (103.42, 7.73, 19.51)`
     → `w = (0.051, 0.680, 0.269)`（TWT 占 26.9%）。
     ⚠️ **改口径的人必须同时改**：本测试、`spec §5.3.3`、`INDEX §5.8`、`progress-log` 里引用
@@ -253,6 +257,6 @@ def test_reference_weights_are_pinned_to_the_due_date_caliber():
     ref = ReferenceObjectives.of(load_mk("mk01"), SimConfig())
     f = ref.as_tuple()
     w = reward_weights(f)
-    assert f == pytest.approx((117.66, 8.77, 161.52), rel=1e-3)
-    assert w == pytest.approx((0.0660, 0.8859, 0.0481), rel=1e-3)
-    assert w[2] == pytest.approx(0.048, abs=5e-3), "TWT 的奖励份额（P4-B 重标后应约 4.8%）"
+    assert f == pytest.approx((117.66, 7.09, 161.52), rel=1e-3)
+    assert w == pytest.approx((0.05457, 0.90567, 0.03975), rel=1e-3)
+    assert w[2] == pytest.approx(0.040, abs=5e-3), "TWT 的奖励份额（待机口径修正后应约 4.0%）"

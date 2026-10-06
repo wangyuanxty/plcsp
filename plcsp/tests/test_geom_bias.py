@@ -33,7 +33,9 @@ from plcsp.nn.state_emb import GEOM_BIAS_W, build_geom_bias, build_tok
 # 黄金摘要：与 `test_route_choice.GOLDEN_CHAIN_DIGEST` 同一口径的独立脚本值（**改造前**捕获，
 # 2026-10-05）。`geom_bias=False`（默认）时它必须逐字复现——偏置的接线若在关态下动了任何一位
 # （多算一次快照/多走一条分支），这里翻红。
-GEOM_OFF_CHAIN_DIGEST = "4241fec403248727280c2aacc888569f03b7d3b5b50a53dc10f2fc0031479228"
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+GEOM_OFF_CHAIN_DIGEST = "949891a8bd75729c3e4cd17745c225d78a8fd9249bfba441e218e3107c8349a2"
 
 
 def _setup(name="mk01"):

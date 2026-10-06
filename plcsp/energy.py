@@ -8,19 +8,32 @@
 车间另有固定功率 P₀（照明/空压等），按 makespan 计。
 
 两处**须在论文里声明的假设**（见 spec §9 的 assumed 表）：
-1. **换型功率 = 待机功率**——原文献未单列换型功率。换型时主轴不切削但机床通电，取空载值是下界。
+1. **换型功率 = 待机功率**——原文献未单列换型功率。换型时主轴不切削但机床通电，取待机值是下界。
 2. **取档内低速值**——原文献每档给了两个转速档（如 M1–M4 为 1500/4500 rpm）对应的功率，
    我们不建模主轴转速，故取**较低值**（保守下界）。`MACHINE_TIERS` 保留了区间端点，
    敏感性分析可直接换成高端值。
+
+**待机功率用的是哪一列（2026-10-06 修）**：原文献有两列容易混——
+- `P^u`（空载/无切削功率，区间 `idle`）＝ **加工过程中**的空转功率，原文 Eq. (2) `P^u = P_idle + P_sp + P_f`；
+- **`Standby Power`**（单值 `standby`，Table 9）＝ 机床非加工时段真正停着时的功率。
+
+**本仓早先用错了列**：`idle_kw` 与 `setup_kw` 取的是 `P^u` 的低端，比待机列高
+（M1–M4 0.74 vs 0.54）。原文从未把两列等同。现已改为 `standby`。
+`idle` 区间**保留**（`reward.py` 用它做功率归一化的上界，且它仍是引证值）。
 """
 from __future__ import annotations
 
-# ── 引证常量（GFJSPT-MMRS, SWEVO 99:102181, 2025；spec §3.4 表）──
-# 机床三档（按原文献机位分组）：rpm 区间 + 切削/空载功率区间 [kW]
-MACHINE_TIERS: dict[str, dict[str, tuple[int, int] | tuple[float, float]]] = {
-    "M1_M4": {"rpm": (1500, 4500), "proc": (0.951, 1.17), "idle": (0.74, 0.90)},
-    "M5_M6": {"rpm": (2000, 6000), "proc": (0.30, 0.60), "idle": (0.24, 0.50)},
-    "M7_M10": {"rpm": (1000, 4000), "proc": (0.20, 0.56), "idle": (0.16, 0.36)},
+# ── 引证常量（GFJSPT-MMRS, SWEVO 99:102181, 2025；spec §3.4 表 + Table 9）──
+# 机床三档（按原文献机位分组）：rpm 区间 + 切削/空载功率区间 [kW] + **待机功率单值** [kW]
+# ⚠️ `idle` 是 **P^u**（加工中的空转，区间）；`standby` 是 **Table 9 的 Standby Power**（单值）。
+#    两者不是同一个量（见模块 docstring）。**计能耗用 `standby`**；`idle` 只供归一化用。
+MACHINE_TIERS: dict[str, dict[str, tuple[int, int] | tuple[float, float] | float]] = {
+    "M1_M4": {"rpm": (1500, 4500), "proc": (0.951, 1.17), "idle": (0.74, 0.90),
+              "standby": 0.54},
+    "M5_M6": {"rpm": (2000, 6000), "proc": (0.30, 0.60), "idle": (0.24, 0.50),
+              "standby": 0.08},
+    "M7_M10": {"rpm": (1000, 4000), "proc": (0.20, 0.56), "idle": (0.16, 0.36),
+               "standby": 0.08},
 }
 # 档位边界：原文献 10 台机床分组为 M1–M4 / M5–M6 / M7–M10（0-based 机位，逐字照抄）
 _PAPER_TIERS = ("M1_M4", "M1_M4", "M1_M4", "M1_M4",
@@ -64,8 +77,11 @@ def machine_params_for(idx: int, n_machines: int) -> dict[str, float | str]:
             "须先扩表或改用其他引证来源，不得静默外推。")
     tier = _tier_of(idx)
     t = MACHINE_TIERS[tier]
-    return {"tier": tier, "proc_kw": t["proc"][0], "idle_kw": t["idle"][0],
-            "setup_kw": t["idle"][0]}      # 换型功率取空载（原文献未单列）
+    # ⚠️ `idle_kw` / `setup_kw` 取 **standby**（Table 9 的 Standby Power），
+    # **不是** `idle`（那是 P^u，加工中的空转功率，见模块 docstring）。
+    standby = float(t["standby"])            # type: ignore[arg-type]
+    return {"tier": tier, "proc_kw": t["proc"][0], "idle_kw": standby,
+            "setup_kw": standby}             # 换型功率取待机（原文献未单列）
 
 
 def machine_energy_kwh(proc_min: float, idle_min: float, setup_min: float,

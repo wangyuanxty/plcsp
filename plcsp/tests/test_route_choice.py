@@ -37,7 +37,9 @@ from plcsp.nn.features import F_MAX, SEG_SLICE
 # `403f68e3ba380857e14a94ada025d667a2cc7e0790abef755ca2845f371c31b0` 钉的是带缺陷的链路
 # ——`_act` 把 L 的**车号**当序列位置，L 头读 M 段机台 token、对车辆特征完全失明；修复后
 # L 的分数与采样动作都变，摘要必须换新基准。路线头关态本身的"逐位稳定"仍由本测试守着。
-GOLDEN_CHAIN_DIGEST = "e67a71292fe33c16e64cdcfdc6a6e8104cd06c546a3c4377ca1b9eb9dab55f79"
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
+GOLDEN_CHAIN_DIGEST = "ad094c9de73542217d6085eba6b54b6bd126fc71ec5a9396548352650e266d57"
 
 
 def _setup(name="mk01"):

@@ -39,10 +39,12 @@ from plcsp.env.transport import TransportCaliber
 # ── 1. 默认配置逐位不变：黄金摘要（**改造前**在 MK01/MK07 上捕获，本机 CPU 配置） ──
 # 摘要口径 = `rollout(..., seed_chain=1)` 的 (makespan, energy, deliveries, trips,
 # travel_time_total, moves, tasks_get) + `dbg`。任何默认路径的行为改动都会翻红。
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
 GOLDEN = {
-    ("mk01", 3): "f293ff28f6bb0f1ac1603a185f7c46b49afeb619c2309a62216ca6211c455a0d",
-    ("mk01", 1): "b7dc6081e5ec06f5337af7a01b3ed775773bc09e96c02d44160ef659c8600043",
-    ("mk07", 3): "89d472f8cc659a6ccdcae888a9cfe9b95413e226cda169666c9ef08198c08832",
+    ("mk01", 3): "2473099163daaa9f2a8daed2b352dfa3a5de6ec06f06c2bd1e5d40f780d200c0",
+    ("mk01", 1): "4ca750b991d421c94a78e2c40a1783a9d941caabb2f51af714440e69283f9075",
+    ("mk07", 3): "f637fa42b06b60ab70a180eab512fdeb74fa0b7825ab63f595a5a587496d0588",
 }
 
 

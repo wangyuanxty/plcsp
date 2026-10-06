@@ -79,7 +79,7 @@ from .env.constraints import ABLATION_GROUPS, ConstraintConfig
 from .env.des import (CHARGE_CAND_SKIP, PM_CAND_NOW, SimConfig, compute_due_dates,
                       rollout, weighted_tardiness)
 from .env.instances import load_mk
-from .env.reward import ReferenceObjectives, reward_weights
+from .env.reward import ReferenceObjectives, _incomplete_objectives, reward_weights
 from .env.t3_budget import (BUDGET_RATIO, T3_CONSTRAINTS, T3_ETA, T3Budget,
                             T3Lagrangian, action_usage, check_influenceable)
 from .nn.encoder import LayoutEncoder
@@ -211,9 +211,20 @@ def _make_eval_fn(inst, lay, dm, cfg, ctx, seeds: int, rule: float,
                                   route_k=route_k, route_zones=route_zones,
                                   geom_bias=geom_bias, pm_head=pm_head,
                                   charge_head=charge_head, batch_head=batch_head)
-            ms.append(float(met["makespan"]))
-            eng.append(float(met["energy"]))
-            twt.append(float(weighted_tardiness(met["completes"], due, eq_w)))
+            # 🔴 **完成度守卫**（2026-10-06，与 `reward.objective_vector` 同一套）：
+            # 未跑完的 episode 三项全都会"看起来更好"（makespan 是部分完工的最大值、
+            # energy 按更小的 makespan 计、TWT 只算已完工的作业甚至为 0）
+            # ⟹ **报实测值就是在 `metrics.ndjson` 里写假改进**，而论文表格正是从这里建的。
+            # 跑完的路径**逐位不变**。
+            if met["horizon_hit"]:
+                _ms, _eng, _twt = _incomplete_objectives(met)
+                ms.append(_ms)
+                eng.append(_eng)
+                twt.append(_twt)
+            else:
+                ms.append(float(met["makespan"]))
+                eng.append(float(met["energy"]))
+                twt.append(float(weighted_tardiness(met["completes"], due, eq_w)))
             # ⚠️ 完成度必须一起报：未跑完的 episode 的 makespan 是**部分完工的最大值**
             #（`max(completes)`），单看它会读出"小得多的 makespan"这种假改进。
             jobs.append(int(met["jobs_done"]))

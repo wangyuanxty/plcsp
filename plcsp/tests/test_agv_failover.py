@@ -31,11 +31,13 @@ from plcsp.nn.encoder import LayoutEncoder
 # 故障高频验证档：MTBF 12 min ≪ episode，MTTR 5 min——桩桩故障都落在 episode 内。
 HOT = dict(agv_mtbf=12.0, agv_mttr=5.0)
 # 改造前捕获的四个摘要（bound/fifo × 默认/高频，failover 关）。
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
 DIGESTS = {
-    ("bound", "default"): "13ee863c4613d04d09e3ecf6279b905a5790c6c73f9754ae13ac5188e2cfe173",
-    ("fifo", "default"): "a81624e78a97204cfaee358f87fda46cced09063b6077ed3327fb2c2163cea5a",
-    ("bound", "hot"): "75b53d6dfce879d96b2ae76cefc53830c676d209058ef1a08520d2007ff90d3d",
-    ("fifo", "hot"): "6bc462ed46562c847a027ba0694d37dde5c6ea522ee7ed73c223968a0b6a8f7f",
+    ("bound", "default"): "9e945df7c1db3abc24ef7f70ae811cb9d5d4f4e12c848dc28d2cb4c4483e0136",
+    ("fifo", "default"): "39d774ce3ec6b47136d105be804af0a4452573b2167168e1ccacf193ab474a85",
+    ("bound", "hot"): "e5c9b41ef3f8f0533f50fadd6b165eceeccdc3f9f31f8f63f7f7cffc372da359",
+    ("fifo", "hot"): "0d0723e2363a2dc49dda1acd0ab46a3f03753dd235e4228287d15bb02850fe47",
 }
 
 

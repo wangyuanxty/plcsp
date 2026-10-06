@@ -31,10 +31,12 @@ from plcsp.nn.encoder import LayoutEncoder
 
 # 改造前捕获的三条摘要（failover 与全部既有开关默认关；高故障配置把布局机台的 fail_rate
 # 抬到 0.05/min，让故障真的发生）。
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
 DIGESTS = {
-    "default": "55eb330943239131db49dbad0e3421c4793416f2b8009a1f2b292bf9d906e5a8",
-    "pm20": "09ac96816cc81aef079426e1a74eaecc0a2caa0b129c7c0778ec83e2a3cf2f8a",
-    "hotfail": "db5471061a75db646bf4715dfb5884b25492b1ec68d20f492a51807f494e7764",
+    "default": "69528db4a63bdc84b6f02e611bcf2a6f7b09f720c1876a93b6898199caa09406",
+    "pm20": "0b4a8cb1dd30ecd261148fdb8a6d8a0ebd3d96e510e23c305cbeba317991de59",
+    "hotfail": "6b1e985ead6a21e256156239efbbd364d4b83a02e8b3d05171be80b6001b8886",
 }
 
 

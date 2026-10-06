@@ -29,14 +29,14 @@ def test_agv_energy_is_kwh_not_kw_times_min():
 @pytest.mark.unit
 def test_machine_energy_uses_three_states():
     """机床三态各自贡献：待机/加工/换型 功率不同，缺一不可。"""
-    p = {"idle_kw": 0.74, "proc_kw": 0.951, "setup_kw": 0.74}     # GFJSPT-MMRS M1–M4 低速档
+    p = {"idle_kw": 0.54, "proc_kw": 0.951, "setup_kw": 0.54}     # GFJSPT-MMRS M1–M4 **Standby**
     only_idle = machine_energy_kwh(0.0, 60.0, 0.0, **p)
     only_proc = machine_energy_kwh(60.0, 0.0, 0.0, **p)
     only_setup = machine_energy_kwh(0.0, 0.0, 60.0, **p)
-    assert only_idle == pytest.approx(0.74, rel=1e-9)
+    assert only_idle == pytest.approx(0.54, rel=1e-9)
     assert only_proc == pytest.approx(0.951, rel=1e-9)
-    assert only_setup == pytest.approx(0.74, rel=1e-9)
-    assert only_proc > only_idle, "加工功率应高于空载"
+    assert only_setup == pytest.approx(0.54, rel=1e-9)
+    assert only_proc > only_idle, "加工功率应高于待机"
 
 
 @pytest.mark.unit
@@ -49,6 +49,10 @@ def test_machine_tier_table_matches_cited_source():
     assert MACHINE_TIERS["M5_M6"]["idle"] == (0.24, 0.50)
     assert MACHINE_TIERS["M7_M10"]["proc"] == (0.20, 0.56)
     assert MACHINE_TIERS["M7_M10"]["idle"] == (0.16, 0.36)
+    # **待机列**（Table 9 的 Standby Power，单值）——计能耗用的是它，不是上面的 `idle`
+    assert MACHINE_TIERS["M1_M4"]["standby"] == 0.54
+    assert MACHINE_TIERS["M5_M6"]["standby"] == 0.08
+    assert MACHINE_TIERS["M7_M10"]["standby"] == 0.08
 
 
 @pytest.mark.unit
@@ -61,7 +65,13 @@ def test_machine_params_follow_paper_machine_grouping():
     assert machine_params_for(6, 10)["tier"] == "M7_M10"
     # 取档内**低速**值（保守下界），不是均值
     assert machine_params_for(0, 10)["proc_kw"] == 0.951
-    assert machine_params_for(6, 10)["idle_kw"] == 0.16
+    # 🔴 待机口径回归守卫（2026-10-06）：计能耗取 **standby**（Table 9），**不是** `idle[0]`（P^u）
+    from plcsp.energy import MACHINE_TIERS
+    assert machine_params_for(6, 10)["idle_kw"] == 0.08
+    assert machine_params_for(0, 10)["idle_kw"] == 0.54
+    assert machine_params_for(0, 10)["idle_kw"] != MACHINE_TIERS["M1_M4"]["idle"][0]
+    # 换型功率与待机同源（assumed 1）
+    assert machine_params_for(0, 10)["setup_kw"] == machine_params_for(0, 10)["idle_kw"]
 
 
 @pytest.mark.unit
@@ -134,7 +144,7 @@ def test_machine_breakdown_sums_to_total_bit_exact():
     """三态分项之和必须**逐位**等于 `machine_energy_kwh`（防"加了分项、总量漂了"）。"""
     from plcsp.energy import machine_energy_breakdown_kwh
 
-    p = {"idle_kw": 0.74, "proc_kw": 0.951, "setup_kw": 0.74}     # GFJSPT-MMRS M1–M4 低速档
+    p = {"idle_kw": 0.54, "proc_kw": 0.951, "setup_kw": 0.54}     # GFJSPT-MMRS M1–M4 **Standby**
     args = (12.5, 30.25, 3.75)
     bd = machine_energy_breakdown_kwh(*args, **p)
     assert set(bd) == {"proc", "idle", "setup"}
@@ -155,15 +165,20 @@ def test_agv_breakdown_sums_to_total_bit_exact():
 def test_metrics_energy_bit_identical_after_breakdown_export():
     """🔴 硬约束：分项导出**不得**动 `met["energy"]`（它是奖励的一项，动一位则读数全废）。
 
-    黄金值 = 本次导出**之前**（2026-10-06）用同一命令在本机捕获：
+    黄金值 = 2026-10-06 分项导出落地时，用同一命令在本机捕获：
     `rollout(mk01, seed_chain=1, cfg=SimConfig())["energy"]`。判据用 `==`（**不是**
     `approx`）：approx 会放过 1e-12 级漂移，而本约束要的正是"一位都没动"。
+
+    ⚠️ **2026-10-06 第二次捕获**：机床待机功率由 **P^u**（0.74/0.24/0.16）改为
+    **Table 9 的 Standby Power**（0.54/0.08/0.08）——**这是模型修正，不是漂移**，
+    故黄金值由 8.22896039621886 改为 6.704665464604725。
+    自本次起，"逐位不变"约束重新生效。
     """
     from plcsp.env.des import SimConfig, rollout
     from plcsp.env.instances import load_mk
 
     r = rollout(load_mk("mk01"), seed_chain=1, cfg=SimConfig())
-    assert r["energy"] == 8.22896039621886          # ← 改前捕获（逐位）
+    assert r["energy"] == 6.704665464604725         # ← 待机口径修正后捕获（逐位）
     bd = r["energy_breakdown"]
     assert r["energy"] == bd["total_kwh"]           # 同一次计算，逐位
     # 新键齐 + 非负

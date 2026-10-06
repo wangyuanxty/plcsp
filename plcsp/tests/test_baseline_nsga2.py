@@ -163,3 +163,47 @@ def test_eval_spec_carries_the_cfg_switches():
                   machine_age_failure=True).cfg()
     assert c1.multi_drop is True and c1.agv_failover is True
     assert c1.machine_age_failure is True and c1.n_agv == 3
+
+
+# ── 动力学同源守卫（2026-10-06）—— 跑基线前必须过的那道闸 ──
+
+@pytest.mark.unit
+def test_from_cfg_copies_the_dynamics_switches():
+    """`from_cfg` 必须把三个**动力学**开关与车队/口径一并复制。
+
+    它们与约束档不是一个轴（tier 选 `REPORT_TIERS`，这三个来自 m13 的 CLI），
+    所以**不能靠 tier 推断**——只能复制。复制漏一个就是"两个问题各跑各的"。
+    """
+    from plcsp.baselines.nsga2 import EvalSpec
+    from plcsp.env.des import SimConfig
+
+    cfg = SimConfig(n_agv=6, multi_drop=True, agv_failover=True,
+                    machine_age_failure=True, transport_unmapped="matrix")
+    spec = EvalSpec.from_cfg(cfg, tier="B-Full")
+    assert spec.multi_drop is True and spec.agv_failover is True
+    assert spec.machine_age_failure is True
+    assert spec.n_agv == 6 and spec.transport_unmapped == "matrix"
+    assert spec.tier == "B-Full"                      # overrides 不覆盖复制来的字段
+    # 复制出来的 spec 与该 cfg 自洽
+    spec.check_same_dynamics(cfg)
+
+
+@pytest.mark.unit
+def test_check_same_dynamics_raises_on_mismatch():
+    """🔴 守卫必须**报错**，不得静默——静默正是它要修的那个 bug。
+
+    默认 `EvalSpec()` 三个开关全 False；拿它去比一份 `multi_drop=True` 的 DRL cfg
+    就是两个问题。守卫要逐字段点名差异。
+    """
+    from plcsp.baselines.nsga2 import EvalSpec
+    from plcsp.env.des import SimConfig
+
+    drl = SimConfig(n_agv=3, multi_drop=True, agv_failover=True,
+                    machine_age_failure=True)
+    with pytest.raises(ValueError, match="动力学口径不一致"):
+        EvalSpec(tier="B-Full").check_same_dynamics(drl)      # 默认全 False ⟹ 三处都不符
+    with pytest.raises(ValueError, match="multi_drop"):
+        EvalSpec(tier="B-Full", multi_drop=False, agv_failover=True,
+                 machine_age_failure=True).check_same_dynamics(drl)   # 只差一个也要报
+    # 全同则通过（不抛）
+    EvalSpec.from_cfg(drl, tier="B-Full").check_same_dynamics(drl)

@@ -48,9 +48,11 @@ from plcsp.nn.features import F_MAX, SEG_SLICE
 # 规则配置（`multi_drop=True` + `batch_head=False`）是**新路径**（改造前不存在），故这两条
 # 摘要捕获自本批实现之后；它们的用途是钉住"以后动 ⑩ 不得悄悄改规则配置"。
 #   kinds={'S':55,'L':65} n=120（mk01）｜{'S':115,'L':105} n=220（mk07）
+# ⚠️ 2026-10-06 重捕：机床待机功率由 P^u 改为 Table 9 的 Standby Power（见 energy.py 模块 docstring）。
+# 已实证决策 / makespan / travel / deliveries 逐位不变，只有 met[energy] 变。
 BATCH_OFF_DIGEST = {
-    "mk01": "0b19b14874a80eb26e621c36bda51a100a76b82ae22f86e68207c94e9c35004f",
-    "mk07": "dc4a2e71e8eb9540fc8144861a3cace62551bca3221ff4bddf9b75c742f09e9c",
+    "mk01": "da11e92e3c1fae1c043985e7420d1a070f655304a3e15031358b6475e2553425",
+    "mk07": "8b80b0bdf58a086dc58a7259a0dc12cf65a7b5aab7addf6aab0c240345031827",
 }
 
 

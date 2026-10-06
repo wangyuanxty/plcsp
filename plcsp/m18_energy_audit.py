@@ -67,20 +67,26 @@ from .m17_reeval import (COMPLETE_MIN_LINES, DEFAULT_EVAL_SEEDS, build_env, coun
 COMPONENTS = ("machine_proc", "machine_idle", "machine_setup",
               "agv_idle", "agv_empty", "agv_loaded", "shop")
 
-# ⚠️ **反事实口径**（诊断用，**不是**本仓模型）：把机床"待机"功率从现用的**空载功率**
-# （GFJSPT-MMRS 的 P^u：M1–M4 0.74 / M5–M6 0.24 / M7–M10 0.16 kW）换成该文 **Table 9 的
-# Standby Power**（M1–M4 0.54 / M5–M6 0.08 / M7–M10 0.08 kW）。原文里 P^u 是**加工中**的
-# 空转功率（P^u = P_idle + P_sp + P_f，见原文 Fig.1/Fig.2 与 §5.6 的换算），
-# 与 E_idle（Eq.7–8）用的 P_idle **不是同一个量**。本表只用于量化"参数换成待机值会怎样"，
-# **不改 `energy.py` 的任何冻结值**（`met["energy"]` 逐位不变由测试钉死）。
+# ✅ **已落地为模型**（2026-10-06）：机床"待机"功率原取 **P^u**（加工中的空转功率，
+# M1–M4 0.74 / M5–M6 0.24 / M7–M10 0.16 kW），**已改为 Table 9 的 Standby Power**
+# （0.54 / 0.08 / 0.08 kW）。原文里两列不是同一个量：P^u = P_idle + P_sp + P_f（Eq. 2），
+# 而 E_idle（Eq. 7–8）用的是 P_idle。见 `energy.py` 模块 docstring。
+#
+# 下面这张表与 `_corrected_total` **保留为交叉校验**：它按 tier 从
+# `machine_states_min` 独立重算一遍待机+换型项。**现在它应当恒等于 `met["energy"]`**；
+# 若哪天不等，说明 `energy.py` 的常量被改回去了，或两处口径脱钩。
+# （原文出处：Table 9 印刷页 21；Eq. 7 定义在 §4.1 印刷页 4–5；AGV/车间功率在 §7.3 印刷页 22–23。）
 CORRECTED_STANDBY_KW = {"M1_M4": 0.54, "M5_M6": 0.08, "M7_M10": 0.08}
 
 
 def _corrected_total(met: dict) -> float:
-    """反事实总能耗：只换机床待机功率（用 `machine_states_min` 重算），其余项不动。
+    """**交叉校验**总能耗：按 tier 从 `machine_states_min` 独立重算待机+换型项，其余项不动。
+
+    2026-10-06 起待机列已是模型本身 ⟹ 本函数**应当恒等于 `met["energy"]`**。
+    它是防回归的：若 `energy.py` 的常量被改回 P^u，或两处口径脱钩，这里会先露馅。
 
     ⚠️ **换型功率跟着换**：本仓假设"换型功率 = 待机功率"（`energy.py` 的 assumed 1）⟹
-    待机值一变，换型项也按同一比例变，否则反事实内部不自洽。
+    两处必须同源。
     """
     bd = met["energy_breakdown"]
     mins = bd["machine_states_min"]
