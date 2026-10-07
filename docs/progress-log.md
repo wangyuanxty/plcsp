@@ -6660,3 +6660,137 @@ BEFORE 探针 7/7 命中 pin；用 AFTER 读数、只把 `agv_fail_events` 换�
 - SEMI E10 的 MTBF/MOBF 定义（$380 付费）
 - 按工时的 PM 间隔表（只找到日历制）
 - **SSRN 10.2139/ssrn.5912353**（"Revisiting AGV scheduling with battery constraints"，Unpaywall 标 green OA）—— **最值得继续追的一条，未取**
+
+---
+
+## 六十六、⭐ JobShopLab 独立试跑：**跑通了，但不该换**（2026-10-07）
+
+**触发**：用户提议「装 JobShopLab，旧的不删，切过去，去掉充电和维护，找其他创新点」。
+理由：「用他们工业级框架比我们自己维护一套省事多了」。
+
+**做法**：**独立 venv 试跑，不碰门禁解释器、不改项目既有文件。**
+
+### 66.1 位置与隔离（用户裁定两次，最终落项目根目录）
+
+| | 位置 | 大小 |
+|---|---|---|
+| 克隆 | **`<repo>/jobshoplab/`** | **35 MB** |
+| venv | **`<repo>/jobshoplab-venv/`** | **857 MB**（torch 502 / pandas 60 / plotly 52 / dash 39 / numpy 31）|
+
+**`.gitignore` 补 `/jobshoplab/` 与 `/jobshoplab-venv/`（前导 `/` 锚到根）**，`git check-ignore` 验证生效。
+
+**🔴 隔离是必须的**：JobShopLab 依赖 **`numpy>2.3.0`**，装出来是 **2.5.3**；而门禁解释器是
+**1.26.4**、`torch 2.14.0+cpu`。**装到门禁上全仓报废。** 试跑全程逐次核验，门禁未变。
+
+**torch 是 CPU 版**（`2.14.1+cpu`）——Windows 上 PyPI 默认发 CPU wheel；CUDA 版要走另一个索引。
+
+### 66.2 跑通了
+
+| | |
+|---|---|
+| 单元测试 | **222 passed, 10 skipped**（7.1 s）|
+| 集成 + e2e | **27 passed, 1 skipped**（70.7 s）|
+| ft06 随机策略 | 62 步，makespan 68，下界 52 |
+| **3×3 全特性** | 21 步，makespan 62，下界 10；**3/3 机器进 Setup、3/3 机器 Outage、3/3 运输车 Outage** |
+
+**Windows 无编译失败**（全部预编译 wheel）。
+
+**⚠️ 一个设计缺陷**：`import jobshoplab` **强制拉入整个 dash 网页栈**
+（`__init__` → `env.env` → `rendering` → `gant_dashboard` → dash/dash_daq/dash_ag_grid/pandas/plotly）。
+**不装仪表盘也得装 Dash + Flask + plotly + pandas（约 150 MB）。无法只装核心仿真器。**
+
+### 66.3 动作空间：`Discrete(2)` —— **⚠️ 我读错过一次，此处记正确的**
+
+```python
+action_space = spaces.Discrete(2, start=0)      # env/factories/actions.py:126
+```
+
+**0 = 空操作，1 = 接受 `possible_transitions[0]`。**
+
+**空操作的语义是砍表头**（`state_machine/middleware/middleware.py:367`，逐字已核）：
+
+```python
+# Remove the first possible transition (simulates skipping it)
+possible_transitions=state.possible_transitions[1:],
+```
+
+**❌ 我第一遍读成"agent 没有选择能力、六个头一个都挂不上"。错。**
+**反复空操作可让任意候选浮到 index 0 再接受 ⟹ 选择是**可表达的**，只是表达成"一串二元步"。**
+**（同一个错 agent 也犯了，我没核就转述 —— 与 §59 同型的毛病。）**
+
+**⟹ 真实代价不是"挂不上"，是"决策粒度变了"：一次多选一 → k+1 次二选一。
+（ft06：36 工序 → 62 步；3×3：9 工序 → 21 步。）**
+
+**⚠️ 而一个真问题是**候选池返回前未排序**（`possible_transition_utils.py:315` 留着
+`return transitions  # ? NEED TO SORT`）⟹ 策略得学一个**没有意义的次序**，浪费且脆。**
+
+### 66.4 约束覆盖（**代码级**核对，不信 README）
+
+| 我们的约束 | JobShopLab | 证据 |
+|---|---|---|
+| **C2 有限缓冲** | ✅ | `buffer_type_utils.py:90`；默认无界（`mapper.py:303` `sys.maxsize`）|
+| **C3 机障** | ✅ | `handler.py:527,531` |
+| **C7 车障** | ✅ | `manipulate.py:90`、`handler.py:983` |
+| **C5 换型** | ✅ | `manipulate.py:306`（刀具对→时长）|
+| **C1 拥堵** | ❌ **无路网/区段/坐标** | 无最短路、无邻接表；AGV 之间**无空间互斥** |
+| **C4 返工** | ❌ | 全仓无 |
+| **C6 交期/拖期** | ❌ | 全仓 `due_date\|tardiness\|deadline` **零命中** |
+| **C8 异构车队** | ❌ | `mapper.py:1075-1079` 非 `"agv"` 直接抛错；`mapper.py:1085` 造**相同**副本 |
+| **C9 充电** | ⚠️ 只有定时 RECHARGE outage | `TransportState` **无电量字段**；全仓无 `soc/battery/charge_level` |
+| **C10 保养** | ⚠️ 按时间触发，非按状态 | `outage_utils.py:45-52` |
+| **能耗** | ❌ **定义了但从未实例化** | `grep -rn "ConsumptionConfig(" --include=*.py .` → **零命中**；`mapper.py` 各构造点传空元组 |
+| **批次** | ❌ | `MachineConfig.batches` 硬编码 1（`mapper.py:222`）且状态机**从不读** |
+
+**⟹ 十条里支持 **4 条**。README 声称的多目标（能耗/利用率/交期）代码里只有 makespan 一个 reward
+（`env/factories/rewards.py` 只有 `DummyRewardFactory` 与 `BinaryActionJsspReward`）。**
+
+### 66.5 实例格式（**"arbitrary transport times"已核实**）
+
+**README 写的路径 `data/instances/jssptransport/*.yaml` **不存在**；真实路径是
+`data/jssp_instances/transport/`（168 个 spec_files + 45 个 transport 变体 + 7 个 DSL 实例）。**
+
+```yaml
+logistics:
+  type: "agv"
+  amount: 3
+  specification: |
+    m-0|m-1|m-2|in-buf|out-buf
+    m-0|0 2 5 2 7
+    m-1|2 0 8 3 6
+    ...
+```
+
+**⟹ **就是一个 (M+2)×(M+2) 的有向整数矩阵，含 `in-buf`/`out-buf`。无坐标、无布局、无距离、无路径。**
+O(1) 字典查表（`state.py:398`）。非对称（实测 `m-0→m-1 = 4`，`m-1→m-0 = 3`）。
+**学术实例默认**全 0**（`mapper.py:302-309`）⟹ 经典 JSSP 模式下运输是退化的。**
+
+### 66.6 代码质量：**一半像框架，一半像原型**
+
+**像框架**：249 测试三层分层 · 27 篇 RST · frozen dataclass 不可变 · 18.5k LOC 只 13 处 TODO · 有 CASE 2025 论文可引。
+
+**像原型**：`env/env_wrapper.py` **0 字节** · `get_possible_transitions` 是死代码且有一处缺参调用 ·
+`state_transitions_rendering.py:69` 导入**不存在**的模块 · `trunction_active` 拼写错 ·
+`actions.py:192` 首行 `raise NotImplementedError` 使其后实现**不可达** ·
+**README 路径过时、step 返回顺序写反、多目标虚报** · **上游最后提交 2026-04-28，已 5 个多月无活动**。
+
+### 66.7 ⭐ 结论：**当参考实现与基线来源，不当宿主环境**
+
+**真正的阻塞不是动作层（那条可重写），是这两条硬的：**
+
+| | |
+|---|---|
+| **① 观察空间无几何** | 8 个 Box、纯 per-machine/per-job 标量；**无机位、无坐标、无图、无边** ⟹ **R2 区段 token、距离偏置、R 头全部没有着落**，贡献 2 失去对象 |
+| **② 约束只支持 4/10** | ⟹ **"十条约束"这条主线要砍掉一半以上**，§2 覆盖表与贡献 2 要重写 |
+
+**agent 原话（我认同）**：
+> "这个框架解决的问题是'给定一个已经排好的候选，接受还是跳过'。作者的六头联合链要解决的是
+> '在六个维度上同时选'。两者不在一个层面上。"
+
+**建议**：引它（§2 相关工作 + 它那句批评 *"Many RL-based approaches abstract real-world challenges
+to maintain comparability with traditional methods"*）+ **借鉴它的实例 DSL 与 PDR 基线数字**。
+
+### 66.8 顺带
+
+- **`third_party/jobshoplab` 在 2026-09-30 就存在一份克隆**，与上游 HEAD (`764af47`) 一致。
+  **来源不明**（不是本批放的）。**若为遗留可清理以免混淆。**
+- 试跑完成后可删 `jobshoplab-venv/` 回收 **857 MB**。

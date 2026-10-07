@@ -3,6 +3,11 @@ third_party/
 references/
 checkpoints/
 
+# ── JobShopLab 试跑（第三方框架 + 它的 venv；用户要求落项目**根目录**）──
+# 前导 `/` 锚到仓库根，不会误伤同名子目录。见 progress-log §66。
+/jobshoplab/
+/jobshoplab-venv/
+
 # ── 生成物 ──
 plcsp/figs/
 __pycache__/
