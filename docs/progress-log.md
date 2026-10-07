@@ -6794,3 +6794,156 @@ to maintain comparability with traditional methods"*）+ **借鉴它的实例 DS
 - **`third_party/jobshoplab` 在 2026-09-30 就存在一份克隆**，与上游 HEAD (`764af47`) 一致。
   **来源不明**（不是本批放的）。**若为遗留可清理以免混淆。**
 - 试跑完成后可删 `jobshoplab-venv/` 回收 **857 MB**。
+
+## 六十七、⭐ RHH 创新点四轮调研：**几乎全部被证伪，只剩一处**（2026-10-07）
+
+**触发**：用户问 "RL hyper-heuristics 还有改进空间吗" → 逐层追问到 "元决策 / 分层 RL 真的不行吗"。
+**方法**：四个 agent 串并行，逐轴证伪。**本节是登记，不是结论** —— 多数判定受访问限制（见 67.8）。
+
+### 67.1 术语裁定（**含我自己的三处更正**）
+
+| 词 | 裁定 | 出处 |
+|---|---|---|
+| **selection hyper-heuristic** | ✅ 标准 | Drake, Kheiri, Özcan, Burke. *EJOR* **285**(2):405–428, 2020. DOI 10.1016/j.ejor.2019.07.073 |
+| **heuristic generation**（**不是** "generation hyper-heuristic"） | ✅ 规范术语 | Burke et al. *JORS* **64**(12):1695–1724, 2013. DOI 10.1057/jors.2013.71 —— **全文检索 `generation hyper` = 0 命中**；`heuristic generation` = 16 |
+| **domain barrier** 提出者 = **Cowling** | ⚠️ **不是 Burke** | Cowling, Kendall & Soubeiga. PATAT 2000, LNCS **2079**:176–190. DOI 10.1007/3-540-44629-X_11。Swan et al. 2018 明说。**多处二手文献误归给 Burke 2003** |
+| **"language hyper-heuristic"** | ❌ **不是成熟术语** | S2：单数 **0**、复数 **1**（只有 ReEvo 自己，Definition 3.2）。**且 BEAM 2026 把同一缩写 LHH 展开成 "Large Language Model-based Hyper Heuristic"** —— 冲突 |
+| **Q-learning-based hyper-heuristic** | ✅ 该领域**主用词** | S2 命中 **64** 篇 |
+| **adaptive operator selection (AOS)** | ✅ 社区词 | S2 命中 **28** 篇 |
+| **"hierarchical reinforcement learning"** | ⚠️ **该领域极罕用，且多为宽松用法** | S2 同含 HRL + hyper-heuristic = **1 篇** |
+| `meta-decision` / `metaheuristic` / `meta-learning` | ❌ **禁用** | 前者**无主词**（13 条 arXiv，五簇互不引用，无权威定义）；后两者含义不同 |
+
+**🔴 我的三处错误（写在此处防复发）**：
+
+1. 我说「生成超启发式」= `generation hyper-heuristic` → **规范综述里不存在此复合词**，正确是 **heuristic generation**。
+2. 我把 domain barrier 归给 Burke et al. 2013/2020 → **错，是 Cowling et al. 2000**。
+3. 我说 LLM 那支叫 "Language Hyper-Heuristics" → **只有 ReEvo 一个来源，且与 BEAM 的 LHH 展开冲突**。
+
+### 67.2 13 条方法轴 —— **11 条被证伪**
+
+| 轴 | 判定 | 关键反例 |
+|---|---|---|
+| A 长时程信用分配 | **REFUTED** | Mischek & Musliu, IJCAI 2022, pp. 4793–4799（按 γ^(T−t)·r_T 摊到启发式链） |
+| B 跨实例泛化 | **REFUTED** | CHeSC 2011 协议**自带两个隐藏域** |
+| C 学习接受准则 | **REFUTED** | Choong, Wong & Lim. *Information Sciences* **436-437**:89–107, 2018 |
+| D 多目标 RL HH | **REFUTED（饱和）** | **一年内三篇专门综述** |
+| E 动态/在线 | **REFUTED（饱和）** | S2 计数 **170**，最大前沿 |
+| F 约束处理（低层） | **REFUTED** | hypDE；Zheng, CEC 2014；Ortiz-Bayliss et al. 2016 |
+| G 理论/运行时间分析 | **REFUTED（成建制的线）** | Alanazi & Lehre, EvoCOP 2016, LNCS **9595**:170–185（**负面结果**）→ *Artificial Intelligence* **314**:103804, 2023 → Oliveto, Wang, Wu, Xu, **PPSN 2026**, DOI 10.1007/978-3-032-36214-8_8 |
+| H 样本效率 | **REFUTED** | 离线学习线：*Evol. Comput.* **29**(2):187–210, 2021 |
+| I RL 做生成 | **REFUTED** | 见 67.4 |
+| J 基准 | HyFlex 仍是标准（**2011 年的比赛**）；可复现性 **COULD-NOT-DETERMINE** | |
+| K 耦合精确求解器 | **REFUTED（近 50 年）** | Rice 1976；Gagliolo & Schmidhuber. *AMAI* **47**:295–328, 2007 |
+| **L 非 anytime / 输出不可比** | ⚠️ **OPEN（MEDIUM）** | **但判定主要基于 arXiv —— 而该领域 arXiv 只占约 5%**（见 67.8） |
+| **M 单策略多决策点** | ⚠️ **OPEN（仅名义）** | 框架外已大量发表（`multi-action RL scheduling` 命中 **314**） |
+
+**agent 2 原话**：「我上一份把它称为'唯一可达且开放的格子'，这个措辞低估了已有工作。」
+
+### 67.3 领域**明说**的开放前沿（S2 bulk 2020–2026，HH 题名计数）
+
+| 前沿 | 计数 | 判定 |
+|---|---|---|
+| 动态/在线 | **170** | 饱和 |
+| 多目标 | 90 | **饱和** |
+| 生成 | 69 | 拥挤（GP/LLM） |
+| 跨域泛化 | 51 | 活跃，旗舰是 2011 年比赛 |
+| **约束处理（高层）** | **39** | ⭐ **综述原文说 open** |
+| 移动接受 | 30 | 理论侧饱和、学习侧**两 agent 冲突**（见 67.5） |
+| **理论/运行时间** | **4** | 开放、极小、一个课题组垄断 |
+| 样本效率/离线 RL | 14 | 太薄 |
+
+**权威原文** —— Juárez, Terashima-Marín, Coello Coello. *Artificial Intelligence Review* **59**(2):80, 2026. DOI 10.1007/s10462-025-11486-2, §5.1.6：
+
+> *"little progress has been made in addressing **constraint handling at the HH level**. This includes both **informing the HH of constraint violations** at the problem-domain level and **handling heuristics selection or generation based on the constraints being violated**."*
+>
+> *"constraint handling specifically tailored to MOHHs remains largely an **open research direction**."*
+
+### 67.4 ⭐ 四条**独立**证据指向同一件事：**学"选"买不到多少**
+
+| # | 证据 | 读数 |
+|---|---|---|
+| 1 | Lassoued, Gobachew, Lier, Schwung. arXiv:**2601.11189**, 2026（JSSP，PPO 选 7 条派工规则） | 平均 makespan 2860 vs **最好单规则 2908 = −1.6%**；ta01 上 1454 vs TSGA **1282（明显更差）**；**每尺寸组只报 10 个实例中的 1 个** |
+| 2 | Sobotka, Kletzander, Musliu, Rudová. arXiv:**2509.02782**, 2025 | **无偏随机选择器**打赢 SOTA。原文：*"the control over what LLHs we select is comparably, if not more, important"* |
+| 3 | Swan, De Causmaecker, Martin, Özcan. *A Re-characterization of Hyper-Heuristics.* ORCSIS **62**:75–89, 2018（全文） | *"there are **no applications** of selective hyper-heuristic for which the use of only 'knowledge poor' low-level heuristics is competitive with the state-of-the-art"*；*"devising and using selective hyper-heuristics is currently **no less labour-intensive** than simply using some generic metaheuristic framework"* |
+| 4 | 结构性论证 | 选择的上界 = 候选集自己能到的上界 |
+
+**⟹ 杠杆在启发式集合与问题本身，不在选择器。**
+
+### 67.5 领域**最一致**的一句话 + 移动接受的**冲突**
+
+**四篇综述各自独立说同一件事**（Juárez 2026 §5.1.3；Ghanbarzadeh et al. *AI Review* **59**(5):131, 2026, §4.19；Gonidakis et al. *Electronics* **15**(17):3991, 2026, §6.4；Drake et al. 2020 §9）：
+
+> **"Generality is claimed but not measured."**
+
+Ghanbarzadeh 的 **236 篇**频次分析：**计算代价 67.8%** · 可扩展性 33.5% · **泛化失败 26.3%** · **仅 15.7% 用工业数据** · **统计稳健性不足 11.9%** · **无理论基础 8.9%**。
+
+**⚠️ 两个 agent 在"学习接受准则"上直接冲突**：
+
+- agent 2：**REFUTED**（Choong et al. 2018，有具体引文）
+- agent 1：**"RL 从不学接受准则"** —— 但它自己标了 `MY INFERENCE`
+
+**⟹ 采信 agent 2。写进稿子前必须复核。**
+
+### 67.6 ⭐ 唯一**存活**的空格：持久隐变量 / regime 头
+
+**agent 4 原话**：**"该族结构在该文献中不存在。"**
+
+查过的 8 个检索串（S2，标题+摘要）**全 0 或全无关**：
+
+`"latent variable"+"heuristic selection"`=1（无关）· `"mode-conditioned" policy scheduling`=**0** · `"mode"+"operator selection"+"bandit"`=**0** · `"hidden mode"+RL+scheduling`=1（无关）· `"regime"+"operator selection"`=4（全无关）· `"regime"+"hyper-heuristic"`=2（ICECET 2026 用 "operating regimes" 但仍是单个上下文 bandit）· `"latent"+"hyper-heuristic"`=20（全部 incidental）
+
+**结构定义**：高层动作**采样进同一条 logp**、共享**同一个优势估计**，但动作**持久**（覆盖一段决策区间）。
+
+**⟹ 不破贡献 1**（仍是"从一个策略里抽的组"），**但不是** HRL**（无第二个策略、无第二个优势、无学习到的终止）。
+
+**⚠️ 证据强度**：`not found in metadata` 是**弱证据**。且我在本轮已**猜错两次**（信用分配那次、更早一次）。**未核，不作依据。**
+
+### 67.7 分层 RL × HH：**已有人做，但我们读不到**
+
+**Zhu, Zhao, Yu, Wang.** *A hierarchical reinforcement learning-aware hyper-heuristic algorithm with fitness landscape analysis.* ***Swarm and Evolutionary Computation* 90:101669, 2024.** DOI 10.1016/j.swevo.2024.101669（缩写 **HRLHH**）
+
+- **两个 agent 独立找到同一篇**；**全文 CONTENT NOT OBTAINED**（Elsevier + Cloudflare）。摘要片段经 Google Scholar 取到约 70%。
+- **已知**：状态空间由**两种适应度景观分析**构成（上层 = 信息熵动态崎岖度的自适应分类；下层 = 基于知识的在线离散度指标）；**分层动作空间**；奖励基于进化成功率与种群收敛率；实验 = **CEC 2017 / CEC 2014 / 大规模 CEC 2013**。
+- ⚠️ **它是连续优化基准，不是调度。**
+- **未核**：两层是否**真 HRL**（独立策略？独立优势？学习到的终止？）—— **NOT VERIFIED**。
+- 姊妹篇：SWEC **90:101668**, 2024（相邻文章号）。SSRN 预印本 10.2139/ssrn.4680117（2023-12-30）。
+
+**"hierarchical / multilevel" 在 HH 文献里至少四种含义，多数是宽松用法**：递归调用超启发式（Guerriero & Saccomanno, *Soft Computing* 2022，**完全无 RL**）· 问题分解（Lassouaoui et al. 2019）· 系统分层架构（Wu et al. *Drones* 2026；ICECET 2026 **一个 bandit 就说 "hierarchically selects"**）· 两层 RL（Zhu/Zhao 组）。
+
+### 67.8 访问限制 —— **所有"零篇"判定的天花板**
+
+| 通道 | 状态 |
+|---|---|
+| **WebSearch** | **配额 200/200 耗尽**（全会话） |
+| **Elsevier 全文** | **403 / Cloudflare，一篇读不到** —— 恰好是 JMS / IJPR / C&IE / R&CIM / ESWA / C&OR |
+| OpenAlex 直连 | 429 全程 |
+| CORE API v3 | 429/500（需 key） |
+| Internet Archive / Wayback | 服务临时下线 |
+| **Semantic Scholar bulk** | ✅ **可用**（606–764 条语料） |
+| Crossref REST | ✅ 可用，但 **Elsevier 不存摘要** |
+| arXiv MCP | ✅ 可用 |
+| Europe PMC fullTextXML | ✅ 可用 |
+
+**⚠️ 决定性测量**：arXiv 2024+ 超启发式摘要 = **28**；S2 2023–2026 = **606**。
+题名同含 HH + RL 的 91 篇里：**期刊 67 · 会议 23 · arXiv 1**。
+**⟹ arXiv 只覆盖约 5%。任何基于 arXiv 的"零篇"判定都不可用。**
+
+**⚠️ 方法学陷阱**：**S2 bulk 不支持嵌套布尔**。`("a" OR "b") AND ("c" OR "d")` **返回 total=0** —— **不是"没有文献"**。agent 第一版踩过。
+
+**⟹ 本轮所有 OPEN 判定均为题录/摘要级，不是全文级。**
+
+### 67.9 丢弃的线索（**登记以防重探**）
+
+| 线索 | 丢弃理由 |
+|---|---|
+| **种群管理 / RL 替换存活选择** | ①**我们没有种群循环** —— 六个头（S 机台 / L 派车 / R 路线 / M 维护 / C 充电 / B 拼批）全在一次仿真内部；② NSGA-II 在本仓是**基线**（`plcsp/baselines/nsga2.py`，构造时**连 `survival` 都没传**）⟹ 改它等于把基线当方法；③ 成本爆炸（一个 RL 步 = 一整轮 EA）；④ **我们不在拥挤距离的弱区** —— 三目标正是 NSGA-II 被设计来处理的区间 |
+| **分层 RL（真 HRL，两个策略）** | 与贡献 1 冲突（"从一个策略里抽的组才叫组"）；且 SWEVO 2024 已做 |
+| **跨求解器预算分配（#15）** | 是 2007 年起的 **solver scheduling** 命名领域（Gagliolo & Schmidhuber 2007；Bandits with Knapsacks, FOCS 2013 / *JACM* 2018） |
+| **"元决策"这个词** | **无主词**，用即自创 |
+
+### 67.10 待用户裁定
+
+1. **"约束处理在高层"要不要进贡献框架？** 若进，contribution 从"十约束仿真"变成"**高层必须感知约束状态 + 报告规范**" —— 是**方法学主张**，不是工程量主张。
+2. **持久 regime 头要不要追？** 唯一未被证伪的格子，但**证据弱**（题录级）且**我已错两次**。
+3. **"测量纪律当贡献"这个角度要不要派 agent 查？** —— 唯一没被查过的角度（现有四个 agent 都没看这个方向）。
+4. **Elsevier 全文能不能拿到？**（学校图书馆 / VPN / 馆际互借）**拿不到，67.8 那条限制就一直挂着。**
