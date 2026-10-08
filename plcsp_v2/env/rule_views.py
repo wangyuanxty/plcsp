@@ -10,18 +10,17 @@
 Informatics* 65:103195, 2025）第 3 节「动作空间」与「状态定义」。凡本实现与他们不同的地方，
 **逐条写在字段注释里**，不静默偏离。
 
-══ 批内投影（本模块唯一不显然的设计）══
+══ 决策时点（第二稿，2026-10-08）══
 
-`_pa_dispatch` **一次把池排空**（设计 §14.3 的"一批派"）。同一批里状态**不变**，
-若规则只看静态快照，`EAM` / `MINU` 会给**整批**挑同一台机台——不是规则的本意。
-故 `PAView.reserved()` 在每次派工后返回一份**把这次预留记进去**的新视图，
-使同批的后续派工看得到前面已派出去的活。**本视图每次 `_pa_dispatch` 调用现建一份，
-跨调用不保留**（跨批的在途预留不计，理由见 `build_pa_view`）。
+`_pa_dispatch` **每次只派一件**（原文："the decision point t is defined as the time when an
+operation is assigned"），**LA 在同一个决策点定车**。故本模块的两份视图都在**派工那一刻**
+构造，`LAView.ready_at` 是**未来**时刻。逐机/逐车的账本（`stats["pa_mct"]` /
+`pa_assigned_min` / `agv_act`）**跨决策点存活**——这是"在途预留看得见"的唯一机制。
 """
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from .instances import Instance
@@ -31,12 +30,30 @@ INF = float("inf")
 
 
 class PAJob(NamedTuple):
-    """PA 池里一个候选作业的**规则自变量**（下标 = 工件号，含已完工者）。"""
+    """PA 池里一个候选作业的**规则自变量**（下标 = 工件号，含不再进池者）。"""
 
     oi: int
-    """该作业的**最早待加工工序**（= 已完成工序数）。`oi == len(alts)` ⟹ 已完工。"""
+    """该作业的**最早待分配工序**——口径照 AEI2025：**最低的、`plans[j][oi]` 尚未定**的下标。
+
+    ⚠️ **不是 `done_ops`（已完成工序数）**。原文逐字：
+
+    > *"Let **OPi(t)** denotes the operation number of job i that **have been assigned** at
+    > decision point t"* / *"`CJ(t) = {i | OPi(t) < Ji + 1}`"* / *"f24 = mean_{i∈CJ(t)}(APT_{i,
+    > **OPi(t)+1**})"*
+
+    ⟹ `OP_i` 数的是**已分配**的工序数，候选是**下一道未分配的**。**一个工件被派过之后仍留在
+    池里**（它的下一道未分配工序又成为候选）——这正是"池 ≈ 未完工工件数"的来源。
+
+    ⚠️ **2026-10-08 修**：此前用的是 `done_ops`，导致一个工件被派过就被滤掉，
+    实测池在 **82%** 的决策上只剩 1 个候选（§73.1）。**错的不是事实卡，是我没读原文。**
+
+    `oi == len(alts)`（= 该作业**全部工序都已分配**）⟹ 不进池（原文的 `OP_i(t) == Ji+1`）。
+    """
+    done_oi: int
+    """**已完成**工序数（= `job_progress`）。规则求值一般不用它；留着供诊断与
+    `ready_at` 的口径判断（见下）。"""
     alts: tuple[tuple[int, float], ...]
-    """本工序的候选 `(机台, 加工时长)`。已完工 = 空元组。"""
+    """本工序（`oi`）的候选 `(机台, 加工时长)`。不再进池者 = 空元组。"""
     apt: float
     """本工序的**平均**加工时长 `APT_ij = (Σ_k pt_ijk)/|候选|`（AEI2025 的 `APT_ij`）。
 
@@ -48,8 +65,14 @@ class PAJob(NamedTuple):
     ready_at: float
     """该作业**可开工**的最早时刻（`EAJ` 的自变量）。
 
-    口径：作业正占着某台机（`at_machine >= 0`）⟹ `now + 该机标的剩余`；否则 `now`。
-    ⚠️ **在途作业按 `now` 计**（乐观）——运输到达时刻在快照里不可知。"""
+    口径：
+    - `oi == 0` ⟹ 作业在装卸站待运，`now`；
+    - 前道（`oi-1`）**已完成**（`oi-1 < done_oi`）⟹ 工件已可运，`now`；
+    - 前道**未完成** ⟹ `now + 该机台的在制标称剩余 + 输入缓冲积压`（= 那台机器清空的时刻，
+      是完工时刻的**上界**）。
+
+    ⚠️ **在途作业按 `now` 计**（乐观）——见 §72 的登记：**这条"不可知"其实是假的**，
+    快照里有 `on_agv` + 车 `node`/`status`，可以反推 ETA。**未修，登记在 §72.1。**"""
     due: float
     """⑧ 交期；`+inf` = 该实例无交期（`JobState.due` 的 0.0 哨兵已就地转成 `inf`）。"""
 
@@ -80,7 +103,7 @@ def advance_avail(avail: float, now: float, proc: float) -> float:
     """把一笔 `proc` 分钟的活记进空闲时刻为 `avail` 的机台 → **新的**空闲时刻。
 
     式：`max(avail, now) + proc`。
-    ⚠️ **批内投影与跨批账本共用这一处**（`PAView.reserved` 与 `_pa_dispatch` 的账本推进），
+    ⚠️ **机台账本与车辆账本共用这一处**（`_pa_dispatch` 与 `_emit_task`），
     两处各写一遍必然会漂——而漂了不会报错，只会让 `EAM` 悄悄用两套口径。
     """
     return max(avail, now) + proc
@@ -99,47 +122,40 @@ class PAView:
     可为 `None`：规则的单测只需 `now/jobs/machines` 三项就能构造一份纯规则视图，
     不必造一张完整快照（`build_pa_view` 生产路径上恒非 None）。"""
 
-    def reserved(self, machine: int, proc: float) -> PAView:
-        """本次派工的**投影**：返回一份把 `(机台 machine, 时长 proc)` 记进去的新视图。
-
-        ⚠️ 只管**本批**（同一 `_pa_dispatch` 调用内的先后两笔）。
-        跨批的那部分由 `stats["pa_mct"]` / `stats["pa_assigned_min"]` 账本承担——
-        本视图下次被 `build_pa_view` 建出时就从账本读。**两者共用 `advance_avail`**。
-        """
-        ms = list(self.machines)
-        old = ms[machine]
-        ms[machine] = PAMachine(avail_at=advance_avail(old.avail_at, self.now, proc),
-                                assigned_min=old.assigned_min + proc)
-        return replace(self, machines=tuple(ms))
-
-
 def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min) -> PAView:
     """活快照 + 实例 + 计划表 + **PA 账本** → `PAView`（**纯函数**）。
 
     `plans[j][oi]` = PA 已写下的机台预留（`None` = 尚未派）；本函数**只读**它。
+    ⚠️ 每个作业的 `oi` = **最低的、`plans[j][oi]` 尚未定**的下标（原文口径，见 `PAJob.oi`）——
+    **不是 `done_ops`**。
     `pa_mct` / `pa_assigned_min` = 跨批账本（`stats` 里的两个逐机台列表，见 `PAMachine`）。
 
     ⚠️ **账本必须跨批存活**——这正是本口径相对"只读物理量"的全部好处：
     实测 MK01 有 **18/55 = 33%** 的派工时刻存在"已预留、尚未入目标机台缓冲"的件，
-    只看物理量的口径在那些时刻是**瞎的**（见 `docs/progress-log.md` §71）。
+    只看物理量的口径在那些时刻是**瞎的**（见 `docs/progress-log.md` §71.1）。
     """
     jobs: list[PAJob] = []
     for j, ops in enumerate(inst.jobs):
         js = snap.jobs[j]
-        oi = int(js.done_ops)
-        if oi >= len(ops):
-            jobs.append(PAJob(oi=oi, alts=(), apt=0.0, rem_apt=0.0,
-                              ready_at=snap.now, due=(js.due if js.due > 0.0 else INF)))
+        done = int(js.done_ops)
+        row = plans[j] if j in plans else [None] * len(ops)
+        oi = next((p for p in range(len(ops)) if row[p] is None), len(ops))
+        due = js.due if js.due > 0.0 else INF
+        if oi >= len(ops):                     # 全部工序都已分配 ⟹ 不进池（原文 `OP_i == J_i+1`）
+            jobs.append(PAJob(oi=oi, done_oi=done, alts=(), apt=0.0, rem_apt=0.0,
+                              ready_at=snap.now, due=due))
             continue
         alts = tuple((int(m), float(t)) for m, t in ops[oi])
         # APT：逐道工序在**各自候选机台**上的平均时长（AEI2025 的 APT_ij）
         apts = [sum(t for _m, t in ops[o]) / len(ops[o]) for o in range(oi, len(ops))]
-        at = int(js.at_machine)
         ready = snap.now
-        if 0 <= at < len(snap.machines):
-            ready += float(snap.machines[at].remaining_min)
-        jobs.append(PAJob(oi=oi, alts=alts, apt=float(apts[0]), rem_apt=float(sum(apts)),
-                          ready_at=ready, due=(js.due if js.due > 0.0 else INF)))
+        if oi > 0 and oi - 1 >= done:          # 前道未完成 ⟹ 等到那台机清空
+            k_prev = row[oi - 1]
+            if k_prev is not None and 0 <= k_prev < len(snap.machines):
+                m_prev = snap.machines[k_prev]
+                ready += float(m_prev.remaining_min) + float(m_prev.backlog_min)
+        jobs.append(PAJob(oi=oi, done_oi=done, alts=alts, apt=float(apts[0]),
+                          rem_apt=float(sum(apts)), ready_at=ready, due=due))
     machines = tuple(
         PAMachine(
             # AEI2025 的 `MCT_k`：账本（计划）与物理清空时刻取 max。
@@ -152,46 +168,55 @@ def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min
 
 # ══════════ LA（物流派车） ══════════
 
-class LATask(NamedTuple):
-    """一次派车任务的身份（端点号口径同 `des.py`：机台 `0..m-1`、装卸站 = `m`）。"""
-
-    job: int
-    oi: int
-    frm_node: int
-    to_node: int
-
-
 class LAVehicle(NamedTuple):
     node: int
     """当前所在通道节点；`-1` = **尚未出车**。⚠️ 这种情况按"**已在取货点**"处置——
     与 `AgvSim.run` 的空载段判据（`pos_node is not None and pos_node != a`）**同一条**，
     不是另立口径。"""
     busy_min: float
-    """累计**行驶**工时 [min]（`MINU` 的自变量；由 `stats["agv_busy_min"]` 来）。"""
+    """累计**行驶**工时 [min]（`MINU` 的分子；由 `stats["agv_busy_min"]` 来）。"""
+    free_at: float
+    """预计空闲时刻（`stats["agv_act"]` 的账本）。
+
+    ⚠️ **分母仍是全局 `now`**（见 `hrl.rules.la_score`）——这一条**未对齐**他们的 `ACT_v`，
+    登记在 `docs/progress-log.md` §71.4 / §72.1。此字段只给 `LATEST_IN_TIME` 用。"""
 
 
 @dataclass(frozen=True)
 class LAView:
-    """LA 一次派车决策的完整输入。"""
+    """LA 一次派车决策的完整输入。
+
+    ⚠️ **决策时点 = 派工那一刻**（不是运输任务生成时）——照 AEI2025：运输任务**从派工就存在**，
+    带一个**未来**的可运输时刻 `ct_{i,OP_i(t)}`（卡里 f33）。**这正是 `LATEST_IN_TIME`
+    （Rule 3）"不晚于可运输时刻地最晚到达"有意义的前提**；§70.8 记的"塌陷"是因为
+    我们把 LA 接到了完工事件上，`ready_at` 恒等于 `now`。**2026-10-08 修。**
+    """
 
     now: float
-    task: LATask
+    job: int
+    oi: int
+    frm_node: int
+    to_node: int
+    ready_at: float
+    """作业的**最早可运输时刻**——前道工序在此刻完工（`oi == 0` 时 = `now`）。"""
     vehicles: tuple[LAVehicle, ...]
     leg_min: Callable[[int, int], float]
     """`leg_min(u, v) -> 分钟`——**与仿真同一条**行程时长口径（`SimWorld.leg_min`），
     规则不另造距离量。"""
+    snap: Snapshot | None = None
+    """全量活状态（规则不用它；留给步 4 的编码器）。"""
 
     def empty_leg(self, aid: int) -> float:
         """第 `aid` 台车跑完**空载段**（当前停位 → 取货点）所需时长 [min]。"""
         node = self.vehicles[aid].node
-        if node < 0 or node == self.task.frm_node:
+        if node < 0 or node == self.frm_node:
             return 0.0
-        return float(self.leg_min(node, self.task.frm_node))
+        return float(self.leg_min(node, self.frm_node))
 
     def loaded_leg(self, aid: int) -> float:
         """**负载段**（取货点 → 卸货点）时长 [min]。⚠️ 与 `aid` 无关（同一任务、同一路径），
         故对**排序**是常数——但 AEI2025 的成本式含它，此处照写以便逐条对上。"""
         del aid
-        if self.task.frm_node == self.task.to_node:
+        if self.frm_node == self.to_node:
             return 0.0
-        return float(self.leg_min(self.task.frm_node, self.task.to_node))
+        return float(self.leg_min(self.frm_node, self.to_node))

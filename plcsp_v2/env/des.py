@@ -32,7 +32,7 @@ from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
-from .rule_views import advance_avail, build_pa_view   # 步 3：PA 规则求值的只读视图（纯数据）
+from .rule_views import LAView, advance_avail, build_pa_view   # 步 3：规则求值的只读视图（纯数据）
 from .snapshot import ChargerState    # ⑪ C 头：`snapshot()` 逐桩报占用（顶部导入，不每帧重导）
 from .transport import MATRIX, UNMAPPED_RAISE, TransportCaliber
 
@@ -1218,6 +1218,34 @@ class SimWorld:
         """
         return self.agvs[0].leg_min(src, dst)
 
+    def _node_of(self, endpoint: int) -> int:
+        """端点号 → 通道节点（机台 `0..m-1`、装卸站 = `m`）。"""
+        e = int(endpoint)
+        return (int(self.layout.machines[e].dock_node) if e < self.inst.n_machines
+                else int(self.layout.lu.dock_node))
+
+    def _la_view(self, job: int, oi: int, frm: int, to: int, ready_at: float) -> LAView:
+        """LA 一次派车决策的只读视图——**在"派工那一刻"构造**（步 3 第二稿）。
+
+        ⚠️ **时点变了**：此前在"运输任务生成时"（= 前道完工之后）构造，故 `ready_at ≡ now`，
+        Rule 3 塌陷成 Rule 1（§70.8）。现在 LA 与 PA **同一决策点**（原文的 PA→LA 顺序），
+        `ready_at` 是**未来**时刻 ⟹ Rule 3 的"不晚于可运输时刻地最晚到达"有真实内容。
+
+        ⚠️ 逐车位置取**当前**节点：车若已有排队任务，其"完成后所在位置"是任务终点而非当前
+        节点——**未建模**（登记 §72.1）。逐车空闲时刻用账本 `stats["agv_act"]`。
+        """
+        from .rule_views import LAVehicle
+        snap = self.snapshot()
+        act = self._live_stats.get("agv_act") or []
+        return LAView(
+            now=float(snap.now), job=int(job), oi=int(oi),
+            frm_node=self._node_of(frm), to_node=self._node_of(to),
+            ready_at=float(ready_at),
+            vehicles=tuple(LAVehicle(node=int(v.node), busy_min=float(v.busy_min),
+                                     free_at=float(act[a]) if a < len(act) else 0.0)
+                           for a, v in enumerate(snap.vehicles)),
+            leg_min=self.leg_min, snap=snap)
+
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
 
@@ -1482,6 +1510,8 @@ class SimWorld:
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量；快照逐车报出）
                  "agv_busy_min": [0.0] * self.cfg.n_agv,
+                 # 步 3 第二稿：逐车**已派任务账本**（预计空闲时刻；LA 的 `LATEST_IN_TIME` 用）
+                 "agv_act": [0.0] * self.cfg.n_agv,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
                  # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
                  "pm_events": 0,
@@ -1717,6 +1747,8 @@ class SimWorld:
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量；快照逐车报出）
                  "agv_busy_min": [0.0] * self.cfg.n_agv,
+                 # 步 3 第二稿：逐车**已派任务账本**（预计空闲时刻；LA 的 `LATEST_IN_TIME` 用）
+                 "agv_act": [0.0] * self.cfg.n_agv,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
                  # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
                  "pm_events": 0,
@@ -1916,87 +1948,79 @@ class SimWorld:
     def _release(env, store, item):
         yield store.put(item)
 
-    def _pa_dispatch(self, plans, policy_pa, stats) -> None:
-        """**v2：PA 派工点** —— 在「未完工工件的最早待加工工序」里挑一件，**并给它定机台**，
-        写进 `plans`（预留）。
+    def _pa_dispatch(self, plans, policy_pa, stats):
+        """**决策点（PA）** —— 在「未完工工件的最早**未分配**工序」池里挑一件，**并给它定机台**。
+        **每次调用恰派一件**（原文口径），返回 `(工件, 工序, 机台)`；池空 ⟹ 返回 `None`。
 
-        ⚠️ **口径照抄 AEI2025 原文**：*"select an **unfinished job** and assign an appropriate
-        machine to process the **earliest pending operation** of the selected job"*。
+        ══ 池的口径：照 AEI2025 原文逐字（2026-10-08 第二稿）══
 
-        **池 = { (j, oi) : j 未完工 且 `plans[j][oi]` 尚未定 }**，`oi` = 该作业的**最早待加工
-        工序**（= 已完成工序数）。⚠️ **正在加工的工件也在池里** —— 它要被派的正是**下一道**
-        工序。这与"就绪队列"（前道刚完工、待派机）**不是一回事**。
+        > *"Let **OPi(t)** denotes the operation number of job i that **have been assigned** at
+        > decision point t"* / *"`CJ(t) = {i | OPi(t) < Ji + 1}`"*
+        > *"f24 = mean_{i∈CJ(t)}(APT_{i, **OPi(t)+1**})"*
 
-        **本函数把池**排空**（有多少派多少）**：这样下游 `_pick_machine` 读 `plans` 时必然已
-        有值，不存在"派工器还没走到"的竞态。
+        **池 = 每个"还有未分配工序"的作业，取其最低未分配工序下标** —— `oi` **不是**
+        `done_ops`。⟹ **一个工件被派过之后仍在池里**（它的下一道未分配工序又成为候选），
+        池恒 ≈ 未完工工件数。
 
-        ══ 契约（步 3 升级）══
+        ⚠️ **第一稿错在这里**：用 `done_ops` 当 `oi` ⟹ 在制/在途工件的预留早已写好、被滤掉
+        ⟹ 实测池在 **82%** 的决策上只剩 **1** 个候选（§73.1），四条工件规则退化成同一个动作。
+        **错的不是事实卡，是我没读原文。**
+
+        ══ 为什么"恰派一件"而不是"排空" ══
+
+        新口径下池**永不为空**（派掉一件，该作业的下一道未分配工序立刻补位）⟹
+        排空 = **一次调用就把整张调度表派完**。原文的决策点是"一道工序**被分配**的时刻"，
+        **一件一次**。⟹ 也因此**没有"批内"**——同一批的后续派工看得到前面预留这件事不再存在
+        （旧口径下池永不为空、排空即等于一次派完整张表）。
+
+        ⚠️ **没被派到的工件会等**：它的件停在源机台的输出缓冲里，直到某个决策点派到它。
+        **这正是原文的语义**（PA 挑哪件，哪件才推进）。
+
+        ══ 契约 ══
 
         `policy_pa(view, pool, tie_rng) -> (池下标, 机台号)`——`view` 是
-        `env/rule_views.PAView`（纯数据，装好规则的自变量；`view.snap` 留给步 4 的编码器）；
-        `tie_rng` 是**环境的平局随机源**（见下）。
-        机台**由 PA 定**（复合规则的机台那一半）；transporter 只读预留。
-        ⚠️ 返回**两个**值而不是一个：复合规则是"先工件、后机台"，机台必须与工件的选择
-        **同一刻**定下来（同一个 `view`），分两次回调会看到两个不同的状态。
+        `env/rule_views.PAView`（纯数据；`view.snap` 留给步 4 的编码器）；
+        `tie_rng` 是**环境的平局随机源**（独立子流 `[seed_chain, PA_TIE_SEED]`，每局重播，
+        见 `PA_TIE_SEED` 的注释——**不得改回共享 `rng`**）。
 
-        `None` = **不启用 PA**（离线路径：`plans` 已预填）⟹ 本函数是空操作（池为空）。
-        非 None 时**池必被排空**，故 `plans` 里不会留 `None` 给 `_pick_machine`。
+        `None` = 不启用 PA（离线路径：`plans` 已预填 ⟹ 本函数不被调用）。
 
-        ══ 平局：`tie_rng` 是**独立子流** ══
+        ══ 账本（`stats["pa_mct"]` / `stats["pa_assigned_min"]`）══
 
-        AEI2025 的复合规则"若多个工件/机器满足条件，则**随机选一个**"，故本函数把一条
-        **独立的**随机源交给策略：`default_rng([seed_chain, PA_TIE_SEED])`。
-        ⚠️ **不得改回共享 `rng`** —— 那条流被机台故障消费，插一个消费者会把故障抽样
-        **整体移位**（"只改了平局"变成"连扰动流都换了"，消融不再干净）。
-        车队早已是各自独立的流（`[seed_chain, 1000+a]`），PA 只是照同一形状再加一条。
-        ⚠️ 随机源**每局重播**（在 `run` / `run_gated` 里建），不是每次派工重建——
-        每次重建会让 55 次派工抽到同一串数。
-
-        ══ 跨批账本（`stats["pa_mct"]` / `stats["pa_assigned_min"]`）══
-
-        机台的两个规则自变量（`EAM` 的 `MCT_k`、`MINU` 的分子）按 **AEI2025 的 λ 口径**
-        逐次推进并**跨派工批次存活**：
+        按 AEI2025 的 `MCT_k` / `Σλ·pt` 推进，**跨决策点存活**：
         `mct[k] ← max(mct[k], 物理清空时刻, now) + pt`、`assigned_min[k] += pt`。
-        ⚠️ 为什么必须跨批：实测 MK01 有 **18/55 = 33%** 的派工时刻存在"已预留、尚未入目标
-        机台缓冲"的件；只读物理量的口径在那些时刻**看不见它们**（§71.1 的量法）。
-
-        ══ 批内投影 ══
-
-        同批里物理状态不变，故 `view.reserved()` 每次派工后把这笔预留记进视图再继续
-        （见 `env/rule_views.py`）。**批内投影与跨批账本共用 `advance_avail` 同一式。**
+        ⚠️ 原文的 `MCT_k` 是**纯计划**；我们取与物理清空时刻的 `max`（实况只能把它推后）。
         """
         led_mct = self._live_stats.setdefault("pa_mct", [0.0] * self.inst.n_machines)
         led_assigned = self._live_stats.setdefault("pa_assigned_min",
                                                    [0.0] * self.inst.n_machines)
+        if policy_pa is None:
+            raise ValueError("_pa_dispatch 需要 policy_pa；离线路径不应调用它")
         view = build_pa_view(self.snapshot(), self.inst, plans, led_mct, led_assigned)
-        while True:
-            pool = tuple((j, v.oi) for j, v in enumerate(view.jobs)
-                         if v.oi < len(self.inst.jobs[j]) and plans[j][v.oi] is None)
-            if not pool:
-                return
-            if policy_pa is None:
-                # 规则驱动（步 2 口径，逐位不变）：池首 + 该工序**最短加工时间**。
-                # ⚠️ 平局取 `alts` 里第一个（不加机台号做次序键）——改了就与步 2 的黄金值分家。
-                pi, m = 0, min(view.jobs[pool[0][0]].alts, key=lambda mt: mt[1])[0]
-            else:
-                pi, m = policy_pa(view, pool, self._pa_tie_rng)
-                pi = int(pi)
-                if not (0 <= pi < len(pool)):
-                    raise ValueError(f"policy_pa 选了不存在的池下标 {pi}；池={pool}")
-                cand = [mm for mm, _t in view.jobs[pool[pi][0]].alts]
-                if int(m) not in cand:
-                    raise ValueError(
-                        f"policy_pa 给作业 {pool[pi][0]} 的第 {pool[pi][1]} 道工序选了非候选"
-                        f"机台 {m}；候选={cand}")
-                m = int(m)
-            j, oi = pool[pi]
-            plans[j][oi] = m
-            proc = next(t for mm, t in view.jobs[j].alts if mm == m)
-            # 跨批账本推进（AEI2025 的 MCT_k / Σλ·pt）——与批内投影**同一式**
-            led_mct[m] = advance_avail(view.machines[m].avail_at, view.now, float(proc))
-            led_assigned[m] += float(proc)
-            view = view.reserved(m, float(proc))
-            stats["pa_assigns"] = stats.get("pa_assigns", 0) + 1
+        # 池 = 还有未分配工序的作业（`view.jobs[j].oi` 已是"最低未分配下标"，见 `PAJob.oi`）
+        pool = tuple((j, v.oi) for j, v in enumerate(view.jobs)
+                     if v.oi < len(self.inst.jobs[j]))
+        if not pool:
+            return None
+        pi, m = policy_pa(view, pool, self._pa_tie_rng)
+        pi = int(pi)
+        if not (0 <= pi < len(pool)):
+            raise ValueError(f"policy_pa 选了不存在的池下标 {pi}；池={pool}")
+        cand = [mm for mm, _t in view.jobs[pool[pi][0]].alts]
+        if int(m) not in cand:
+            raise ValueError(
+                f"policy_pa 给作业 {pool[pi][0]} 的第 {pool[pi][1]} 道工序选了非候选"
+                f"机台 {m}；候选={cand}")
+        m = int(m)
+        j, oi = pool[pi]
+        ready_at = float(view.jobs[j].ready_at)      # 该工序的**可运输时刻**（给 LA 的 f33）
+        plans[j][oi] = m
+        proc = next(t for mm, t in view.jobs[j].alts if mm == m)
+        # 账本推进（AEI2025 的 MCT_k / Σλ·pt）
+        led_mct[m] = advance_avail(view.machines[m].avail_at, view.now, float(proc))
+        led_assigned[m] += float(proc)
+        stats["pa_assigns"] = stats.get("pa_assigns", 0) + 1
+        return j, oi, m, ready_at
 
     def _transporter(self, env, events_q, tasks_in, plans, entities, stats, lu_idx: int,
                      bound: bool = False, agv_phi: list[int] | None = None,
@@ -2035,55 +2059,106 @@ class SimWorld:
         （池只含"还没定机台的待加工工序"，回站不是工序）。
         """
         task_i = 0
-
+        # ═══ 统一事件流（2026-10-08 第二稿）═══
+        # 三条驱动方式（**同一套流**，只换"谁定机台"）：
+        #   · `policy_pa` 非空 —— 决策点由 PA 派一件（新路径，见 `_pa_dispatch`）；
+        #   · `online_s=True` —— 决策点由 S 层当场定机台（旧消融路径）；
+        #   · 都不给 —— `plans` 离线预填，本函数只读它（**逐位等于旧行为**）。
+        # `pending[j] = (oi, src)`：件**已产出**、等目的地；一旦 `plans[j][oi]` 有值就发车。
+        # `booking[(j, oi)]` = 该程**已订的车**（LA 在派工那一刻定的，见 §74.5）。
+        pending: dict[int, tuple[int, int]] = {}
+        booking: dict[tuple[int, int], int] = {}
         while True:
             frm_idx, job, oi, op, is_last = yield events_q.get()
             stats["trans_evt"] = stats.get("trans_evt", 0) + 1
             n_ops = len(self.inst.jobs[job])
             if is_last:                                     # 末工序完工 → 回装卸站
+                # ⚠️ 回站**不由 PA 决定**（终点恒为装卸站）⟹ 不走决策点，直接发。
+                # 这是与原文的一处小差异：他们的 dummy 工序（`J_i+1`）也进 PA 的动作。
                 yield entities[frm_idx].out_q.get()
-                nxt_m, item = lu_idx, (job, n_ops, op, True)
-            else:                                           # 投放（frm=装卸站）或工序流转
+                yield from self._emit_task(tasks_in, entities, stats, frm_idx, lu_idx,
+                                           (job, n_ops, op, True), job, policy_l,
+                                           bound, agv_phi, task_i)
+                task_i += 1
+            else:
+                # 件**此刻已在 `out_q`**（机台是先 put 事件再 put 件，同一事件帧）⟹ 不阻塞。
                 if frm_idx != lu_idx:
                     yield entities[frm_idx].out_q.get()
-                # ⚠️ **v2：PA 派工器先派**（把池排空 ⟹ `plans` 里必有值，无竞态），
-                # 再由 `_pick_machine` 读 `plans`。PA 与 transporter 的分工 = AEI2025 的 PA/LA。
-                # ⚠️ 对**离线路径**（`plans` 已预填）本调用是**空操作**（池为空 ⟹ 立刻返回）——
-                # 既有读数因此逐位不变。
-                self._pa_dispatch(plans, policy_pa, stats)
-                nxt_m, nxt_t = self._pick_machine(job, oi + 1, policy_s, online_s, plans)
-                item = (job, oi + 1, OpLite(nxt_t), oi + 1 == n_ops - 1)
-            from .corridors import shortest_node_path
-            _path = shortest_node_path(self.g, entities[frm_idx].pad.dock_node,
-                                       entities[nxt_m].pad.dock_node)   # AGV 实际经过的节点序列
-            task = (frm_idx, nxt_m, item, _path)
-            stats.setdefault("task_flow", []).append((job, item[1], frm_idx, nxt_m))  # L 层流导出
-            stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
-                                                     tuple(stats["agv_pos"])))       # 任务时点车状态
-            if policy_l is not None:
-                # F1（P2 Task 5）：回调契约与 `policy_s` 对称——快照 + 任务身份 + 候选车号。
-                # 此前这里现搓 11 维扁平特征（含魔数 (oi+1)/8、task_i/50，MK10 上溢出到
-                # 1.75/4.40），其唯一消费者 `PolicyNet.agv_logits` 已随 Task 4 删除——
-                # 即那段是**死代码**，故整体删除：特征一律由调用方从快照自造。
-                # T7（P2 Task 7）：任务身份再补**作业号**——L 头的任务特征含"该机是否需换型"
-                # （需作业号），而 (frm, to, oi) 反查作业**多义**（实测 MK01 51/112、
-                # MK10 538/985 个键有歧义），静默取错作业 = 换型特征错，故走显式参数。
-                snap = self.snapshot()                  # 派车决策时点的活状态（只读）
-                cand_v = list(range(len(tasks_in)))     # 候选 = 全车队（每车一队列，都可选）
-                agv = int(policy_l(snap, job, frm_idx, nxt_m, item[1], cand_v))
-                if agv not in cand_v:
-                    # 同 policy_s：非候选**显式报错**——负索引会静默回绕到别的车
-                    raise ValueError(f"policy_l 派了不存在的车 {agv}；候选={cand_v}")
-                yield tasks_in[agv].put(task)
-            elif bound:
-                n_agv = len(tasks_in)
-                agv = agv_phi[task_i] if (agv_phi and task_i < len(agv_phi)) else (task_i % n_agv)
-                yield tasks_in[agv].put(task)
-            else:
-                agv = -1                        # FIFO 路径：此刻还没派车（车在取货时才定）
-                yield tasks_in.put(task)
-            # 快照跟踪（P2 Task 1）：工件已离机台；绑定路径此刻即知派了哪台车
-            self._job_loc[job] = -1
-            self._job_agv[job] = agv
-            task_i += 1
-            stats["tasks_put"] = stats.get("tasks_put", 0) + 1
+                pending[job] = (oi + 1, frm_idx)             # 件已到，等目的地
+            if policy_pa is not None:
+                # ── 决策点：**恰派一件**（原文："the decision point t is defined as the time
+                #    when an operation is assigned"）──
+                got = self._pa_dispatch(plans, policy_pa, stats)
+                if got is not None and policy_l is not None:
+                    # ⚠️ **LA 在派工那一刻定车**（原文的 PA→LA 同决策点顺序）：此刻算出的
+                    # `ready_at` 是**未来**时刻 ⟹ `LATEST_IN_TIME` 的"不晚于它地最晚到达"有内容。
+                    # 车**先订下**，件到了（下面的冲账）才进它的队列。
+                    j3, oi3, m3, ready3 = got
+                    src3 = lu_idx if oi3 == 0 else int(plans[j3][oi3 - 1])
+                    cand3 = list(range(len(tasks_in)))
+                    agv3 = int(policy_l(self._la_view(j3, oi3, src3, m3, ready3), cand3))
+                    if agv3 not in cand3:
+                        raise ValueError(f"policy_l 派了不存在的车 {agv3}；候选={cand3}")
+                    booking[(j3, oi3)] = agv3
+            elif online_s:
+                # 旧消融路径：S 层当场定机台（`_pick_machine` 把结果写进 `plans`）
+                self._pick_machine(job, oi + 1, policy_s, True, plans)
+            # ── 冲账：所有"件已到 + 目的地已定"的作业，此刻发车 ──
+            for j2 in list(pending):
+                oi2, src2 = pending[j2]
+                m2 = plans[j2][oi2]
+                if m2 is None:
+                    continue
+                n2 = len(self.inst.jobs[j2])
+                t2 = next(t for mm, t in self.inst.jobs[j2][oi2] if mm == m2)
+                item2 = (j2, oi2, OpLite(t2), oi2 == n2 - 1)
+                yield from self._emit_task(tasks_in, entities, stats, src2, m2, item2,
+                                           j2, policy_l, bound, agv_phi, task_i,
+                                           agv=booking.pop((j2, oi2), None))
+                task_i += 1
+                del pending[j2]
+
+    def _emit_task(self, tasks_in, entities, stats, frm: int, to: int, item, job: int,
+                   policy_l, bound: bool, agv_phi, task_i: int, agv: int | None = None):
+        """建路径 + 派车（`policy_l` / 绑定 / FIFO 三条路）。旧路径与新路径**共用此一处**。
+
+        `agv` 非空 = **已订的车**（新路径：LA 在**派工那一刻**定的，见 `_pa_dispatch` 的注释）
+        ⟹ 直接进它的队列，不再问一次策略——同一程问两次会拿到两个答案。
+        """
+        from .corridors import shortest_node_path
+        _path = shortest_node_path(self.g, entities[frm].pad.dock_node,
+                                   entities[to].pad.dock_node)   # AGV 实际经过的节点序列
+        task = (frm, to, item, _path)
+        stats.setdefault("task_flow", []).append((job, item[1], frm, to))  # L 层流导出
+        stats.setdefault("agv_load", []).append((tuple(stats["agv_del"]),
+                                                 tuple(stats["agv_pos"])))       # 任务时点车状态
+        if agv is not None:
+            yield tasks_in[agv].put(task)
+        elif policy_l is not None:
+            # 无预订时的兜底（`online_s` / 离线路径 + `policy_l`）：此刻件**已在手**，
+            # 故 `ready_at ≡ now`——`LATEST_IN_TIME` 在这条路上仍会塌陷成 `MINCOST`，
+            # **这是预期的**（那条路本来就不是新流）。新流走上面的 `agv` 分支。
+            view = self._la_view(job, item[1], frm, to, float(self.env.now))
+            cand_v = list(range(len(tasks_in)))         # 候选 = 全车队（每车一队列，都可选）
+            agv = int(policy_l(view, cand_v))
+            if agv not in cand_v:
+                # 同 policy_s：非候选**显式报错**——负索引会静默回绕到别的车
+                raise ValueError(f"policy_l 派了不存在的车 {agv}；候选={cand_v}")
+            yield tasks_in[agv].put(task)
+        elif bound:
+            n_agv = len(tasks_in)
+            agv = agv_phi[task_i] if (agv_phi and task_i < len(agv_phi)) else (task_i % n_agv)
+            yield tasks_in[agv].put(task)
+        else:
+            agv = -1                        # FIFO 路径：此刻还没派车（车在取货时才定）
+            yield tasks_in.put(task)
+        # 快照跟踪（P2 Task 1）：工件已离机台；绑定路径此刻即知派了哪台车
+        self._job_loc[job] = -1
+        self._job_agv[job] = agv
+        if agv >= 0:
+            # 步 3 第二稿：逐车**已派任务账本**（预计空闲时刻）。估时用**负载段**时长——
+            # 空载段取决于车的当前停位，此处不反推（登记 §72.1）。
+            est = self.leg_min(self._node_of(frm), self._node_of(to))
+            act = self._live_stats.setdefault("agv_act", [0.0] * self.cfg.n_agv)
+            act[agv] = advance_avail(act[agv], float(self.env.now), est)
+        stats["tasks_put"] = stats.get("tasks_put", 0) + 1

@@ -22,9 +22,14 @@
 **工件规则口径**（AEI2025 原文："select an unfinished job and assign an appropriate
 machine to process the earliest pending operation of the selected job"）：
 
-- `SPT`  —— 最早待加工工序的 **APT** 最小（非"某台机上最短"：工件规则必须先于机台规则定案）
+- `SPT`  —— 最早待加工工序的加工时间 `APT` 最小
+  ⚠️ **存疑，未核**：卡里只写"加工时间最短"，**没说取 `APT` 平均还是 `min_k` 最短**。
+  我们取 `APT`，依据是他们的状态特征 f24–f26 是 `APT_{i,OP_i+1}` 的 mean/min/max ——
+  **那是推断，不是原文。** 论文里不得声称此处一致。（登记在 §72.5）
 - `EAJ`  —— **可开工时刻**最早：`max(作业就绪时刻, min_{候选机台} 机台空闲时刻)`
-- `SRPT` —— **剩余**加工时间 `RTJ_i(t)` 最小
+  ⚠️ **存疑，未核**：卡里只写"能被最早加工的工件"。**"作业就绪时刻"他们用没用、怎么算，
+  卡里读不出来。** 论文里不得声称此处一致。（登记在 §72.5）
+- `SRPT` —— **剩余**加工时间 `RTJ_i(t)` 最小（此项**可核**：卡里给了 `RTJ_i(t)` 的公式）
 - `EDD`  —— 交期最早（**新增**）
 
 **机台规则口径**（在**被选中工件**的候选机台里挑）：
@@ -52,8 +57,7 @@ from collections.abc import Callable, Sequence
 
 import numpy as np
 
-from ..env.rule_views import INF, LATask, LAVehicle, LAView, PAView
-from ..env.snapshot import Snapshot
+from ..env.rule_views import INF, LAView, PAView
 
 # ══════════ PA ══════════
 
@@ -89,7 +93,11 @@ def _resolve_pa_rule(rule: int | str) -> int:
 
 
 def pa_job_score(rule: str, view: PAView, job: int) -> float:
-    """工件规则的**打分**（越小越先）。`rule ∈ PA_JOB_RULES`。"""
+    """工件规则的**打分**（越小越先）。`rule ∈ PA_JOB_RULES`。
+
+    ⚠️ `SPT` 与 `EAJ` 的口径**存疑未核**（卡里读不出他们的确切式子）——见模块 docstring。
+    论文里不得声称这两项与 AEI2025 一致。
+    """
     jv = view.jobs[job]
     if rule == "SPT":
         return jv.apt
@@ -217,54 +225,39 @@ def la_score(rule: str, view: LAView, aid: int) -> tuple:
       ⚠️ **负载段与车号无关**（同一任务、同一条路径）⟹ 本规则实际等价于"**就近派车**"。
       这不是实现取巧，是成本式本身如此（`tt_{l'l}` 对所有车同值）。
     - `MINU`（Rule 2）—— 利用率最低：`累计行驶工时 / max(now, 地板)`。
-      ⚠️ **分母与他们的 `ACT_v(t)` 不同**（他们是"该车已派物流任务的最晚完工时刻"）：
-      我们**逐车的已派任务账本还没建**，暂用全局 `now`。**同 PA 曾经的毛病（晚开工的车
-      显得更闲），但**未修**——登记在 `docs/progress-log.md` §71.4。**不要当成已对齐。**
-    - `LATEST_IN_TIME`（Rule 3）—— "在**所分配工序最早可运输时刻**之前最晚完成空载段；
-      若无合格车，则取最早完成"。
-      ⚠️ **本仓的流使这条退化为"就近派车"**：LA 的触发点就是"工序可运输那一刻"
-      （transporter 收到机台完工事件），故"最早可运输时刻" ≡ `now`——"不晚于它"只剩
-      `空载段 == 0`（车已在取货点）一种情形，而那也正是 `MINCOST` 会挑的。
-      **如实记录**，不假装三条都两两可辨（登记进 `docs/progress-log.md` §70.8）。
+      ⚠️ **分母与他们的 `ACT_v(t)` 不同**（他们是"该车已派物流任务的最晚完工时刻"）、
+      **分子也少了故障中断时间 `AT_v`**：我们**逐车的已派任务账本还没建**。
+      **登记在 §71.4 / §72.1，不要当成已对齐。**
+    - `LATEST_IN_TIME`（Rule 3）—— 原文：*"select the AGV that can **complete the no-load stage
+      at the latest before the earliest transportable time of assigned operation**; and if no
+      eligible AGV exists, select the AGV that can complete the no-load stage earliest"*。
+      **2026-10-08 起这条不再塌陷**：LA 的决策时点移到了**派工那一刻**（§74.5），
+      `view.ready_at` 是**未来**时刻，故"不晚于它"有真实内容（实测 56% 的池内条目可运输时刻
+      在未来，均值提前 1.8 min、最大 6.0 min）。
     """
     if rule == "MINCOST":
         return (view.empty_leg(aid) + view.loaded_leg(aid),)
     if rule == "MINU":
-        # ⚠️ 分母是全局 `now`，**不是**他们的 `ACT_v`（见 `la_score` 的文档）。
+        # ⚠️ 分母是全局 `now`，**不是**他们的 `ACT_v`（见上文）。
         return (view.vehicles[aid].busy_min / max(view.now, MINU_TIME_FLOOR),)
     if rule == "LATEST_IN_TIME":
-        arrive = view.now + view.empty_leg(aid)
+        arrive = max(view.vehicles[aid].free_at, view.now) + view.empty_leg(aid)
         # 第一级：0 = 赶得上（空载段在"可运输时刻"之前跑完）、1 = 赶不上。
         # 第二级：赶得上的取**最晚**（`-arrive` 升序 = arrive 降序）；赶不上的取**最早**。
-        return (0, -arrive) if arrive <= view.now else (1, arrive)
+        return (0, -arrive) if arrive <= view.ready_at else (1, arrive)
     raise ValueError(f"未知的 LA 规则 {rule!r}；可选={LA_RULE_NAMES}")
 
 
-def la_rule_policy(rule: int | str, layout, leg_min: Callable[[int, int], float]
-                   ) -> Callable[[Snapshot, int, int, int, int, Sequence[int]], int]:
-    """第 `rule` 条 LA 规则 → **`policy_l` 回调**（契约同 `run_gated` 的 `policy_l`）。
+def la_rule_policy(rule: int | str
+                   ) -> Callable[[LAView, Sequence[int]], int]:
+    """第 `rule` 条 LA 规则 → **`policy_l` 回调**：`policy_l(view, cand_v) -> 车号`。
 
-    `layout` 供 **端点号 → 通道节点**（机台 `0..m-1`、装卸站 = `m`）；
-    `leg_min(u, v)` 是**与仿真同一条**的行程时长口径（`SimWorld.leg_min`）——
-    规则不另造距离量。
+    契约与 `policy_pa` 对称：环境装好 `LAView`（纯数据，含 `ready_at` 与行程时长口径），
+    规则只读它——**规则层不认识 SimPy，也不认识布局**。
     """
     name = LA_RULE_NAMES[_resolve_la_rule(rule)]
-    n_m = len(layout.machines)
-    lu_node = int(layout.lu.dock_node)
 
-    def node_of(endpoint: int) -> int:
-        e = int(endpoint)
-        return int(layout.machines[e].dock_node) if e < n_m else lu_node
-
-    def policy(snap: Snapshot, job: int, frm: int, to: int, oi: int,
-               cand_v: Sequence[int]) -> int:
-        view = LAView(
-            now=float(snap.now),
-            task=LATask(job=int(job), oi=int(oi),
-                        frm_node=node_of(frm), to_node=node_of(to)),
-            vehicles=tuple(LAVehicle(node=int(v.node), busy_min=float(v.busy_min))
-                           for v in snap.vehicles),
-            leg_min=leg_min)
+    def policy(view: LAView, cand_v: Sequence[int]) -> int:
         if not cand_v:
             raise ValueError("LA 候选集为空——派车决策点不该出现（全车队恒可候选）")
         return int(min(cand_v, key=lambda a: (la_score(name, view, int(a)), int(a))))
