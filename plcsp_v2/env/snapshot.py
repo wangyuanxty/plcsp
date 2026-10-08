@@ -64,8 +64,8 @@ class VehicleState:
     node: int               # 当前所在通道节点
     queued: int             # 本车待办任务数
     battery_frac: float     # [0,1]
-    capacity: int
-    speed_factor: float
+    # ⚠️ **v2：⑩ 去后，`capacity`（载量）与 `speed_factor`（速度倍率）已删**
+    # （2026-10-08）—— 车队同构、单车单载，这两个量对每台车都相同，无信息。
     # ① 拥堵：本车**此刻**等待区段的时长 [min]（不在等待 = 0.0）。① 关闭时恒 0。
     # ⚠️ 是"当前等了多久"，**不是**"累计等过多久"——放行即清零（`ZoneManager.current_wait`
     # 的口径）；残留值会把"等过"误报成"还在等"。归一化除以 `SimConfig.zone_wait_limit`。

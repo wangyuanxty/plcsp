@@ -32,7 +32,7 @@ class ConstraintConfig:
     due_dates: bool = True            # ⑧ 交期 / 拖期（TF/RDD：LB·τ·(1+R(2ρ−1))，见 due_dates.py）
     agv_failure: bool = True          # ⑨ AGV 故障
     # C 类：真花钱
-    heterogeneous_fleet: bool = True  # ⑩ 异构车队（载重/速度/多载量）
+    # ⚠️ **v2：⑩ 异构车队（含拼批）开关已删**（2026-10-08）
     charging: bool = True             # ⑪ 充电 / 电量
     maintenance: bool = True          # ⑫ 预防性维护（计划性停机）
 
@@ -53,12 +53,12 @@ _FULL = ConstraintConfig()
 
 ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "Full": _FULL,
-    "-物流": _FULL.with_off("congestion", "agv_failure", "heterogeneous_fleet", "charging"),
+    "-物流": _FULL.with_off("congestion", "agv_failure", "charging"),
     "-生产": _FULL.with_off("machine_failure", "maintenance"),
     "-信息": _FULL.with_off("due_dates"),
     "None": _FULL.with_off("congestion", "machine_failure",
                            "due_dates",
-                           "agv_failure", "heterogeneous_fleet", "charging", "maintenance"),
+                           "agv_failure", "charging", "maintenance"),
 }
 
 # ── P4-B：两个报告档（用户裁定 2026-10-03）──

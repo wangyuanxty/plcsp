@@ -103,15 +103,14 @@ class LuPad:
 
 @dataclass(frozen=True)
 class AgvSpec:
-    """单台 AGV 的规格（⑩ 异构车队的载体）。**参数全部 assumed**，见 spec §9。
+    """单台 AGV 的规格。**参数 assumed**，见 spec §9。
 
-    `speed_factor` 是**相对倍率**（不是绝对 m/s）——绝对车速仍是 `SimConfig.agv_speed_mps`
-    这条扫描轴，此处只表达"车队内部有快慢差"。异构关闭时倍率一律取 1.0。
+    ⚠️ **v2：⑩ 异构车队与拼批已删**（2026-10-08）—— `speed_factor`（速度倍率）与
+    `capacity`（拼车件数上限）两个字段一并去掉。车队现在**同构、单车单载**：
+    绝对车速取 `SimConfig.agv_speed_mps`，载量恒 1。
     """
     id: int
-    speed_factor: float       # × cfg.agv_speed_mps，∈ [0.8, 1.2]
-    capacity: int             # 同向拼车的件数上限
-    battery_kwh: float        # 电池容量 [kWh]
+    battery_kwh: float        # 电池容量 [kWh]（⑪ 充电用，保留）
 
 
 @dataclass
@@ -141,8 +140,7 @@ def grid_shape(n_machines: int) -> tuple[int, int]:
 
 def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
                   cell_h: float = 2.4, aisle_w: float = 1.5,
-                  n_chargers: int = 2, n_agv: int = 3,
-                  max_agv_capacity: int = 3) -> Layout:
+                  n_chargers: int = 2, n_agv: int = 3) -> Layout:
     """采样一个网格布局 + 车队规格。同 (n_machines, seed, 尺寸, 车队参数) → 同结果（确定性）。
 
     机台按格子顺序（逐行）占用前 n_machines 个格子；dock 落在该格左上角节点。
@@ -151,8 +149,6 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
     ⚠️ **`n_agv` 必须与 `SimConfig.n_agv` 一致**——否则布局的车队与仿真的车队数量不符，
     是**静默错误**（`rollout` 已负责传参；直接调 `SimWorld` 的调用点须自己保证）。
     """
-    if max_agv_capacity < 1:
-        raise ValueError(f"载量上限必须 ≥ 1，收到 {max_agv_capacity}")
     rng = np.random.default_rng(seed)
     n_rows, n_cols = grid_shape(n_machines)
     spec = GridSpec(n_rows=n_rows, n_cols=n_cols, cell_w=cell_w, cell_h=cell_h, aisle_w=aisle_w)
@@ -184,11 +180,9 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
     lu = LuPad(node=spec.lu_node, dock_node=spec.lu_dock_node,
                x=spec.lu_xy[0], y=spec.lu_xy[1], connector_m=spec.lu_connector_m)
 
-    # 车队规格（⑩ 异构）。⚠️ 抽样放在**最后**——机台/充电桩的抽样序列才不会被扰动。
-    # 这些数只被 `AgvSim` 在 `heterogeneous_fleet=True` 时读；关掉时行为与"从未存在"一致。
+    # 车队规格。⚠️ 抽样放在**最后**——机台/充电桩的抽样序列才不会被扰动。
+    # ⚠️ **v2（⑩ 去后）**：只剩电池容量（⑪ 充电要用）；速度与载量不再逐车不同。
     agvs = [AgvSpec(id=a,
-                    speed_factor=float(rng.uniform(0.8, 1.2)),       # assumed：±20% 速度差
-                    capacity=int(rng.integers(1, max_agv_capacity + 1)),  # assumed
                     battery_kwh=float(rng.uniform(2.0, 4.0)))        # assumed
             for a in range(n_agv)]
 

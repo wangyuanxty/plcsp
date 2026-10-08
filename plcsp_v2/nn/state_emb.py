@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """快照 + 实例 + 布局 → 编码器输入（spec §5.3.1）。
 
-四段宽度不同（F_M=7 / F_B=8 / F_V=11 / F_G=3；v2：④ 返工删后 F_B 9→8），故各自算完后**补齐到 `F_MAX` 后按序列
+四段宽度不同（F_M=7 / F_B=8 / F_V=9 / F_G=3；v2：④ 删后 F_B 9→8、⑩ 删后 F_V 11→9），故各自算完后**补齐到 `F_MAX` 后按序列
 拼成单张 `(N, F_MAX)`**（spec §5.3.1），并给出 `seg` 标出各段行数。
 """
 from __future__ import annotations
@@ -155,7 +155,9 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_agv, 11)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。
+    """(n_agv, 9)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。
+
+    ⚠️ **v2：⑩ 去后由 11 维降到 9 维**（2026-10-08）—— 去掉 `capacity` 与 `speed_factor`。
 
     ⚠️ **第 10 维（zone_wait）在 ① `congestion` 关闭时恒 0**（R1c，同型）：① 关时 `_drive`
     根本不申请区段（等待状态永不存在），但特征仍**显式读开关**静默——快照里带值也不得外泄。
@@ -180,10 +182,9 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
                   y,                                                 # 5 node_y
                   _safe(v.queued / max(ctx.max_queued, 1), 0.0, 1.0),   # 6 queued
                   _safe(v.battery_frac, 0.0, 1.0),                   # 7 battery
-                  v.capacity / max(ctx.max_capacity, 1),             # 8 capacity
-                  _safe(v.speed_factor, 0.0, 2.0),                   # 9 speed_factor
+                  # ⚠️ **v2：⑩ 去后，原 8 `capacity` / 9 `speed_factor` 两维已删**（2026-10-08）
                   (_safe(v.zone_wait / max(ctx.zone_wait_limit, 1e-9), 0.0, 1.0)
-                   if ctx.constraints.congestion else 0.0))          # 10 zone_wait（① 关恒 0）
+                   if ctx.constraints.congestion else 0.0))          # 8 zone_wait（① 关恒 0）
     return out
 
 
