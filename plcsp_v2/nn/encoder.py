@@ -31,11 +31,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .cuda_graph import CudaGraphForward
-from .features import F_B, F_G, F_M, F_MAX, F_V, F_Z, SEG_SLICE
+from .features import F_B, F_G, F_M, F_MAX, F_V, SEG_SLICE
 
-_SEG_KEYS = ("M", "B", "V", "G", "Z")     # 与 seg 元组的段序一一对应（不可改动）
-_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 四段实际列数（= `SEG_SLICE` 的宽度）；
-                                          # 第五段 Z（R2，可选）的投影是独立的 `proj_z`
+_SEG_KEYS = ("M", "B", "V", "G")          # 与 seg 元组的段序一一对应（不可改动）
+_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 四段实际列数（= `SEG_SLICE` 的宽度）
+# ⚠️ **v2：① 拥堵去后 Z 段（区段 token）整段移除**（2026-10-08）—— `proj_z` /
+# `zone_type_emb` / 五元 seg 三条路径一并删。`seg` 现在恒为四元。
 
 
 class AttnLayer(nn.Module):
@@ -101,18 +102,11 @@ class LayoutEncoder(nn.Module):
         self.type_emb = nn.Parameter(torch.randn(self.N_SEG_TYPES, d_model) * 0.02)
         self.layers = nn.ModuleList([AttnLayer(d_model, n_heads) for _ in range(n_layers)])
         self.ln = nn.LayerNorm(d_model)
-        # ⚠️ **R2 区段 token（2026-10-05）——新增参数一律建在既有参数之后，且不消耗全局
-        # 抽签流**：`torch.random.fork_rng()` 把 `nn.Linear` 的构造抽签隔离掉。否则这些
-        # 多出来的随机数会把**后续**（PolicyNet 的头）的初始化整体移位，默认关态的黄金摘要
-        # （含随机初值）全部作废。`proj` 仍是 4 个 Linear、`type_emb` 仍是 4 行——既有
-        # 参数的形状与取值一位不变；Z 段只在 `seg` 有五元时使用。
-        with torch.random.fork_rng():
-            self.proj_z = nn.Linear(F_Z, d_model)            # Z 段自己的投影（分段投影纪律）
-            self.zone_type_emb = nn.Parameter(torch.randn(d_model) * 0.02)
+        # ⚠️ **v2：`proj_z` / `zone_type_emb` 已删**（2026-10-08）—— Z 段不存在了。
 
     def forward(self, tok_feat: torch.Tensor, seg: tuple[int, ...],
                 bias: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_g=1[, n_zones])。
+        """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_g=1) —— **v2 恒为四元**。
 
         返回 (token 嵌入 (B, N, d), 全局上下文 (B, d)=按 token 均值池化)。
         `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
@@ -179,7 +173,7 @@ class LayoutEncoder(nn.Module):
         """纯计算：分段投影 + 类型嵌入 + N 层注意力 + 末层 LayerNorm。
 
         **无守卫、无图**——两样都由 `forward` 负责。图快路捕获的就是本函数。
-        `seg` 四元 = 默认配置（既有路径，逐位等于今日）；五元 = R2（Z 段走 `proj_z`）。
+        `seg` **恒为四元**（v2：Z 段已删）。
         `bias` = ② 的逐层注意力偏置（`None` = 不加，逐位等于今日）。
         """
         tid = self._type_ids(seg, tok_feat.device)
@@ -187,19 +181,10 @@ class LayoutEncoder(nn.Module):
         parts, r = [], 0
         for i, n in enumerate(seg):
             if n:
-                if i < len(_SEG_DIMS):
-                    parts.append(self.proj[i](tok_feat[:, r:r + n, :_SEG_DIMS[i]]))
-                else:                                   # 第 5 段：Z（R2 区段 token）
-                    parts.append(self.proj_z(tok_feat[:, r:r + n, :F_Z]))
+                parts.append(self.proj[i](tok_feat[:, r:r + n, :_SEG_DIMS[i]]))
             r += n
         x = torch.cat(parts, dim=1)
-        if len(seg) == self.N_SEG_TYPES:
-            x = x + self.type_emb[tid]                  # 默认配置：**与今日同一条表达式**
-        else:
-            # R2：第 5 类（Z）走 `zone_type_emb`——既有四类的嵌入一位不变（不搞乱 type_emb
-            # 语义：Z 有自己的一行，不是复用 G/类型 3 的嵌入）。
-            tab = torch.cat([self.type_emb, self.zone_type_emb.unsqueeze(0)], dim=0)
-            x = x + tab[tid]
+        x = x + self.type_emb[tid]                  # v2：只有四类，无 Z 分支
         for layer in self.layers:
             x = layer(x, bias)
         x = self.ln(x)

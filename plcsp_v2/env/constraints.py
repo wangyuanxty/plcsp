@@ -23,7 +23,7 @@ class ConstraintConfig:
     ⑥ 模糊加工**已砍**（2026-10-03，实测不 binding）——故为 10 而非 11。
     """
     # A 类：基建已有
-    congestion: bool = True           # ① AGV 拥堵 / 区段冲突 / 死锁（粒度见 SimConfig.zone_granularity）
+    # ⚠️ **v2：① 拥堵开关已删**（2026-10-08）—— 区段机制整个移除
     # ⚠️ **v2：② 有限缓冲开关已删**（2026-10-08）
     machine_failure: bool = True      # ③ 机器故障（泊松 + 中断恢复）
     # B 类：近乎免费
@@ -39,7 +39,7 @@ class ConstraintConfig:
     def with_off(self, *names: str) -> "ConstraintConfig":
         """返回**关掉指定开关**的副本（不可变风格，不原地改）。
 
-        用法：`cfg.with_off("congestion", "due_dates")`。
+        用法：`cfg.with_off("agv_failure", "due_dates")`。
         取 `*names` 而非 `**kw` 是刻意的——后者要写 `with_(rework=True)` 才能关，
         值被忽略、靠 key 表意，极易读反。
         """
@@ -53,10 +53,10 @@ _FULL = ConstraintConfig()
 
 ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "Full": _FULL,
-    "-物流": _FULL.with_off("congestion", "agv_failure", "charging"),
+    "-物流": _FULL.with_off("agv_failure", "charging"),
     "-生产": _FULL.with_off("machine_failure", "maintenance"),
     "-信息": _FULL.with_off("due_dates"),
-    "None": _FULL.with_off("congestion", "machine_failure",
+    "None": _FULL.with_off("machine_failure",
                            "due_dates",
                            "agv_failure", "charging", "maintenance"),
 }

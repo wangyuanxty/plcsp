@@ -13,7 +13,7 @@ from ..env.layout import Layout
 from ..env.snapshot import Snapshot
 # `norm_context` 用冗余别名转出（explicit re-export）——`NormContext` 的构造入口在
 # `features.py`（与字段定义同处一地），此处只为保持 `state_emb.norm_context` 这个既有入口可用。
-from .features import (F_B, F_M, F_MAX, F_V, F_Z, SEG_SLICE, NormContext,
+from .features import (F_B, F_M, F_MAX, F_V, SEG_SLICE, NormContext,
                        norm_context as norm_context)
 
 
@@ -27,8 +27,8 @@ def _safe(x: float, lo: float, hi: float) -> float:
 GEOM_BIAS_W = 1.0
 
 
-def build_geom_bias(snap: Snapshot, inst: Instance, layout: Layout, ctx: NormContext,
-                    dm: np.ndarray, zof: dict[int, int] | None = None) -> np.ndarray:
+def build_geom_bias(snap: Snapshot, inst: Instance, layout: Layout,
+                    ctx: NormContext, dm: np.ndarray) -> np.ndarray:
     """几何/度量偏置矩阵 `(N, N)`——**只在 `geom_bias=True` 时构造**（② 拥堵的"距离可感知"）。
 
     口径（设计节「几何/度量偏置」定死）：
@@ -39,22 +39,19 @@ def build_geom_bias(snap: Snapshot, inst: Instance, layout: Layout, ctx: NormCon
     - `d` 取自 `dm`（`dock_distance_matrix(build_corridor_graph(layout))`）——**与仿真
       `AgvSim._seg_min` 的行驶时长同一张矩阵**（单位 [m]），不另造距离量；
     - 锚：M = 该机台的 `dock_node`；B = `at_machine` 的 dock，否则 `on_agv` 所在车的
-      `node`（≥0 才有），否则**无锚**；V = 该车 `node`（`-1` = 尚未出车 ⟹ 无锚）；
-      Z（仅 R2 打开时）= 该区段的**最小成员节点**（`zof` 反查；row/col/all 粒度下一个
-      区段含多节点，取最小号是确定性的）；G = **无锚**。
+      `node`（≥0 才有），否则**无锚**；V = 该车 `node`（`-1` = 尚未出车 ⟹ 无锚）；G = **无锚**。
+      （⚠️ **v2：① 拥堵去后 Z 段已删**（2026-10-08）—— 原"区段最小成员节点"锚不再存在。）
     - 缺锚的行/列全 0（**中性，不是哨兵**）；对角恒 0；不可达（`inf`）按缺锚处理
       （不把 NaN/inf 送进 softmax）。
 
     ⚠️ **只作"输入"**：本项只让距离/拥堵可被感知；**不得**借它主张跨布局/跨拓扑泛化
     （`method-transfer-candidates.md` §6.3 的裁定——那是 2026-10-02 砍掉的卖点）。
-    ⚠️ `zof` 必须与 `build_tok` 的 Z 段**同一份**（否则行号对不上）；`None` = 无 Z 段。
     """
     n_m = int(inst.n_machines)
     n_b = int(inst.n_jobs)
     n_v = int(ctx.n_agv)
     n_base = n_m + n_b + n_v + 1                      # 四段行数（G 在末位）
-    n_z = 0 if zof is None else (max(zof.values()) + 1 if zof else 0)
-    anchors: list[int | None] = [None] * (n_base + n_z)
+    anchors: list[int | None] = [None] * n_base
     for i, mp in enumerate(layout.machines):
         anchors[i] = int(mp.dock_node)
     for j, js in enumerate(snap.jobs):
@@ -73,13 +70,6 @@ def build_geom_bias(snap: Snapshot, inst: Instance, layout: Layout, ctx: NormCon
             break
         node = int(v.node)
         anchors[n_m + n_b + a_i] = node if node >= 0 else None
-    if zof is not None:                               # Z 段：区段的最小成员节点
-        members: dict[int, list[int]] = {}
-        for node, z in zof.items():
-            members.setdefault(int(z), []).append(int(node))
-        for z, ns in members.items():
-            if 0 <= z < n_z:
-                anchors[n_base + z] = min(ns)
     N = len(anchors)
     out = np.zeros((N, N), dtype=np.float32)
     scale = GEOM_BIAS_W / max(ctx.bbox_diag, 1e-9)
@@ -159,9 +149,7 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
     ⚠️ **v2：⑩ 去后由 11 维降到 9 维**（2026-10-08）—— 去掉 `capacity` 与 `speed_factor`。
 
-    ⚠️ **第 10 维（zone_wait）在 ① `congestion` 关闭时恒 0**（R1c，同型）：① 关时 `_drive`
-    根本不申请区段（等待状态永不存在），但特征仍**显式读开关**静默——快照里带值也不得外泄。
-    归一化除以 `ctx.zone_wait_limit`（= 跑仿真那份 `SimConfig` 的等待上限，同 F3 的同源要求）。
+    ⚠️ **v2：① 去后 `zone_wait` 维已删**（2026-10-08）。
     """
     out = np.zeros((ctx.n_agv, F_V), dtype=np.float32)
     for a, v in enumerate(snap.vehicles):
@@ -181,10 +169,9 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
                   x,                                                 # 4 node_x
                   y,                                                 # 5 node_y
                   _safe(v.queued / max(ctx.max_queued, 1), 0.0, 1.0),   # 6 queued
-                  _safe(v.battery_frac, 0.0, 1.0),                   # 7 battery
-                  # ⚠️ **v2：⑩ 去后，原 8 `capacity` / 9 `speed_factor` 两维已删**（2026-10-08）
-                  (_safe(v.zone_wait / max(ctx.zone_wait_limit, 1e-9), 0.0, 1.0)
-                   if ctx.constraints.congestion else 0.0))          # 8 zone_wait（① 关恒 0）
+                  _safe(v.battery_frac, 0.0, 1.0))                   # 7 battery
+                  # ⚠️ **v2**：原 8 `capacity` / 9 `speed_factor`（⑩ 去）与
+                  # 原 `zone_wait`（① 去）三维已删（2026-10-08）
     return out
 
 
@@ -197,49 +184,11 @@ def global_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
     ]], dtype=np.float32)
 
 
-def zone_features(snap: Snapshot, ctx: NormContext, zof: dict[int, int],
-                  n_zones: int) -> np.ndarray:
-    """R2 区段 token 的特征 `(n_zones, F_Z)`——**只在 `route_zones=True` 时构造**。
-
-    列序 = `FEATURE_NAMES["Z"]`：`[busy, wait_frac, zone_x, zone_y]`。
-
-    - `busy` = `Snapshot.zone_holder[z] != -1`（有车持着该区段）；
-    - `wait_frac` = `Snapshot.zone_wait[z] / ctx.zone_wait_limit`——该区段的**当前**等待
-      压力（逐区段取"正在等它"的车里最大的等待时长）。与 V 段 `zone_wait` 同一原料、
-      同一标度；放行/超时即清零，不会把"等过"报成"还在等"。
-    - `zone_x` / `zone_y` = 该区段**成员节点**坐标的均值 ÷ `bbox_diag`——区段的身份维。
-      `node` 粒度下成员就是该节点自身；`row`/`col`/`all` 粒度下一个区段含多个节点，
-      取均值（成员集合只由 `zof` 决定 ⟹ 确定性）。装卸站节点（格点外）也在 `ctx.node_xy` 里。
-
-    ⚠️ **缺表**（`zone_holder` / `zone_wait` 为空 = 手搓快照或 `_cold_start`）⟹ `busy` /
-    `wait_frac` 恒 0——**不是哨兵**（同 R 候选特征的约定：缺表 = 该维无信息）。
-    ⚠️ `zof` / `n_zones` 必须与仿真侧**同一份** `build_zone_map(layout, cfg.zone_granularity)`
-    （`roll_chain` 与 `SimWorld` 各自现算，同一函数同一入参 ⟹ 不可能漂）。
-    """
-    nz = int(n_zones)
-    out = np.zeros((nz, F_Z), dtype=np.float32)
-    holder = snap.zone_holder
-    waits = snap.zone_wait
-    members: list[list[int]] = [[] for _ in range(nz)]
-    for node, z in zof.items():
-        if 0 <= int(z) < nz:
-            members[int(z)].append(int(node))
-    for z in range(nz):
-        if z < len(holder):
-            out[z, 0] = 0.0 if int(holder[z]) < 0 else 1.0
-        if z < len(waits):
-            out[z, 1] = _safe(float(waits[z]) / max(ctx.zone_wait_limit, 1e-9), 0.0, 1.0)
-        if members[z]:                                   # 区段身份：成员节点坐标均值
-            xs = [ctx.node_xy[n][0] for n in members[z]]
-            ys = [ctx.node_xy[n][1] for n in members[z]]
-            out[z, 2] = (sum(xs) / len(xs)) / ctx.bbox_diag
-            out[z, 3] = (sum(ys) / len(ys)) / ctx.bbox_diag
-    return out
+# ⚠️ **v2：① 去后 `zone_features` 已删**（2026-10-08）—— 无区段 token
 
 
 def build_tok(snap: Snapshot, inst: Instance, layout: Layout,
-              ctx: NormContext, zof: dict[int, int] | None = None,
-              n_zones: int = 0) -> tuple[np.ndarray, tuple[int, ...]]:
+              ctx: NormContext) -> tuple[np.ndarray, tuple[int, ...]]:
     """快照 → **单张** `(N, F_MAX)` 特征张量 + `seg`（spec §5.3.1）。
 
     四段各自算完后按 `SEG_SLICE` 填进对应行，**列不足处保持 0**（补零）。
@@ -247,16 +196,11 @@ def build_tok(snap: Snapshot, inst: Instance, layout: Layout,
 
     ⚠️ `seg` 由**各段实际行数**推出，**不硬编码实例规模**（Review Focus #2）。
 
-    ⚠️ **R2 区段 token（2026-10-05）**：`zof` 非空（= `route_zones=True`）时**末位追加**
-    第五段 "Z"，`seg` 变成五元组、序列多出 `n_zones` 行；`zof=None`（默认）时**逐位等于
-    今日**（四段、四元组、行数不变）。区段行只填 `SEG_SLICE["Z"]`（4 列），其余列保持 0
-    ——编码器的补零守卫照旧（`_pad_positions` 按 seg 现算）。
+    ⚠️ **v2：① 拥堵去后 Z 段（区段 token）已删**（2026-10-08）—— `seg` **恒为四元**。
     """
     parts = [("M", machine_features(snap, ctx)), ("B", job_features(snap, ctx)),
              ("V", vehicle_features(snap, ctx)), ("G", global_features(snap, ctx))]
-    if zof is not None:
-        parts.append(("Z", zone_features(snap, ctx, zof, n_zones)))
-    seg = tuple(p.shape[0] for _k, p in parts)                    # 默认 (n_m, n_jobs, n_agv, 1)
+    seg = tuple(p.shape[0] for _k, p in parts)                    # 恒为 (n_m, n_jobs, n_agv, 1)
     tok = np.zeros((sum(seg), F_MAX), dtype=np.float32)
     r = 0
     for key, p in parts:

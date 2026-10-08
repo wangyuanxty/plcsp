@@ -29,7 +29,6 @@ from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
                       agv_energy_breakdown_kwh, agv_energy_kwh,
                       machine_energy_breakdown_kwh, machine_energy_kwh,
                       machine_params_for, total_energy_kwh)
-from .corridors import k_shortest_paths, shortest_node_path
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
@@ -91,9 +90,10 @@ class SimConfig:
     # （spec §3.4 表："AGV 3 台，0.5 m/s"）；1.0 是无出处的拍脑袋值，且使运输被低估一倍。
     # 文献区间：0.3–0.6（IEJ 随机批量运输 FJSP）、1.2（FlexSim 车间级案例）。车速是扫描轴之一。
     agv_speed_mps: float = 0.5
-    zone_hold: float = 1.0        # 缓冲满退避时长 [min]
-    zone_granularity: str = "node"   # 区段粒度：node|row|col|all（越粗→区段越少→争用越强）
-    zone_wait_limit: float = 8.0     # 区段申请等待上限 [min]（超时→退避重试）
+    # ⚠️ **v2：① 去后 `zone_granularity` / `zone_wait_limit` 已删**（2026-10-08）。
+    # `zone_hold` **保留**——它是通用退避时长，另有三处在用（⑨ failover 重试、
+    # 负载段失败后退避、待命轮询），与区段无关。
+    zone_hold: float = 1.0        # 通用退避时长 [min]（原为区段而设，v2 下另作他用）
     repair_time: float = 5.0      # [min]
     aisle_width: float = 1.5      # 通道宽（米）：窄通道限速 = Phase A2 真权衡来源
     # ── 约束参数（**全部 assumed**，无文献出处；见 spec §9 的 assumed 表）──
@@ -624,112 +624,8 @@ class LuStation:
                 self.done.succeed()
 
 
-def build_zone_map(layout, granularity: str) -> tuple[dict[int, int], int]:
-    """按粒度构造「节点 → 区段」映射。**粒度越粗 → 区段越少 → 争用越强。**
-
-    - `node`：每个通道节点一个区段（最细；MK10 的 5×4 网格 → 30 个）
-    - `row` / `col`：整行 / 整列算一个区段（像"一条长廊一个区段"）
-    - `all`：全图一个区段（极端参数，用于下界）
-
-    ⚠️ 装卸站是**格点外**节点（号 = `grid.n_nodes`），`row`/`col` 没有它的行列号 ⟹
-    给它**独占**一个区段（`all` 粒度则并入唯一那一个）——它不是路口，不该与某一行共用区段。
-    """
-    spec = layout.grid
-    n = spec.n_nodes                      # 格点交叉口数（装卸站不在其中）
-    if granularity == "all":
-        return dict.fromkeys(range(n + 1), 0), 1
-    if granularity == "node":
-        zof, nz = {i: i for i in range(n)}, n
-    elif granularity == "row":
-        zof, nz = {i: spec.node_rc(i)[0] for i in range(n)}, spec.n_rows + 1
-    elif granularity == "col":
-        zof, nz = {i: spec.node_rc(i)[1] for i in range(n)}, spec.n_cols + 1
-    else:
-        raise ValueError(f"未知区段粒度：{granularity}")
-    zof[spec.lu_node] = nz                # 装卸站独占一格（node 粒度下恰好等于它自己的号）
-    return zof, nz + 1
-
-
-class ZoneManager:
-    """区段管制：**一区段一车互斥** + 等待环检测（经典 AGV 死锁的防法）。
-
-    ⚠️ **区段粒度是参数**（`SimConfig.zone_granularity`）：粒度越粗 → 区段数越少 → 争用越强。
-    真实 AGV 系统两种都有（长廊算一个区段 vs 每个路口一个），故做成可扫描的参数。
-
-    `zone_of`: 节点号 → 区段号 的映射（由 `SimWorld` 按粒度构造）。
-    """
-
-    def __init__(self, env: simpy.Environment, zone_of: dict[int, int], n_zones: int,
-                 wait_limit: float):
-        self.env, self.wait_limit, self.zone_of, self.n = env, wait_limit, zone_of, n_zones
-        self.holder: dict[int, int | None] = dict.fromkeys(range(n_zones))
-        self.pending: dict[int, int] = {}
-        # AGV → **本次**等待的申请时刻 [min]。与 `pending` **同处增删**：只描述"此刻还在等"，
-        # 一放行/超时就清（`current_wait` 的口径；累计史在 `waits`，两者不可混用）。
-        self.pending_since: dict[int, float] = {}
-        self._ev: dict[int, simpy.Event] = {}
-        self.waits: list[float] = []      # 区段等待时长 [min]——拥堵的唯一度量
-
-    # ── 等待环检测（不变）──
-    def _wait_path_to(self, start: int, target: int) -> bool:
-        node, seen = start, set()
-        while node is not None and node != target:
-            if node in seen:
-                return False
-            seen.add(node)
-            z = self.pending.get(node)
-            if z is None:
-                return False
-            node = self.holder.get(z)
-        return node == target
-
-    def would_cycle(self, agv: int, z: int) -> bool:
-        return self.holder.get(z) not in (None, agv) and self._wait_path_to(self.holder[z], agv)
-
-    # ── 申请 / 释放 ──
-    def try_grant(self, agv: int, z: int) -> bool:
-        if self.holder[z] == agv:
-            return True
-        if self.holder[z] is not None:
-            return False
-        self.holder[z] = agv
-        return True
-
-    def current_wait(self, agv: int) -> float:
-        """本车**此刻**等待区段的时长 [min]；不在等待 = 0.0（特征层 `zone_wait` 维的唯一原料）。
-
-        ⚠️ 与 `waits`（**完成后**追加的累计史）不同：这是"当前还在等多久"，放行/超时即清零
-        （`pending_since` 与 `pending` 同处增删）。读累计史会把"等过"报成"还在等"（假信号）。
-        """
-        t0 = self.pending_since.get(agv)
-        return 0.0 if t0 is None else max(0.0, float(self.env.now) - t0)
-
-    def wait_zone(self, agv: int, z: int, limit: float | None = None):
-        if self.try_grant(agv, z):
-            return True, False
-        if self.would_cycle(agv, z):
-            return False, True
-        self.pending[agv] = z
-        t0 = self.env.now
-        self.pending_since[agv] = t0
-        ev = self._ev.setdefault(z, simpy.Event(self.env))
-        yield ev | self.env.timeout(limit or self.wait_limit)
-        self.waits.append(self.env.now - t0)
-        self.pending.pop(agv, None)
-        self.pending_since.pop(agv, None)
-        if self.try_grant(agv, z):
-            return True, False
-        return False, False
-
-    def release(self, agv: int, z: int) -> None:
-        if self.holder.get(z) == agv:
-            self.holder[z] = None
-            ev = self._ev.get(z)
-            if ev is not None and not ev.triggered:
-                ev.succeed()
-            self._ev[z] = simpy.Event(self.env)
-        self.pending.pop(agv, None)
-        self.pending_since.pop(agv, None)
+# ⚠️ **v2：① 拥堵去后 `build_zone_map` 与 `ZoneManager` 已删**（2026-10-08）——
+# 无区段机制，AGV 行驶不再申请/释放区段。
 
 
 class AgvSim:
@@ -757,23 +653,19 @@ class AgvSim:
 
     def __init__(self, env, aid, m_dm: np.ndarray, transport: TransportCaliber, cfg: SimConfig,
                  stats: dict,
-                 tasks_in, machines: list, graph, zm, constraints, spec, rng,
+                 tasks_in, machines: list, graph, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 route=None, charge=None, fleet: list | None = None):
+                 charge=None, fleet: list | None = None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
         self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
-        self.g, self.zm = graph, zm
-        self.con = constraints              # ① congestion 等物流侧开关从这里读
-        self.congestion = constraints.congestion    # ① 关 → 无区段管制
+        self.g = graph
+        self.con = constraints              # 物流侧开关（⑨ 等）从这里读
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
         # ⚠️ **v2：⑩ 的 `multi_drop` 与拼批头（B）回调已删**（2026-10-08）
 
-        # 路线决策（R）的入口：`SimWorld` 给的 `(aid, src, dst, leg) -> 节点序列` 回调。
-        # `None` = **不启用**——`_drive` 恒走 `shortest_node_path`，且不多取快照/不多抽随机数
-        # ⟹ 逐位等于"路线头从未存在"的行为（既有全部读数立在这条上）。
-        self.route = route
+        # ⚠️ **v2：① 去后路线头（R）与 `route` 回调已删**（2026-10-08）—— `_drive` 恒走最短路。
         # 充电决策（C）的入口：`SimWorld` 给的 `(aid, cands) -> 动作码` 回调。
         # `None` = **规则配置**（低电 → 最近空闲桩，今日行为逐位不变）；
         # 非 None = 策略配置，`_maybe_charge` 在**每个空闲点**问它 {不去充} ∪ {各桩}。
@@ -1063,49 +955,15 @@ class AgvSim:
         """
         if src == dst:
             return True, dst
-        if not self.congestion:                 # ① 关：不申请区段，按距离直行
-            seg = self._leg_min(src, dst)
-            yield self.env.timeout(seg)
-            self._drain(leg, seg)               # ⑪ 行驶耗电
-            self.stats["travel_time"] += seg
-            self.stats[f"agv_{leg}_min"] += seg
-            self.stats["moves"] += 1
-            return True, dst
-        # 逐段申请区段：持当前 → 申请下一 → 成功才放上一 → 走这一段
-        path = (shortest_node_path(self.g, src, dst) if self.route is None
-                else self.route(self.aid, src, dst, leg))
-        # ⚠️ 矩阵口径下**整段时长先算出来**，逐段只决定**分摊比例**（占比之和恒为 1 ⟹
-        # 各段之和 == 矩阵查表值，有测试钉）；矩阵里没有"中间走廊节点"这一说，逐段查表必失败。
-        total = self._leg_min(src, dst) if self.transport.mode == MATRIX else None
-        leg_geo = self._seg_min(src, dst) if total is not None else 0.0
-        zseq = [self.zm.zone_of[p] for p in path]
-        zseq = [z for i, z in enumerate(zseq) if i == 0 or z != zseq[i - 1]]   # 合并同一区段的连续段
-        granted, cycle = yield from self.zm.wait_zone(self.aid, zseq[0], self.cfg.zone_wait_limit)
-        if cycle or not granted:
-            return False, src
-        travel, end, prev_z = 0.0, src, zseq[0]
-        for pi in range(len(path) - 1):
-            z = self.zm.zone_of[path[pi + 1]]
-            if z != prev_z:
-                granted, cycle = yield from self.zm.wait_zone(self.aid, z, self.cfg.zone_wait_limit)
-                if cycle or not granted:
-                    self.zm.release(self.aid, prev_z)
-                    self.stats["travel_time"] += travel
-                    self.stats[f"agv_{leg}_min"] += travel
-                    return False, end
-                self.zm.release(self.aid, prev_z)
-                prev_z = z
-            seg = self._seg_min(path[pi], path[pi + 1])
-            if total is not None:
-                seg = total * seg / leg_geo
-            yield self.env.timeout(seg)
-            self._drain(leg, seg)               # ⑪ 行驶耗电
-            travel += seg
-            end = path[pi + 1]
-            self.stats["moves"] += 1
-        self.zm.release(self.aid, prev_z)
-        self.stats["travel_time"] += travel
-        self.stats[f"agv_{leg}_min"] += travel
+        # ⚠️ **v2：① 拥堵与路线头（R）都已删**（2026-10-08）—— 按距离直行，一次走到底，
+        # 永不失败（原"逐段申请/释放区段 + 等待环检测"整段移除）。
+        # ⚠️ 矩阵口径下**整段时长一次算出**（原来是逐段按几何占比分摊——那时要逐段查表）。
+        seg = self._leg_min(src, dst)
+        yield self.env.timeout(seg)
+        self._drain(leg, seg)                   # ⑪ 行驶耗电
+        self.stats["travel_time"] += seg
+        self.stats[f"agv_{leg}_min"] += seg
+        self.stats["moves"] += 1
         return True, dst
 
     def run(self):
@@ -1244,23 +1102,23 @@ class SimWorld:
         return fleet
 
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
-                        seed_chain: int = 0, charger_res=(), route=None, pm=None,
+                        seed_chain: int = 0, charger_res=(), pm=None,
                         charge=None, seq: SeqDecide | None = None,
                         done=None) -> tuple[
-                            list, list[simpy.Store] | simpy.Store, ZoneManager, simpy.Store]:
+                            list, list[simpy.Store] | simpy.Store, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
         `run()` / `run_gated()` / `_cold_start()` **共用同一份**构造（逐字重复是本仓评审会判
         缺陷的形态）。⚠️ 只建对象、**不启进程**：`env.process` 的**注册顺序**决定同刻事件
         次序，故启动由调用方按原顺序做（机台 → 车辆）。返回调用方后续还要用的实体
-        `(entities, tasks_in, zm, events_q)`（`self.*` 上的活引用已一并挂好）。
+        `(entities, tasks_in, events_q)`（`self.*` 上的活引用已一并挂好）。
 
         ⚠️ **`entities` 比 `self.machines` 多一项**：末位是装卸站（端点号 = `inst.n_machines`）。
         任务端点、AGV 的投递目标都走这张表；而 `self.machines` **只含机台**——`snapshot()` 与
         `_energy_report` 的逐机台口径不能被装卸站污染（它不是机台）。
 
         ⚠️ `route`（R 层）：`None` = 不启用路线决策（`run()` / `_cold_start()` 恒如此）；
-        `run_gated` 传 `_make_route_fn(...)` 的返回值。透传给每台 `AgvSim`，`_drive` 消费。
+        ⚠️ **v2：`route`（R 头）已删**（2026-10-08）。
         ⚠️ `pm`（⑫ 维护头）：同上，`None` = 规则驱动；`run_gated` 传 `_make_pm_fn(...)` 的
         返回值。透传给每台 `MachineSim`，`_pm_after_op` 消费。
         ⚠️ `charge`（⑪ 充电头）：同上，`None` = 规则驱动（低电 → 最近空闲桩）；`run_gated`
@@ -1275,8 +1133,7 @@ class SimWorld:
         `None` = 不装（手搓夹具的既有用法逐字不变）。
         """
         specs = self._fleet()
-        zof, nz = build_zone_map(self.layout, self.cfg.zone_granularity)
-        zm = ZoneManager(env, zof, nz, self.cfg.zone_wait_limit)
+        # ⚠️ **v2：① 去后无 `ZoneManager`**（2026-10-08）
         events_q = simpy.Store(env)
         track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
@@ -1294,10 +1151,10 @@ class SimWorld:
         agvs: list[AgvSim] = []
         for a in range(self.cfg.n_agv):
             agvs.append(AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in,
-                               entities, self.g, zm, self.constraints, specs[a],
+                               entities, self.g, self.constraints, specs[a],
                                np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
                                track, chargers=self.layout.chargers, charger_res=charger_res,
-                               bound=bound, route=route, charge=charge, fleet=agvs))
+                               bound=bound, charge=charge, fleet=agvs))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
@@ -1306,7 +1163,6 @@ class SimWorld:
         self.lu = lu
         self.tasks_in = tasks_in
         self.track = track
-        self.zm = zm                        # ① 拥堵：`snapshot()` 取**每车当前**区段等待时长
         self._job_progress = track.job_progress
         self._job_loc = track.job_loc
         self._job_agv = track.job_agv
@@ -1315,7 +1171,7 @@ class SimWorld:
         self._agv_loaded = track.agv_loaded
         self._agv_load_n = track.agv_load_n
         self.agvs = agvs
-        return entities, tasks_in, zm, events_q
+        return entities, tasks_in, events_q
 
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
@@ -1446,8 +1302,7 @@ class SimWorld:
         **标称**最短候选工时之和。`JobState.due` = ⑧ 的交期（与 `run()` 同口径的 `_due_map`；
         约束关闭或参考运行内为 0.0）。`in_flight` = **队列里待取** + **车上在运**（两种队列形状
         都算，见下）。⚠️ **v2：④ 返工删后已无 `rework_cnt`**（2026-10-08）。
-        另一个约束量：`VehicleState.zone_wait` = 该车**当前**区段等待
-        时长（`ZoneManager.current_wait`，不在等待 = 0.0，放行即清零）。
+        ⚠️ **v2：① 去后 `VehicleState.zone_wait` 已删**（2026-10-08）。
         `queued_tasks` = **队列内容**（逐件身份，⑩ 拼批头的原料；两种队列形状都接，见下）。
         """
         from .snapshot import JobState, MachineState, QueuedTask, Snapshot, VehicleState
@@ -1483,8 +1338,7 @@ class SimWorld:
                                            (1 if agv.pos_node is not None else 0)),
                 node=int(agv.pos_node if agv.pos_node is not None else -1),
                 queued=len(self.tasks_in[a].items) if agv.bound else 0,
-                battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9)),
-                zone_wait=float(self.zm.current_wait(a))))
+                battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9))))
         # 在途 = **队列里待取** + **车上在运**。队列有两种形状（绑定=每车一 Store，
         # FIFO=单个共享 Store）——只看 `agv.bound` 那种形状会让 FIFO 路径恒为 0（F5）；
         # 车上那部分必须单独数，因为已装车的批次**已经离开队列**。
@@ -1503,16 +1357,7 @@ class SimWorld:
         return Snapshot(now=float(self.env.now), machines=tuple(ms), jobs=tuple(js),
                         vehicles=tuple(vs), n_done=len(self.completes),
                         in_flight=queued + sum(self._agv_load_n),
-                        # ① 拥堵：路线决策（R）按**路径**读的争用原料——逐区段的当前持有者。
-                        # 与 `VehicleState.zone_wait`（逐车"等了多久"）互补：这个量必须按
-                        # 候选路径聚合，逐车读不到（见 `snapshot.Snapshot.zone_holder`）。
-                        zone_holder=tuple(-1 if h is None else int(h)
-                                          for h in (self.zm.holder.get(z)
-                                                    for z in range(self.zm.n))),
-                        # ① 拥堵（R2 区段 token）：**同一份**逐车等待时长按区段的聚合——每个
-                        # 区段取"正在申请它的车"里最大的那个（`pending` 与 `pending_since`
-                        # 同处增删，放行/超时即清）。无人等 = 0.0。不新造状态量。
-                        zone_wait=self._zone_wait_max(),
+                        # ⚠️ **v2：① 去后 `zone_holder` / `zone_wait` 已删**（2026-10-08）
                         # ⑪ C 头：逐桩**当时**的占用/排队。下标 = `layout.chargers` 顺序
                         # （`charger_res` 与它同序建出）。`_cold_start` 无桩表 ⟹ 空元组。
                         chargers=tuple(ChargerState(occupied=int(res.count),
@@ -1521,22 +1366,7 @@ class SimWorld:
                                        for res in self.charger_res),
                         queued_tasks=tuple(qt))
 
-    def _zone_wait_max(self) -> tuple[float, ...]:
-        """逐区段的**当前**等待压力 `(n_zones,)`——每个区段取"正在等它"的车里最大的等待时长。
-
-        R2 区段 token 的 `wait_frac` 维即此量 ÷ `zone_wait_limit`（与 V 段 `zone_wait` 同一
-        标度、同一原料：`ZoneManager.pending` / `pending_since`）。**不是新状态**：`pending`
-        只描述"此刻还在等"（放行/超时即清），故这里读的是"现在"，不是"等过"。
-        逐区段扫描一次 `pending`（车数 ≤ 3–5，区段数 ≤ 30）：一次 O(n_agv) 的遍历，
-        不改变任何仿真状态（`snapshot()` 的只读契约）。
-        """
-        out = [0.0] * self.zm.n
-        for aid, z in self.zm.pending.items():
-            if 0 <= int(z) < self.zm.n:
-                w = self.zm.current_wait(int(aid))
-                if w > out[int(z)]:
-                    out[int(z)] = w
-        return tuple(out)
+    # ⚠️ **v2：① 去后 `_zone_wait_max` 已删**（2026-10-08）
 
     def _make_seq_decide(self, rank: list[list[float]]) -> SeqDecide:
         """把**静态工序优先表**编成 `decide(mach, jobs) -> 候选序号`（spec §5.1）。
@@ -1626,7 +1456,7 @@ class SimWorld:
         done = env.event()                      # 完工事件：末件到站即成功（见下"停表"注释）
         bound = agv_phi is not None
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
-        (entities, tasks_in, zm,
+        (entities, tasks_in,
          events_q) = self._build_entities(env, stats, completes, rng, bound=bound,
                                           seed_chain=seed_chain, charger_res=charger_res,
                                           seq=seq_decide, done=done)
@@ -1709,9 +1539,7 @@ class SimWorld:
                 "dbg": {k: v for k, v in stats.items()
                         if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue")},
                 "travel_time_total": float(stats["travel_time"]),
-                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
-                              "max": float(max(zm.waits)) if zm.waits else 0.0},
-                "n_zones": zm.n,
+                # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径**随结果自报**（P4-A Review Focus #1 同型）：两种口径的数并排放时靠这两行分辨
                 "transport": self.inst.transport,
                 "unmapped_legs": stats.get("unmapped_legs", 0),
@@ -1719,15 +1547,13 @@ class SimWorld:
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
-                  policy_r=None, route_k: int = 2, policy_m=None, policy_c=None) -> dict:
+                  policy_m=None, policy_c=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
         活状态快照交给它（无并发 → 无需事件/Gate）。S/L/R 的回调契约对称：
         `policy_l(snap, job, frm, to, oi+1, cand_v) -> 车号`（候选 = 全车队）；
         `policy_s(snap, job, oi, cand) -> 机台号`；
-        `policy_r(snap, aid, src, dst, leg, cands) -> 候选序号`（候选 = `route_k` 条最短路，
-        见 `_make_route_fn`；动作是**序号**，路径本身当不了动作号）。
         `des.py` 只给原始材料、**不构造任何特征**（层次纪律：`env/` 不得依赖 `nn/`）。
 
         `online_s=False`（默认）：S 层读**预计算**的 `plans`（`op_choices` 或贪婪最短）——
@@ -1737,11 +1563,8 @@ class SimWorld:
         此刻各队列皆空；同刻投放的作业共享同一初始视界）。`plans` 随之退化为**决策日志**
         （`plans[job][oi]` 在决策后写入），故**决策前不得读它**。
 
-        ⚠️ `policy_r=None`（默认）= **不启用路线决策**：`_drive` 恒走最短路，不多取快照、
-        不多抽随机数 ⟹ 逐位等于今日行为（既有读数靠它）。`route_k` 只在 `policy_r` 非空时
-        有意义（候选条数，本任务的设计值 = 2）。
-        ⚠️ `policy_r` 非空但 ① 拥堵关闭 → **显式报错**：① 关时区段机制不存在、选远路严格
-        更差（spec §5.3 的原始理由），给一个死动作只会污染链 logp。
+        ⚠️ **v2：路线头（R）与 `policy_r` / `route_k` 已删**（2026-10-08）——
+        ① 拥堵去掉后"选远路严格更差"，路线决策没有意义。
 
         ⚠️ **`policy_m`（⑫ 维护头，M）**：`None`（默认）= 规则驱动 ⟹ 逐位等于今日行为；
         非空 = **策略驱动**：一道工序加工完毕、下一件尚未上机时（`MachineSim._pm_after_op`）
@@ -1780,14 +1603,6 @@ class SimWorld:
         if online_s and op_choices is not None:
             raise ValueError("online_s=True 时计划由 policy_s 在线产生，op_choices 不生效——"
                              "两者同传会静默忽略计划，故直接报错")
-        route_fn = None
-        if policy_r is not None:
-            if not self.constraints.congestion:
-                raise ValueError(
-                    "policy_r 非空但 ① 拥堵关闭：区段机制不存在，选远路**严格更差**"
-                    "（spec §5.3 砍掉路线头的原始理由）——那会是一个死动作。请开 ① 或传 "
-                    "policy_r=None。")
-            route_fn = self._make_route_fn(policy_r, route_k)
         pm_fn = None
         if policy_m is not None:
             if not self.constraints.maintenance:
@@ -1848,10 +1663,10 @@ class SimWorld:
         completes: dict[int, float] = {}
         done = env.event()                      # 完工事件（同 run()：末件到站即成功）
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
-        (entities, tasks_in, zm,
+        (entities, tasks_in,
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
-                                          route=route_fn, pm=pm_fn, charge=charge_fn,
+                                          pm=pm_fn, charge=charge_fn,
                                           done=done)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
@@ -1919,12 +1734,7 @@ class SimWorld:
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
                 "task_flow": stats.get("task_flow", []),
                 "travel_time_total": float(stats["travel_time"]),
-                # ① 区段等待（T3 ① 的激活量 `zone_wait["total"]`）——run_gated 此前**没带**，
-                # 而训练路径走的正是它（`roll_chain`）⟹ 不补这一键则 T3 的 ① 读不到激活量。
-                # 口径与 run() 逐字相同（`zm.waits` 的 n/total/max）。
-                "zone_wait": {"n": len(zm.waits), "total": float(sum(zm.waits)),
-                              "max": float(max(zm.waits)) if zm.waits else 0.0},
-                "n_zones": zm.n,
+                # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径随结果自报（同 run()）
                 "transport": self.inst.transport,
                 "unmapped_legs": stats.get("unmapped_legs", 0),
@@ -1958,42 +1768,7 @@ class SimWorld:
         t = next(t for m, t in alts if m == choice)
         return choice, float(t)
 
-    def _make_route_fn(self, policy_r, route_k: int):
-        """构造**路线决策（R）**的回调 `route(aid, src, dst, leg) -> 节点序列`（一局一个）。
-
-        契约与 S/L 回调对称：`env/` 只给**原始材料**（快照 + 候选节点序列），**不构造特征**
-        （层次纪律：`env/` 不得依赖 `nn/`）——候选路径的"长度比/区段数/争用"由 `algo/` 侧
-        从快照与候选自造（见 `group_rel._route_cand_feat`）。
-
-        三件事在这里一次做掉：
-        1. **候选缓存**：`k_shortest_paths` 是逐次枚举的生成器，而 `_drive` **每一段**都要问；
-           缓存键 `(src, dst)`（候选只取决于图，一局内图不变）。缓存随本闭包**每局新建**——
-           图对象每局重建，跨局复用会串味。
-        2. **候选 < 2 不记决策**：装卸站那条**桥**边、相邻节点直连只有一条简单路径，
-           "选路"不构成决策——此时直接走它（记假决策只会给链 logp 添恒 0 项）。
-        3. **非候选显式报错**（同 `policy_s` / `policy_l`）：静默回退会掩盖策略/候选集不一致，
-           让整条链的 logp 与动作错位而无人察觉。
-
-        ⚠️ 快照只在**真的要决策**时取（候选 < 2 不取）——`snapshot()` 有成本，且关态
-        （`route=None`）连本函数都不会被调用，逐位保持今日行为。
-        """
-        cache: dict[tuple[int, int], tuple[tuple[int, ...], ...]] = {}
-
-        def route(aid: int, src: int, dst: int, leg: str) -> list[int]:
-            cands = cache.get((src, dst))
-            if cands is None:
-                cands = tuple(tuple(p) for p in k_shortest_paths(self.g, src, dst, route_k))
-                cache[(src, dst)] = cands
-            if len(cands) < 2:
-                return list(cands[0])
-            snap = self.snapshot()                  # 只读（见 `snapshot()` 的契约）
-            idx = int(policy_r(snap, aid, src, dst, leg, cands))
-            if not 0 <= idx < len(cands):
-                raise ValueError(f"policy_r 选了不存在的候选 {idx}；候选数={len(cands)}"
-                                 f"（aid={aid}，{src}→{dst}，{leg}）")
-            return list(cands[idx])
-
-        return route
+    # ⚠️ **v2：① 与路线头去后 `_make_route_fn` 已删**（2026-10-08）
 
     def _make_pm_fn(self, policy_m):
         """构造 **⑫ 维护决策（M）** 的回调 `pm(mach) -> 动作码`（一局一个）。

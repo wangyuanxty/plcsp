@@ -66,10 +66,7 @@ class VehicleState:
     battery_frac: float     # [0,1]
     # ⚠️ **v2：⑩ 去后，`capacity`（载量）与 `speed_factor`（速度倍率）已删**
     # （2026-10-08）—— 车队同构、单车单载，这两个量对每台车都相同，无信息。
-    # ① 拥堵：本车**此刻**等待区段的时长 [min]（不在等待 = 0.0）。① 关闭时恒 0。
-    # ⚠️ 是"当前等了多久"，**不是**"累计等过多久"——放行即清零（`ZoneManager.current_wait`
-    # 的口径）；残留值会把"等过"误报成"还在等"。归一化除以 `SimConfig.zone_wait_limit`。
-    zone_wait: float
+    # ⚠️ **v2：① 拥堵去后 `zone_wait` 已删**（2026-10-08）—— 无区段，不存在等待
 
 
 @dataclass(frozen=True)
@@ -117,21 +114,11 @@ class Snapshot:
     # 全线在途运输任务数 = **各队列里待取** + **车上正在运送**（两种队列形状都算；
     # 已装车的批次已离开队列，故必须单列"车上"那部分，否则 bound 路径会漏计）。
     in_flight: int
-    # ① 拥堵——**路线决策（R）的原料**：逐区段的当前持有者，下标 = 区段号
-    # （`des.build_zone_map` 的口径），值 = 持有它的 AGV 号，-1 = 空闲。
-    # R 头的"争用"维就数它：候选路径经过的区段里有几个被**别的车**占着（见
-    # `group_rel._route_cand_feat`）。⚠️ 与 `VehicleState.zone_wait`（"本车等了多久"）
-    # 不同：这是"这条路上有几处正被占"，是**按路径**读的量，逐车读不到。
-    zone_holder: tuple[int, ...]
-    # ① 拥堵（R2 区段 token）：`VehicleState.zone_wait` 的**逐区段聚合**——第 z 个 = 正在
-    # 申请区段 z 的车中**最大**的当前等待时长 [min]；无人等 = 0.0。下标 = 区段号
-    # （与 `zone_holder` 同口径）。它**不是新量**：原料就是 `ZoneManager.pending` /
-    # `pending_since`（放行/超时即清），只是把逐车口径折到逐区段。
-    # 缺表（手搓快照 / `_cold_start`）= 空元组 ⟹ 特征层按"无等待"读，**不是哨兵**。
-    zone_wait: tuple[float, ...] = ()
+    # ⚠️ **v2：① 拥堵去后，`zone_holder` 与 `zone_wait`（逐区段）两个字段已删**
+    # （2026-10-08）—— 无区段机制，R 头（路线决策）也不在 v2 里。
     # ⑪ C 头的候选特征原料：逐个充电桩的占用/排队，下标 = `layout.chargers` 的顺序。
     # 默认空元组 = 该快照不带桩表（`_cold_start` 或测试手搓）⟹ 占用维恒 0，
-    # **不是哨兵**（与 `zone_holder` 为空的约定一致：缺表 = 该维无信息）。
+    # **不是哨兵**（缺表 = 该维无信息）。
     chargers: tuple[ChargerState, ...] = ()
     # ⑩ 拼批头的原料：**队列内容**（逐件任务身份，队列序），两种队列形状都进这一张表
     # （`bound` = 每车一 Store，逐车的表；FIFO = 单个共享 Store，`veh = -1`）。

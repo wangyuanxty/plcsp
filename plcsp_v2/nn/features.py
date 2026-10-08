@@ -23,20 +23,18 @@ from ..env.des import SimConfig
 from ..env.instances import Instance
 from ..env.layout import Layout
 
-F_M, F_B, F_V, F_G = 7, 8, 9, 3
+F_M, F_B, F_V, F_G = 7, 8, 8, 3
 # ⚠️ 2026-10-08（v2）：④ 返工删 ⟹ `F_B` 9→8；⑩ 异构车队+拼批删 ⟹ `F_V` 11→9
 # （去掉 `capacity` / `speed_factor` 两维，车队同构单车单载）。
 # ⚠️ **`F_MAX` 因此由 11 降到 9** —— 这是 v2 第一次改 token 宽度。
 # ⑤ 换型从未进过特征层（`prev_job` 是快照里的死字段），故 F_M 不变。
-# ⚠️ 2026-10-05（R2 区段 token）：新增第五段 "Z"（区段）——**只在 `route_zones=True` 时出现**
-# （默认配置的 seg 仍是四元组、序列一位不变）。F_Z=4 ≤ F_MAX ⟹ token 宽度与补齐规则不变。
-F_Z = 4
-F_MAX = max(F_M, F_B, F_V, F_G, F_Z)     # **9**（v2 起；原 11）—— 补齐后的统一宽度
+# ⚠️ 2026-10-08（v2）：① 拥堵删 ⟹ V 段去掉 `zone_wait`（F_V 9→8），**Z 段整段去掉**
+# （区段 token 没有对象）。⚠️ 四段制回到 M/B/V/G；`F_MAX` = max(7,8,8,3) = **8**。
+F_MAX = max(F_M, F_B, F_V, F_G)          # **8**（v2；原 11）—— 补齐后的统一宽度
 
 # 各段在补齐张量 (N, F_MAX) 里占的列；超出部分恒为 0
 SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
-                               "V": slice(0, F_V), "G": slice(0, F_G),
-                               "Z": slice(0, F_Z)}
+                               "V": slice(0, F_V), "G": slice(0, F_G)}
 
 # ⚠️ 字段名清单与宽度**必须逐段相等**——有测试守着（test_field_counts_match_declared_widths）。
 # 它同时是论文附录的特征表与排错时的对照表。
@@ -48,10 +46,8 @@ FEATURE_NAMES: dict[str, tuple[str, ...]] = {
     "B": ("progress", "remaining_work", "due_margin", "finished",
           "at_machine", "in_transit", "on_agv", "weight"),
     "V": ("st_idle", "st_empty", "st_loaded", "st_down", "node_x", "node_y",
-          "queued", "battery", "zone_wait"),
+          "queued", "battery"),
     "G": ("time_progress", "done_frac", "in_flight"),
-    # R2 区段 token（`route_zones=True` 时才有这一段）：占用 / 等待压力 / 身份坐标
-    "Z": ("busy", "wait_frac", "zone_x", "zone_y"),
 }
 
 
@@ -72,7 +68,7 @@ class NormContext:
     bbox_diag: float
     max_fail_rate: float
     pm_interval: float
-    zone_wait_limit: float       # ① 拥堵：区段等待上限 [min]（与 SimConfig 同源，见下）
+    # ⚠️ **v2：① 去后 `zone_wait_limit` 已删**（2026-10-08）
     # ⚠️ **v2：⑩ 去后 `max_capacity` 已删**（2026-10-08）—— 车队同构单车单载，载量维不存在
     max_queued: int
     node_xy: tuple[tuple[float, float], ...]   # 通道节点坐标（V 段 x/y 用）
@@ -112,7 +108,6 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float,
         bbox_diag=max(diag, 1e-9),
         max_fail_rate=max((m.fail_rate for m in layout.machines), default=1e-9),
         pm_interval=float(c.pm_interval),   # 与 SimConfig.pm_interval 同源（评审 F3）
-        zone_wait_limit=float(c.zone_wait_limit),   # ① 与 SimConfig 同源（同 F3 的理由）
         max_queued=max(1, int(np.ceil(np.sqrt(max(inst.n_jobs, 1))))),
         # ⚠️ 末位是**装卸站**（节点号 = `grid.n_nodes`，格点外）——`state_emb` 按
         # `VehicleState.node` 取坐标，AGV 在站上时没有它就会 IndexError。
