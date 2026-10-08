@@ -49,7 +49,8 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
             aisle_width: float = 1.5,
             agv_phi: list[int] | None = None, constraints=None,
             layout: Layout | None = None,
-            seq_rank: list[list[int | None]] | None = None) -> dict:
+            seq_rank: list[list[int | None]] | None = None,
+            policy_pa=None) -> dict:
     """一次完整 episode：网格布局采样(seed_layout) → 格点距离 → SimPy(seed_chain)。
 
     `layout_type` **保留但忽略**（旧调用方仍传）。
@@ -80,7 +81,8 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     g = build_corridor_graph(layout)
     dm = dock_distance_matrix(g)
     return SimWorld(inst, layout, dm, eff_cfg, graph=g, constraints=constraints).run(
-        seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi, seq_rank=seq_rank)
+        seed_chain=seed_chain, op_choices=op_choices, agv_phi=agv_phi, seq_rank=seq_rank,
+        policy_pa=policy_pa)
 
 
 @dataclass
@@ -655,7 +657,7 @@ class AgvSim:
                  stats: dict,
                  tasks_in, machines: list, graph, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 charge=None, fleet: list | None = None):
+                 charge=None, fleet: list | None = None, free_q=None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -687,6 +689,9 @@ class AgvSim:
         # ——转交前要查目标车是否停机（转给停机车会在两辆停机车之间乒乓）。
         self.failover = bool(cfg.agv_failover)
         self.fleet: list = fleet if fleet is not None else []
+        # ⚠️ **v2：`free_q`** —— 本车进入待命时往它投自己的号，派工器据此等空车（见 `_transporter`）。
+        # `None`（旧路径）= 不报空闲，派工器按轮询/`agv_phi` 绑定。
+        self.free_q = free_q
         self._rr = 0                        # 转交轮转指针（本车实例级、确定性）
 
     def _seg_min(self, u: int, v: int) -> float:
@@ -982,6 +987,10 @@ class AgvSim:
                 yield from self._recover_from_depletion()
             yield from self._maybe_charge()          # ⑪ 待命补电（规则 / C 决策）
             yield from self._wait_up_or_failover()
+            # ⚠️ **v2：报空闲**（在真正等任务之前）—— 派工器等的是"有车可派"这个条件，
+            # 而池正是在这段等待里累积的（见 `_transporter` 的 v2 段）。
+            if self.free_q is not None:
+                yield self.free_q.put(self.aid)
             t0 = self.env.now
             frm, to, item, path = yield q.get()
             if self.con.charging:                    # ⑪ 待命也耗电（三态口径）
@@ -1111,7 +1120,7 @@ class SimWorld:
         `run()` / `run_gated()` / `_cold_start()` **共用同一份**构造（逐字重复是本仓评审会判
         缺陷的形态）。⚠️ 只建对象、**不启进程**：`env.process` 的**注册顺序**决定同刻事件
         次序，故启动由调用方按原顺序做（机台 → 车辆）。返回调用方后续还要用的实体
-        `(entities, tasks_in, events_q)`（`self.*` 上的活引用已一并挂好）。
+        `(entities, tasks_in, events_q, free_q)`（`self.*` 上的活引用已一并挂好）。
 
         ⚠️ **`entities` 比 `self.machines` 多一项**：末位是装卸站（端点号 = `inst.n_machines`）。
         任务端点、AGV 的投递目标都走这张表；而 `self.machines` **只含机台**——`snapshot()` 与
@@ -1135,6 +1144,7 @@ class SimWorld:
         specs = self._fleet()
         # ⚠️ **v2：① 去后无 `ZoneManager`**（2026-10-08）
         events_q = simpy.Store(env)
+        free_q = simpy.Store(env)       # v2：空闲车号（车投、派工器取）；见 `_transporter`
         track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
                                events_q, self.constraints, track, pm=pm, seq=seq)
@@ -1154,7 +1164,7 @@ class SimWorld:
                                entities, self.g, self.constraints, specs[a],
                                np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
                                track, chargers=self.layout.chargers, charger_res=charger_res,
-                               bound=bound, charge=charge, fleet=agvs))
+                               bound=bound, charge=charge, fleet=agvs, free_q=free_q))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
@@ -1171,7 +1181,7 @@ class SimWorld:
         self._agv_loaded = track.agv_loaded
         self._agv_load_n = track.agv_load_n
         self.agvs = agvs
-        return entities, tasks_in, events_q
+        return entities, tasks_in, events_q, free_q
 
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
@@ -1389,7 +1399,8 @@ class SimWorld:
 
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None,
-            seq_rank: list[list[int | None]] | None = None) -> dict:
+            seq_rank: list[list[int | None]] | None = None,
+            policy_pa=None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
 
         agv_phi[task_i] = 第 task_i 个运输任务的 AGV id（L 层决策的载体；None=旧 FIFO 规则）。
@@ -1457,7 +1468,7 @@ class SimWorld:
         bound = agv_phi is not None
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]  # 一桩同时只服务一车
         (entities, tasks_in,
-         events_q) = self._build_entities(env, stats, completes, rng, bound=bound,
+         events_q, free_q) = self._build_entities(env, stats, completes, rng, bound=bound,
                                           seed_chain=seed_chain, charger_res=charger_res,
                                           seq=seq_decide, done=done)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
@@ -1471,7 +1482,8 @@ class SimWorld:
         for j in jkeys:
             env.process(self._release(env, events_q, (lu_idx, j, -1, OpLite(0.0), False)))
         env.process(self._transporter(env, events_q, tasks_in, plans, entities, stats, lu_idx,
-                                      bound=bound, agv_phi=agv_phi))
+                                      bound=bound, agv_phi=agv_phi, policy_pa=policy_pa,
+                                      free_q=free_q))
         total_work = sum(chosen_times)          # = 所选候选的时长之和（口径与旧式逐位相同）
         horizon = float(total_work * 6 + 500)   # v0 护栏升格：B 层门控（cap=2）下运行可远长于
                                                 # 无门控（波形化串行）；3× 护栏曾把门控运行掐
@@ -1547,7 +1559,7 @@ class SimWorld:
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
-                  policy_m=None, policy_c=None) -> dict:
+                  policy_m=None, policy_c=None, policy_pa=None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1664,7 +1676,7 @@ class SimWorld:
         done = env.event()                      # 完工事件（同 run()：末件到站即成功）
         charger_res = [simpy.Resource(env, 1) for _ in self.layout.chargers]
         (entities, tasks_in,
-         events_q) = self._build_entities(env, stats, completes, rng, bound=True,
+         events_q, free_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
                                           pm=pm_fn, charge=charge_fn,
                                           done=done)
@@ -1677,7 +1689,8 @@ class SimWorld:
             env.process(self._release(env, events_q, (lu_idx, j, -1, OpLite(0.0), False)))
         env.process(self._transporter(env, events_q, tasks_in, plans, entities, stats, lu_idx,
                                       bound=True, policy_l=policy_l,
-                                      policy_s=policy_s, online_s=online_s))
+                                      policy_s=policy_s, online_s=online_s,
+                                      policy_pa=policy_pa, free_q=free_q))
         # horizon 的工时上界：**按最短候选**估（在线时 `plans` 是决策日志、读不到时长；
         # 离线且用默认贪婪计划时该式 = 各工序所选时长之和，与旧式逐位相同）。
         # 实际选择可能更长，靠下面的 6× 余量兜底——掐表时 horizon_hit 如实置位。
@@ -1822,7 +1835,8 @@ class SimWorld:
 
     def _transporter(self, env, events_q, tasks_in, plans, entities, stats, lu_idx: int,
                      bound: bool = False, agv_phi: list[int] | None = None,
-                     policy_l=None, policy_s=None, online_s: bool = False):
+                     policy_l=None, policy_s=None, online_s: bool = False,
+                     policy_pa=None, free_q=None):
         """机台完成事件 → 生成搬运任务；`task_i` = 本函数生成序。
 
         **三类事件**（端点号：机台 `0..m-1`、装卸站 = `lu_idx` = `m`）：
@@ -1845,11 +1859,51 @@ class SimWorld:
         是否需换型"，需要作业号，且用 (frm, to, oi) 反查作业多义）。
         L 层（bound，`policy_l` 为空）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；
         超出补轮询。
+
+        ══ v2：**就绪池 + 批量派工**（2026-10-08，设计 §14.3）══
+
+        机台完工事件先**入池**，不再立刻处理。池非空时由 **PA** 在「就绪池 ×
+        候选机台」里挑一个 **(工件, 机台) 对**——这才是 AEI2025 的 PA 语义。
+
+        `policy_pa(snap, pool) -> 规则下标`（契约与其余头对称：只给原始快照与就绪池，
+        **不构造特征**）。`None` = 规则驱动，默认取**池首**（= 按事件到达序，接近旧行为，
+        可作对照）。
+
+        ⚠️ 回站任务（`is_last`）的终点恒为装卸站 ⟹ **不参与机台选择**；但它仍在池里，
+        可以被 PA 优先挑走（"先回站腾出车"是合法策略）。
         """
         task_i = 0
+        # ⚠️ **池 + 收集器**：机器完工事件由**独立进程**入池，**不等派工器**。
+        # 早先把"收集"和"派工"写在同一个循环里是**错的**——派工器在等空车的那段时间，
+        # 事件会堆在 `events_q` 里而不进池，醒来时池仍是空的 ⟹ 平均池大小恒为 1 ⟹
+        # PA 的"挑哪个工件"根本没有对象（实测：派工 195 次、池大小全为 1）。
+        pool: list[tuple[int, int, int, object, bool]] = []   # [(frm_idx, job, oi, op, is_last)]
+        state: dict = {"ev": None}                            # 池非空的唤醒事件
+
+        def _collect():
+            while True:
+                ev = yield events_q.get()
+                pool.append(ev)
+                wake = state["ev"]
+                if wake is not None and not wake.triggered:
+                    wake.succeed()
+
+        env.process(_collect())
 
         while True:
-            frm_idx, job, oi, op, is_last = yield events_q.get()
+            # ── v2：**等一台空车**再派 ──
+            # 运输是瓶颈资源；"车空闲"才是能真正执行的时刻。**池在这段等待里累积**，
+            # 故 PA 面对的常常是多个就绪工序——(工件, 机台) 的选择因此是真实的。
+            aid_free = (yield free_q.get()) if free_q is not None else None
+            if not pool:                                    # 池空 → 等收集器唤醒
+                state["ev"] = env.event()                   # ⚠️ 与上面的 if 之间**无 yield** ⟹ 原子
+                yield state["ev"]
+                state["ev"] = None
+            # ── v2 派工点：在「就绪池 × 机台」里挑一个 (工件, 机台) 对 ──
+            pi = 0 if policy_pa is None else int(policy_pa(self.snapshot(), tuple(pool)))
+            if not (0 <= pi < len(pool)):
+                raise ValueError(f"policy_pa 选了不存在的池下标 {pi}；池大小={len(pool)}")
+            frm_idx, job, oi, op, is_last = pool.pop(pi)
             stats["trans_evt"] = stats.get("trans_evt", 0) + 1
             n_ops = len(self.inst.jobs[job])
             if is_last:                                     # 末工序完工 → 回装卸站
@@ -1884,7 +1938,11 @@ class SimWorld:
                 yield tasks_in[agv].put(task)
             elif bound:
                 n_agv = len(tasks_in)
-                agv = agv_phi[task_i] if (agv_phi and task_i < len(agv_phi)) else (task_i % n_agv)
+                # v2：有 free_q 时**直接用刚等到的那台空车**（车是自己报空闲的 ⟹ 必真空闲）；
+                # 无 free_q（旧路径）时退回原来的轮询/agv_phi 绑定。
+                agv = (int(aid_free) if aid_free is not None else
+                       (agv_phi[task_i] if (agv_phi and task_i < len(agv_phi))
+                        else (task_i % n_agv)))
                 yield tasks_in[agv].put(task)
             else:
                 agv = -1                        # FIFO 路径：此刻还没派车（车在取货时才定）
