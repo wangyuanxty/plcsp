@@ -224,10 +224,18 @@ def la_score(rule: str, view: LAView, aid: int) -> tuple:
     - `MINCOST`（AEI2025 Rule 1）—— 完成本次物流任务的运输成本最低：`空载段 + 负载段`。
       ⚠️ **负载段与车号无关**（同一任务、同一条路径）⟹ 本规则实际等价于"**就近派车**"。
       这不是实现取巧，是成本式本身如此（`tt_{l'l}` 对所有车同值）。
-    - `MINU`（Rule 2）—— 利用率最低：`累计行驶工时 / max(now, 地板)`。
-      ⚠️ **分母与他们的 `ACT_v(t)` 不同**（他们是"该车已派物流任务的最晚完工时刻"）、
-      **分子也少了故障中断时间 `AT_v`**：我们**逐车的已派任务账本还没建**。
-      **登记在 §71.4 / §72.1，不要当成已对齐。**
+    - `MINU`（Rule 2）—— 利用率最低：原文 `AU_v(t) = AW_v(t)/ACT_v(t)`，其中
+      `AW_v = Σ x_ijv(nct−nst+lct−lst) + AT_v`（**空载段 + 负载段**的时长之和，
+      `AT_v` = 故障中断时间）、`ACT_v = max lct_ij`（**该车最后一笔已派任务的完工时刻**）。
+
+      **2026-10-08 第三次核后对齐**：
+      - **分母改用 `view.vehicles[aid].free_at`（≡ `ACT_v`）**，不再用全局 `now`
+        —— `free_at` 就是逐车已派任务账本（`stats["agv_act"]`），口径与 `ACT_v` 同。
+        ⚠️ 我此前两稿都用 `now`，理由是"逐车账本还没建"——而账本**当时就已经有了**。
+      - 分子用 `busy_min`（**实际**行驶工时）。他们的 `AW_v` 是**已派**任务的时长之和；
+        新流下任务在派工那刻就订给某台车，故两者只在"计划 vs 实况"上差一点。
+      - `AT_v`（故障中断时间）**恒为 0**：本仓的 ⑨ 是**段间检出**，不打断正在进行的行驶
+        （`AgvSim._failures`），故"被中断的运输时间"这个量在本模型里不存在。**如实声明。**
     - `LATEST_IN_TIME`（Rule 3）—— 原文：*"select the AGV that can **complete the no-load stage
       at the latest before the earliest transportable time of assigned operation**; and if no
       eligible AGV exists, select the AGV that can complete the no-load stage earliest"*。
@@ -238,8 +246,9 @@ def la_score(rule: str, view: LAView, aid: int) -> tuple:
     if rule == "MINCOST":
         return (view.empty_leg(aid) + view.loaded_leg(aid),)
     if rule == "MINU":
-        # ⚠️ 分母是全局 `now`，**不是**他们的 `ACT_v`（见上文）。
-        return (view.vehicles[aid].busy_min / max(view.now, MINU_TIME_FLOOR),)
+        # 分母 = 该车**已派任务账本**的空闲时刻（≡ 他们的 `ACT_v`），不是全局 `now`。
+        return (view.vehicles[aid].busy_min
+                / max(view.vehicles[aid].free_at, MINU_TIME_FLOOR),)
     if rule == "LATEST_IN_TIME":
         arrive = max(view.vehicles[aid].free_at, view.now) + view.empty_leg(aid)
         # 第一级：0 = 赶得上（空载段在"可运输时刻"之前跑完）、1 = 赶不上。

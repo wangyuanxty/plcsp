@@ -81,17 +81,15 @@ class PAMachine(NamedTuple):
     """一台机台的**规则自变量**。"""
 
     avail_at: float
-    """预计空闲时刻（`EAM` 的自变量）——**≡ AEI2025 的 `MCT_k(t)`**。
+    """预计空闲时刻（`EAM` 的自变量）——**≡ AEI2025 的 `MCT_k(t)`**，**纯计划口径**。
 
-    口径照抄他们：`MCT_k(t) = max_{已派给 k 的工序} ct`，即"**已派工序的最晚完工时刻**"。
-    我们的实现 = `max(物理清空时刻, 账本 mct_k)`：
+    原文：*"MCTk(t) denotes the completion time of the **last operation assigned** to machine k"*。
+    实现 = 逐机账本 `stats["pa_mct"]`：PA 每次派工推进
+    `mct_k ← max(mct_k, 当时的 avail, now) + pt`，**跨决策点存活**（在途预留因此看得见）。
 
-    - **账本项**（主项）：PA 每次派工推进 `mct_k ← max(mct_k, 当时的 avail, now) + pt`，
-      **跨派工批次存活**（存 `stats["pa_mct"]`）⟹ **在途预留看得见**；
-    - **物理项**（下界）：`now + 在制标称剩余 + 输入缓冲积压`。账本是**计划**，会与
-      实况漂（故障、保养、运输延误）⟹ 取 `max` 让实况只能把它推后、不能提前。
-
-    ⚠️ **不含**从工件当前所在地到该机台的运输时长（派工时无从知道），故 `EAM` 略偏好远机台。"""
+    ⚠️ 曾取 `max(账本, 物理清空时刻)`；2026-10-08 第三次核后去掉物理项（实测逐位相同，见
+    `build_pa_view` 的注释）。
+    ⚠️ **不含**从工件所在地到该机台的运输时长（派工时按原文无从知道），故 `EAM` 略偏好远机台。"""
     assigned_min: float
     """已派给它的加工工时之和 [min]（`MINU` 的分子）——**≡ AEI2025 的 `Σ λ_ijk·pt_ijk`**。
 
@@ -158,9 +156,10 @@ def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min
                           rem_apt=float(sum(apts)), ready_at=ready, due=due))
     machines = tuple(
         PAMachine(
-            # AEI2025 的 `MCT_k`：账本（计划）与物理清空时刻取 max。
-            avail_at=max(pa_mct[i] if i < len(pa_mct) else 0.0,
-                         snap.now + float(m.remaining_min) + float(m.backlog_min)),
+            # **≡ AEI2025 的 `MCT_k(t)`**：逐机账本，**纯计划口径**。
+            # ⚠️ 曾取 `max(账本, 物理清空时刻)`——2026-10-08 第三次核后**去掉物理项**：
+            # 实测（MK01，4 条 EAM 规则 × 6 seed）两者**逐位相同**，而原文是纯计划 ⟹ 无代价对齐。
+            avail_at=(pa_mct[i] if i < len(pa_mct) else 0.0),
             assigned_min=float(pa_assigned_min[i]) if i < len(pa_assigned_min) else 0.0)
         for i, m in enumerate(snap.machines))
     return PAView(now=float(snap.now), jobs=tuple(jobs), machines=machines, snap=snap)
@@ -176,10 +175,11 @@ class LAVehicle(NamedTuple):
     busy_min: float
     """累计**行驶**工时 [min]（`MINU` 的分子；由 `stats["agv_busy_min"]` 来）。"""
     free_at: float
-    """预计空闲时刻（`stats["agv_act"]` 的账本）。
+    """预计空闲时刻（`stats["agv_act"]` 的账本）——**≡ AEI2025 的 `ACT_v(t)`**
+    （*"the completion time of the last task assigned to AGV v"*）。
 
-    ⚠️ **分母仍是全局 `now`**（见 `hrl.rules.la_score`）——这一条**未对齐**他们的 `ACT_v`，
-    登记在 `docs/progress-log.md` §71.4 / §72.1。此字段只给 `LATEST_IN_TIME` 用。"""
+    两处用：`MINU` 的**分母**（2026-10-08 第三次核后对齐，此前误用全局 `now`）
+    与 `LATEST_IN_TIME` 的到达时刻。"""
 
 
 @dataclass(frozen=True)
