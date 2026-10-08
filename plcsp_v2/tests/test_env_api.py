@@ -374,3 +374,48 @@ def test_la_view_loaded_leg_is_vehicle_independent():
                leg_min=lambda a, b: float(abs(a - b)))
     assert v.loaded_leg(0) == v.loaded_leg(1) == pytest.approx(4.0)
     assert v.empty_leg(1) == pytest.approx(1.0)
+
+
+# ══════════════════ ⑨ 的三个故障场景（AEI2025 §3.2） ══════════════════
+
+@pytest.mark.unit
+def test_agv_breakdown_scenarios_sc1_sc2_sc3_all_occur():
+    """⚠️ **2026-10-09 之前 SC2/SC3 从不发生** —— ⑨ 是**段间检出**，只在两次行驶之间生效。
+
+    原文按 AGV 的**即时状态**分三个场景：**SC1 空闲** / **SC2 空载段中** / **SC3 负载段中**，
+    修理位置与"工件是否同步移动"都随之不同。段间检出把它们抹成了只有 SC1。
+
+    这条断言：在强制频繁故障下，**三个场景都要出现**，且 `at`（被中断任务已耗运输时间）非零。
+
+    ⚠️ **曝光量的正确算法**：一次故障落在行驶中的概率 = **逐车**行驶时长 / makespan
+    （= 车队合计 ÷ 车数 ÷ makespan）。实测 MK01 约 **7%**；我曾错算成 42%（漏除车数）。
+    """
+    inst = load_mk("mk01")
+    cfg = SimConfig(agv_mtbf=20.0, agv_mttr=3.0)      # 强制频繁故障
+    lay = layout_mod.sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
+    g = corridors.build_corridor_graph(lay)
+    dm = corridors.dock_distance_matrix(g)
+    tot = {k: 0 for k in ("agv_fail_sc1", "agv_fail_sc2", "agv_fail_sc3")}
+    at = 0.0
+    for s in range(4):
+        m = SimWorld(inst, lay, dm, cfg, graph=g).run(seed_chain=s)
+        assert m["jobs_done"] == inst.n_jobs and not m["horizon_hit"]
+        for k in tot:
+            tot[k] += m[k]
+        at += m["agv_at_min"]
+    assert tot["agv_fail_sc1"] > 0, f"SC1（空闲）没出现：{tot}"
+    assert tot["agv_fail_sc2"] > 0, f"SC2（空载段中断）没出现——⑨ 还是段间检出：{tot}"
+    assert tot["agv_fail_sc3"] > 0, f"SC3（负载段中断）没出现：{tot}"
+    assert at > 0.0, "`at`（被中断任务的已耗运输时间）恒 0 ⟹ 段间检出；它计入 TC 式(48)"
+
+
+@pytest.mark.unit
+def test_agv_breakdown_is_inert_at_the_default_mtbf_on_mk01():
+    """⚠️ **反向守卫**：默认 MTBF 下 MK01 的 ⑨ **一次都不触发** ⟹ 黄金值必须逐位不变。
+
+    （⑨ 的**激活**是另一件事，见 `scaled_agv_mtbf` 与 §78.0。）
+    """
+    m = _world("mk01").run(seed_chain=0)
+    assert m["makespan"] == pytest.approx(75.870)
+    assert (m["agv_fail_sc1"], m["agv_fail_sc2"], m["agv_fail_sc3"]) == (0, 0, 0)
+    assert m["agv_at_min"] == 0.0

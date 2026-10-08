@@ -735,6 +735,11 @@ class AgvSim:
         self.fleet: list = fleet if fleet is not None else []
         # ⚠️ **v2：`free_q` 已撤**（2026-10-08）—— PA 派工不再等空车（见 `_pa_dispatch`）。
         self._rr = 0                        # 转交轮转指针（本车实例级、确定性）
+        # ⑨ 的三个故障场景（AEI2025 §3.2）：**故障发生在车的哪个即时状态**。
+        # SC1 = 空闲、SC2 = 空载段中、SC3 = 负载段中。`_failures` 据此判定，
+        # `_drive` 负责进出本段时置位/复位——**行驶中打断**靠 `simpy.Interrupt`。
+        self.stage = "idle"
+        self._main = None                   # 本车主进程（`_failures` 打断它）
 
     def _seg_min(self, u: int, v: int) -> float:
         """节点 u→v 的**几何**行驶时长 [min]（格点最短路 ÷ 有效车速 ÷ 60）。
@@ -803,6 +808,10 @@ class AgvSim:
         while True:
             yield self.env.timeout(self.rng.exponential(self.cfg.agv_mtbf))
             self.stats["agv_fail_events"] += 1
+            # ── ⑨ 的三个场景（AEI2025 §3.2）：按车的**即时状态**判定 ──
+            # SC1 空闲 · SC2 空载段中 · SC3 负载段中。计数逐场景入 stats，供报告如实声明分布。
+            scen = {"idle": "sc1", "empty": "sc2", "loaded": "sc3"}[self.stage]
+            self.stats[f"agv_fail_{scen}"] = self.stats.get(f"agv_fail_{scen}", 0) + 1
             # ⚠️ 必须**先换一个新的未触发事件**再置 down：否则等待者会反复 yield 一个
             # 已经 succeed 的事件 → 仿真时间不推进、空转成死循环（实测 pytest 直接挂死）。
             self.up = simpy.Event(self.env)
@@ -810,6 +819,11 @@ class AgvSim:
             if self.events_q is not None:
                 # 扰动事件（哨兵：`frm_idx = -1`）——transporter 收到后**开一个决策点**。
                 yield self.events_q.put((DISTURBANCE, self.aid, -1, None, False))
+            # ⚠️ **SC2/SC3：打断正在进行的行驶**（`_drive` 里接 `simpy.Interrupt`）。
+            # 只在 `stage != "idle"` 时打断——空闲时车可能停在任意 yield 点上，
+            # 盲目打断会把 Interrupt 抛到无关的等待里。
+            if self.stage != "idle" and self._main is not None:
+                self._main.interrupt(("agv_breakdown", self.stage))
             yield self.env.timeout(self.cfg.agv_mttr)
             self.down = False
             self.up.succeed()
@@ -1017,11 +1031,36 @@ class AgvSim:
         """
         if src == dst:
             return True, dst
-        # ⚠️ **v2：① 拥堵与路线头（R）都已删**（2026-10-08）—— 按距离直行，一次走到底，
-        # 永不失败（原"逐段申请/释放区段 + 等待环检测"整段移除）。
+        # ⚠️ **v2：① 拥堵与路线头（R）都已删**（2026-10-08）—— 按距离直行，一次走到底。
         # ⚠️ 矩阵口径下**整段时长一次算出**（原来是逐段按几何占比分摊——那时要逐段查表）。
         seg = self._leg_min(src, dst)
-        yield self.env.timeout(seg)
+        self.stage = leg                        # ⑨：SC2（空载中）/ SC3（负载中）据此判定
+        t0 = self.env.now
+        try:
+            yield self.env.timeout(seg)
+        except simpy.Interrupt:                 # ⚠️ ⑨ SC2/SC3：行驶中途故障
+            spent = min(self.env.now - t0, seg)
+            self._drain(leg, spent)             # 走了一半就耗一半的电
+            self.stats["travel_time"] += spent
+            self.stats[f"agv_{leg}_min"] += spent
+            self.stats["agv_busy_min"][self.aid] += spent
+            # ⚠️ **被打断 = 本段没跑完** ⟹ 从未走完的那部分要单独记（`moves` 不计这一次）。
+            self.stats["agv_interrupted_min"] = (
+                self.stats.get("agv_interrupted_min", 0.0) + (seg - spent))
+            # 被中断任务**已消耗的运输时间**（原文的 `at`，计入 TC）。
+            self.stats["agv_at_min"] = self.stats.get("agv_at_min", 0.0) + spent
+            # ── 修理点（SC2/SC3）：原文 *"moved to a location closer to itself between the
+            #    starting location and destination location"* —— **取本段两端里离它更近的一端**。
+            #    ⚠️ 原文这句话本身有歧义（"离自己更近"既可读作"路上离自己最近的点"=原地，
+            #    也可读作"两端里更近的一端"）；我们取后者，因为它的**目的**是
+            #    *"avoid the interference of mid-road repair to other shop activities"*
+            #    ——那只有移开路面才成立。如实声明。
+            here = self._node_along(src, dst, spent / max(seg, 1e-9))
+            near_src = self._leg_min(here, src) <= self._leg_min(here, dst)
+            self.pos_node = src if near_src else dst
+            self.stage = "idle"
+            return False, self.pos_node
+        self.stage = "idle"
         self._drain(leg, seg)                   # ⑪ 行驶耗电
         self.stats["travel_time"] += seg
         self.stats[f"agv_{leg}_min"] += seg
@@ -1031,8 +1070,30 @@ class AgvSim:
         self.stats["moves"] += 1
         return True, dst
 
+    def _node_along(self, src: int, dst: int, frac: float) -> int:
+        """沿 `src→dst` 的格点最短路按**时长比例**定位到某个节点（只在被打断时调用）。
+
+        ⚠️ 只在 `simpy.Interrupt` 分支里算——正常行驶不付这份代价。
+        """
+        from .corridors import shortest_node_path
+        path = shortest_node_path(self.g, src, dst)
+        if len(path) <= 2:
+            return path[-1] if frac >= 0.5 else path[0]
+        cum, tot = [0.0], 0.0
+        for u, v in zip(path, path[1:]):
+            tot += self._leg_min(u, v, count_unmapped=False)
+            cum.append(tot)
+        if tot <= 0.0:
+            return path[-1] if frac >= 0.5 else path[0]
+        t = frac * tot
+        for k, c in enumerate(cum):
+            if c >= t:
+                return int(path[min(k, len(path) - 1)])
+        return int(path[-1])
+
     def run(self):
         q = self.tasks_in[self.aid] if self.bound else self.tasks_in
+        self._main = self.env.active_process      # ⑨ 打断目标（见 `_failures`）
         if self.con.agv_failure:
             self.env.process(self._failures())       # ⑨ 关掉时不启进程 → 不抽随机数
         while True:
@@ -1085,7 +1146,8 @@ class AgvSim:
                 yield from self._requeue_hand(batch)
                 continue
             ok, self.pos_node = yield from self._drive(a, b, "loaded")
-            if not ok:
+            if not ok and self.pos_node != b:
+                # SC3 且**修理点 = 取货点**（离自己更近的那一端是起点）⟹ 带着货退回队列。
                 # 快照跟踪（P2 Task 1）：退回队列 = **当场**卸空——车要带着"空车"的状态在
                 # 取货点干等 zone_hold，不能挂着"负载行驶"（否则状态 2 / 在途会滞留到重试）
                 self.track.set_load(self.aid, 0)
@@ -1096,6 +1158,13 @@ class AgvSim:
                 for t in batch:                      # 整批退回队列
                     q.put(t)
                 continue
+            if not ok:
+                # ⚠️ **SC3 且修理点 = 卸货点**：原文 *"If this load job moves synchronously to
+                # the end location of load-stage, it will **not be seen as an interrupted task**
+                # and can continue to be processed directly on the assigned machine."*
+                # ⟹ 工件已随车同步到达终点，**照常投递**（只多等一次修复）。
+                self.stats["agv_sc3_delivered"] = self.stats.get("agv_sc3_delivered", 0) + 1
+                yield from self._wait_up_or_failover()
             self.stats["trips"] += 1
             for (_f, t2, _item2, _p2) in batch:
                 self.stats["agv_del"][self.aid] += 1  # L 层状态轨迹（负载差/最后位置）
@@ -1562,6 +1631,11 @@ class SimWorld:
                  "agv_dry_events": 0,
                  # ⑨ failover 的记账：故障期间被退回/转交的任务件数（默认关 ⟹ 恒 0）
                  "agv_failover_tasks": 0,
+                 # ⑨ 的三个故障场景（SC1 空闲 / SC2 空载段中 / SC3 负载段中）逐场景计数；
+                 # `agv_at_min` = 被中断任务**已消耗的运输时间**（原文的 `at`，计入 TC）；
+                 # `agv_sc3_delivered` = SC3 里"修理点恰为终点 ⟹ 不算中断"的次数。
+                 "agv_fail_sc1": 0, "agv_fail_sc2": 0, "agv_fail_sc3": 0,
+                 "agv_sc3_delivered": 0, "agv_at_min": 0.0, "agv_interrupted_min": 0.0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
@@ -1675,6 +1749,13 @@ class SimWorld:
                 "pa_assigns": stats.get("pa_assigns", 0),
                 # 扰动触发的决策点数（原文决策点定义的**另一半**，2026-10-08 补齐）
                 "dist_events": stats.get("dist_events", 0),
+                # ⑨ 的三个故障场景分布 + 中断记账（`at` 是 TC 的一项，见式(48)）
+                "agv_fail_sc1": stats.get("agv_fail_sc1", 0),
+                "agv_fail_sc2": stats.get("agv_fail_sc2", 0),
+                "agv_fail_sc3": stats.get("agv_fail_sc3", 0),
+                "agv_sc3_delivered": stats.get("agv_sc3_delivered", 0),
+                "agv_at_min": float(stats.get("agv_at_min", 0.0)),
+                "agv_interrupted_min": float(stats.get("agv_interrupted_min", 0.0)),
                 "task_flow": stats.get("task_flow", []),
                 "agv_load": stats.get("agv_load", []),
                 "dbg": {k: v for k, v in stats.items()
@@ -1688,8 +1769,10 @@ class SimWorld:
                 # - `at`（故障中断时间）**恒 0**：⑨ 段间检出、不打断正在进行的行驶。
                 # ⚠️ **这不是我们的目标函数**（我们的是 makespan + energy + TWT），
                 # 只是**报告桥**——不加它，任何"比较 TC"的说法都不成立。见 §77.4 第 2 行。
-                "logistics_cost": (AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
-                                   + AEI2025_UNIT_TRANSPORT_COST * float(stats["travel_time"])),
+                "logistics_cost": (
+                    AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
+                    + AEI2025_UNIT_TRANSPORT_COST * (float(stats["travel_time"])
+                                                     + float(stats.get("agv_at_min", 0.0)))),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径**随结果自报**（P4-A Review Focus #1 同型）：两种口径的数并排放时靠这两行分辨
                 "transport": self.inst.transport,
@@ -1810,6 +1893,11 @@ class SimWorld:
                  "agv_dry_events": 0,
                  # ⑨ failover 的记账：故障期间被退回/转交的任务件数（默认关 ⟹ 恒 0）
                  "agv_failover_tasks": 0,
+                 # ⑨ 的三个故障场景（SC1 空闲 / SC2 空载段中 / SC3 负载段中）逐场景计数；
+                 # `agv_at_min` = 被中断任务**已消耗的运输时间**（原文的 `at`，计入 TC）；
+                 # `agv_sc3_delivered` = SC3 里"修理点恰为终点 ⟹ 不算中断"的次数。
+                 "agv_fail_sc1": 0, "agv_fail_sc2": 0, "agv_fail_sc3": 0,
+                 "agv_sc3_delivered": 0, "agv_at_min": 0.0, "agv_interrupted_min": 0.0,
                  "battery_min_kwh": float("inf"),
                  "tasks_get": 0, "requeue": 0, "in_q_gets": 0,
                  "trans_evt": 0, "tasks_put": 0,
@@ -1912,6 +2000,13 @@ class SimWorld:
                 "pa_assigns": stats.get("pa_assigns", 0),
                 # 扰动触发的决策点数（原文决策点定义的**另一半**，2026-10-08 补齐）
                 "dist_events": stats.get("dist_events", 0),
+                # ⑨ 的三个故障场景分布 + 中断记账（`at` 是 TC 的一项，见式(48)）
+                "agv_fail_sc1": stats.get("agv_fail_sc1", 0),
+                "agv_fail_sc2": stats.get("agv_fail_sc2", 0),
+                "agv_fail_sc3": stats.get("agv_fail_sc3", 0),
+                "agv_sc3_delivered": stats.get("agv_sc3_delivered", 0),
+                "agv_at_min": float(stats.get("agv_at_min", 0.0)),
+                "agv_interrupted_min": float(stats.get("agv_interrupted_min", 0.0)),
                 "task_flow": stats.get("task_flow", []),
                 "travel_time_total": float(stats["travel_time"]),
                 # 物流成本（**借 AEI2025 式(48) 的成本模型**，只为让读数可与其表并列）：
@@ -1921,8 +2016,10 @@ class SimWorld:
                 # - `at`（故障中断时间）**恒 0**：⑨ 段间检出、不打断正在进行的行驶。
                 # ⚠️ **这不是我们的目标函数**（我们的是 makespan + energy + TWT），
                 # 只是**报告桥**——不加它，任何"比较 TC"的说法都不成立。见 §77.4 第 2 行。
-                "logistics_cost": (AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
-                                   + AEI2025_UNIT_TRANSPORT_COST * float(stats["travel_time"])),
+                "logistics_cost": (
+                    AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
+                    + AEI2025_UNIT_TRANSPORT_COST * (float(stats["travel_time"])
+                                                     + float(stats.get("agv_at_min", 0.0)))),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径随结果自报（同 run()）
                 "transport": self.inst.transport,

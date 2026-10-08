@@ -8285,3 +8285,76 @@ coverage（v2）                74%
 ```
 
 **不再需要问"有没有错"** —— 门禁绿 = 跑过；不绿 = 有错。
+
+---
+
+## 八十二、⭐⭐ 清单最后一项 #7：**⑨ 的三个故障场景 SC1/SC2/SC3**（2026-10-09）
+
+### 82.1 ⚠️ 原文说得很清楚，我们只实现了三分之一
+
+AEI2025 §3.2 逐字：
+
+> *"Based on the **immediate status of the AGV** when a breakdown occurs, **three breakdown
+> scenarios** exist. The first scenario (SC1) is **AGV fails when it is idle**; the second (SC2)
+> is **AGV fails during the non-load stage**; and the third (SC3) is **AGV fails during the load
+> stage**."*
+>
+> *"for SC1, the failed AGV will be **repaired at its current location**… For SC2, the failed AGV
+> will be **moved to a location closer to itself between the starting location and destination
+> location** for repair. Such repair strategy aims to **avoid the interference of mid-road repair
+> to other shop activities**. For SC3, the AGV will undergo the same repair strategy as SC2, and
+> **the load job on AGV will also be moved synchronously**. **If this load job moves synchronously
+> to the end location of load-stage, it will not be seen as an interrupted task** and can continue
+> to be processed directly on the assigned machine."*
+>
+> *"the affected tasks include **interrupted logistics task** on failed AGV **(this does not exist
+> in SC1)**…"* + `at` = *"the transport time already consumed by the interrupted logistics task"*（计入式(48) 的 TC）
+
+**我们的 ⑨ 是「段间检出」**（`_failures` 的 docstring："故障不打断正在进行的行驶，在下一段
+行驶开始前的段间生效"）⟹ **SC2/SC3 从来不发生**，`at ≡ 0`。
+
+**理由写在代码里**：*"MTBF(480 min) 远大于单段行驶时长，误差可忽略"* —— **一句没算过的形容词。**
+
+### 82.2 ⚠️ 而我自己第一次也算错了
+
+我给用户报的曝光量是 **42%**（"故障落在行驶中的概率 = 行驶时长占 makespan 的比例"）。
+**错了：那是车队合计行驶时间，要除以车数。** 正确的是**逐车**视角：
+
+```
+P(落在行驶中) = Σ_v 行驶_v / (n_agv × makespan)   实测 MK01 约 7%
+```
+
+**实测对上**：强制 `MTBF=20` 时 mk03 的 `(SC1, SC2, SC3) = (55, 2, 2)` ⟹ 中途故障占
+**4/59 ≈ 7%**。**同一个数字，两个算法 —— 我报的是错的那个。**
+
+**⟹ "误差可忽略"在量级上勉强站得住（7%），但在**种类**上不成立**：SC2/SC3 与 `at`
+**根本不存在**，而 `at` 是原文式(48) TC 里的一项 —— 我们此前把它写成恒 0。
+
+### 82.3 改了什么
+
+| 处 | 改前 | 改后 |
+|---|---|---|
+| 检出时点 | **段间**（两次行驶之间） | **可打断行驶中**（`simpy.Interrupt`）；`AgvSim.stage ∈ {idle, empty, loaded}` 决定场景 |
+| SC1 | ✓ | ✓（就地修理） |
+| **SC2** | ✗ 不发生 | ✓ 载前中断 → 修理点 = 本段两端里**离它更近的一端** → 任务退回队列 |
+| **SC3** | ✗ 不发生 | ✓ 载中中断 → 同 SC2 的修理点；**修理点恰为卸货点 ⟹ 工件同步到达 ⟹ 不算中断，照常投递**（原文那句） |
+| `at` | 恒 0 | ✓ 累计被中断任务的**已耗运输时间**，**计入 TC**（式(48)） |
+| 记账 | —— | `agv_fail_sc1/sc2/sc3` · `agv_sc3_delivered` · `agv_at_min` · `agv_interrupted_min` |
+
+**⚠️ 原文那半句有歧义**：*"a location closer to itself between the starting location and
+destination location"* —— 可读作"路上离它最近的点"（= 原地，与 SC1 无异），也可读作
+"两端里更近的一端"。**我们取后者**，因为它的**目的**明写是
+*"avoid the interference of mid-road repair to other shop activities"* —— 那只有**移开路面**才成立。
+**如实声明这一处解读。**
+
+### 82.4 读数
+
+```
+MK01 默认 MTBF：mak = 75.870（逐位不变，⑨ 一次都不触发）· SC = (0,0,0)
+MK03 默认 MTBF：mak = 361.390 · SC = (4,0,1) · SC3 直达交付 1 次 · at = 0.17
+强制 MTBF=20  ：MK01 SC = (12,1,3) · MK03 SC = (55,2,2)   ← 三个场景全部出现
+```
+
+**MK01 的黄金值逐位不变**（默认 MTBF 下 ⑨ 不触发）—— 这条是"改动没有污染既有读数"的硬证据。
+
+**⟹ 清单（§77.5 的 7 项）到此**清空**。** 剩下的只有"已量、暂不修"的三个近似（§79.3）。
