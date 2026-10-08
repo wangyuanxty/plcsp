@@ -41,7 +41,7 @@ SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
 # ⚠️ 2026-10-08（v2）：④ 返工删 ⟹ B 段去掉 `rework_cnt`。
 # **一律末位追加 / 末位删除**——既有列的下标是 ckpt 与测试的契约，不得插队。
 FEATURE_NAMES: dict[str, tuple[str, ...]] = {
-    "M": ("backlog", "in_fill", "out_fill", "busy", "remaining_frac",
+    "M": ("backlog", "in_queue", "out_queue", "busy", "remaining_frac",
           "pm_left", "fail_rate"),
     "B": ("progress", "remaining_work", "due_margin", "finished",
           "at_machine", "in_transit", "on_agv", "weight"),

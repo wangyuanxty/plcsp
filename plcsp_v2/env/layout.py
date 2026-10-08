@@ -70,8 +70,7 @@ class MachinePad:
     h: float
     dock_node: int            # 该机台装卸点所在的通道节点
     fail_rate: float = 0.001  # ⚠️ assumed（无文献出处），见 spec §9
-    in_cap: int = 2           # ⚠️ assumed
-    out_cap: int = 2          # ⚠️ assumed
+    # ⚠️ **v2：② 有限缓冲已删**（2026-10-08）—— `in_cap`/`out_cap` 一并去掉
 
 
 @dataclass
@@ -166,8 +165,6 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
         machines.append(MachinePad(
             id=i, x=x, y=y, w=cell_w, h=cell_h, dock_node=node,
             fail_rate=float(rng.uniform(0.0, 0.003)),      # assumed，见 spec §9
-            in_cap=int(rng.integers(1, 4)),                # assumed
-            out_cap=int(rng.integers(1, 4)),               # assumed
         ))
 
     used = {m.dock_node for m in machines}

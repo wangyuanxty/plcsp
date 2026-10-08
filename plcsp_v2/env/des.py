@@ -493,14 +493,14 @@ class MachineSim:
         self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
         self.pm = pm                    # ⑫ 维护头回调（None = 规则驱动，见类 docstring）
         self.seq = seq                  # 工序排序回调（None = 裸 FIFO，见类 docstring）
-        # SimPy 的 Store 不接受 capacity=None；无界用 inf（且下游的"缓冲满"检查须能识别 inf）
-        cap_in = pad.in_cap if constraints.finite_buffer else float("inf")
-        cap_out = pad.out_cap if constraints.finite_buffer else float("inf")
-        # ⚠️ 关态必须是**裸 `simpy.Store`**（同一个类），不是"忠实做同样事的子类"——
-        #    这是最强形式的"默认关 ⟹ 逐位不变"（spec §3.4）。
-        self.in_q = (simpy.Store(env, capacity=cap_in) if seq is None else
-                     _PriorityStore(env, capacity=cap_in, decide=seq, mach=pad.id, stats=stats))
-        self.out_q = simpy.Store(env, capacity=cap_out)
+        # ⚠️ **v2：② 有限缓冲已删**（2026-10-08）—— 进出队列**无界**（SimPy `Store` 的默认
+        # `capacity=inf`）。原 `cap_in`/`cap_out` 与 `finite_buffer` 开关一并去掉。
+        # ⟹ "缓冲满 → put 阻塞"这条路径不存在了；死锁护栏的用途也随之收窄。
+        # ⚠️ 两个队列仍是**裸 `simpy.Store`**（`in_q` 有排序回调时走 `_PriorityStore`）。
+        self.in_q = (simpy.Store(env) if seq is None else
+                     _PriorityStore(env, capacity=float("inf"), decide=seq,
+                                    mach=pad.id, stats=stats))
+        self.out_q = simpy.Store(env)
         self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障/保养期间占用）
         # ⚠️ v2：⑤ 换型的 `prev_job` 已删（2026-10-08）
         self.pm_clock = 0.0                  # ⑫ 距上次保养累计的主轴工时 [min]
@@ -1658,8 +1658,8 @@ class SimWorld:
             cur = self._cur_op[i]
             ms.append(MachineState(
                 backlog_min=float(sum(it[2].time for it in q)),
-                in_q_len=len(q), in_cap=float(m.in_q.capacity),
-                out_q_len=len(m.out_q.items), out_cap=float(m.out_q.capacity),
+                in_q_len=len(q),
+                out_q_len=len(m.out_q.items),
                 busy=bool(m.slot.count),
                 remaining_min=(max(0.0, cur[2] + cur[1] - float(self.env.now)) if cur else 0.0),
                 pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate)))

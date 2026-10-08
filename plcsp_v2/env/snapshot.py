@@ -18,9 +18,7 @@ from dataclasses import dataclass
 class MachineState:
     backlog_min: float      # 输入队列内各工序加工时长之和 [min]
     in_q_len: int
-    in_cap: float           # inf 表示无界（② 关闭时）
     out_q_len: int
-    out_cap: float
     # 是否持有加工槽。⚠️ 与 `remaining_min > 0` **不互为充要**：两者可同时成立
     # （持有槽但未在制切削/已触底），**Task 2 / Task 8 都不得把"busy ⟹ remaining>0"
     # 当作不变式**（返工中间态、换型段、故障修复长停都会打出 `busy=True, remaining=0`）。

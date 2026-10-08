@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """快照 + 实例 + 布局 → 编码器输入（spec §5.3.1）。
 
-四段宽度不同（F_M=7 / F_B=9 / F_V=11 / F_G=3），故各自算完后**补齐到 `F_MAX` 后按序列
+四段宽度不同（F_M=7 / F_B=8 / F_V=11 / F_G=3；v2：④ 返工删后 F_B 9→8），故各自算完后**补齐到 `F_MAX` 后按序列
 拼成单张 `(N, F_MAX)`**（spec §5.3.1），并给出 `seg` 标出各段行数。
 """
 from __future__ import annotations
@@ -110,8 +110,10 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
     for i, m in enumerate(snap.machines):
         out[i] = (
             m.backlog_min / ctx.total_work_min,                     # 0 backlog
-            _safe(m.in_q_len / max(m.in_cap, 1.0), 0.0, 1.0),       # 1 in_fill
-            _safe(m.out_q_len / max(m.out_cap, 1.0), 0.0, 1.0),     # 2 out_fill
+            # ⚠️ **v2（② 去后）**：无容量可除 ⟹ 改用实例静态量 `n_jobs` 归一。
+            # 队列长度 <= 作业总数（每作业对某台机最多贡献 1 件），故比值在 [0,1]。
+            _safe(m.in_q_len / max(ctx.n_jobs, 1), 0.0, 1.0),        # 1 in_queue
+            _safe(m.out_q_len / max(ctx.n_jobs, 1), 0.0, 1.0),       # 2 out_queue
             1.0 if m.busy else 0.0,                                 # 3 busy
             m.remaining_min / max(ctx.total_work_min, 1e-9),        # 4 remaining_frac
             _safe(1.0 - m.pm_used_min / max(ctx.pm_interval, 1e-9), 0.0, 1.0),  # 5 pm_left

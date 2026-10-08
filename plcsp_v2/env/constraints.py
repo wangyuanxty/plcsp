@@ -24,7 +24,7 @@ class ConstraintConfig:
     """
     # A 类：基建已有
     congestion: bool = True           # ① AGV 拥堵 / 区段冲突 / 死锁（粒度见 SimConfig.zone_granularity）
-    finite_buffer: bool = True        # ② 有限缓冲（in_cap/out_cap）
+    # ⚠️ **v2：② 有限缓冲开关已删**（2026-10-08）
     machine_failure: bool = True      # ③ 机器故障（泊松 + 中断恢复）
     # B 类：近乎免费
     # ⚠️ **v2：④ 返工开关已删**（2026-10-08）
@@ -54,10 +54,9 @@ _FULL = ConstraintConfig()
 ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "Full": _FULL,
     "-物流": _FULL.with_off("congestion", "agv_failure", "heterogeneous_fleet", "charging"),
-    "-生产": _FULL.with_off("finite_buffer", "machine_failure",
-                            "maintenance"),   # ② 机台缓冲属生产侧
+    "-生产": _FULL.with_off("machine_failure", "maintenance"),
     "-信息": _FULL.with_off("due_dates"),
-    "None": _FULL.with_off("congestion", "finite_buffer", "machine_failure",
+    "None": _FULL.with_off("congestion", "machine_failure",
                            "due_dates",
                            "agv_failure", "heterogeneous_fleet", "charging", "maintenance"),
 }
