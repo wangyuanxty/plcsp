@@ -7022,7 +7022,13 @@ Ghanbarzadeh 的 **236 篇**频次分析：**计算代价 67.8%** · 可扩展�
 | **"从同一状态采 N 个做组归一化"** | **GiGPO**（**NeurIPS 2025**, arXiv:2505.10978）*anchor state grouping* |
 | GRPO 出 LLM 圈子 | 机器人控制（`cat:cs.RO` 51 篇）· MARL · 组合优化 |
 
-**⚠️ 核心假设被反证 —— HiMAC 的消融：**
+**⚠️ 核心假设被反证（但**力度需限定**）—— HiMAC 的消融：**
+
+**⚠️ 用户裁定：HiMAC 是 LLM 域，与我们不同域，**不该当判决**。**
+- 它的"分层"是**动作序列内容的拆分**（蓝图文本 → 动作），**不是时序抽象**
+- 下层是**微调 LLM**（词表级动作空间、漂移极大）；我们是 **12/3 路分类策略**（漂移小得多）
+
+**⟹ 结构同源（两级互相追逐），幅度不可比 —— 当**参考**，不当**判决**。**
 
 它把非稳态修复归给**交替更新**（Iterative Co-Evolution），**不是**去掉 critic：
 
@@ -7032,6 +7038,8 @@ Ghanbarzadeh 的 **236 篇**频次分析：**计算代价 67.8%** · 可扩展�
 | **去掉交替更新**（免 critic 优势**仍在**） | **85.3（−6.8）** | **74.8（−9.3）** |
 
 > agent 原话：*"critic-freeness alone does not remove the non-stationarity penalty. The paper never claims that it does."*
+
+**🅱 备用方案已登记（§9.5.1）**：**交替更新**（一层更新时另一层冻结）—— 有 LLM 域先例（HiMAC 的 *Iterative Co-Evolution*）。**触发式备用，消融不失败就不用，不改变主线设计。**
 
 **⚠️ 第二条反证** —— *Learning Without Critics?*（arXiv:**2511.03527**）：
 
