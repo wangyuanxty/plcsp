@@ -96,7 +96,7 @@ class SimConfig:
     repair_time: float = 5.0      # [min]
     aisle_width: float = 1.5      # 通道宽（米）：窄通道限速 = Phase A2 真权衡来源
     # ── 约束参数（**全部 assumed**，无文献出处；见 spec §9 的 assumed 表）──
-    p_rework: float = 0.05        # ④ 返工率 [1/工序]
+    # ⚠️ v2：④ 返工已删（2026-10-08）—— `p_rework` 一并去掉
     # ⚠️ v2：⑤ 换型已删（2026-10-08）—— `setup_min_default` 一并去掉
     pm_interval: float = 120.0    # ⑫ 预防性维护间隔 [min 主轴工时]
     pm_duration: float = 10.0     # ⑫ 维护停机时长 [min]
@@ -171,8 +171,7 @@ class SimTrack:
     `MachineSim` / `AgvSim` 只拿这个袋子（不持 `SimWorld` 引用，避免环）；
     `SimWorld` 把各跟踪列表同时挂成 `_job_progress` 等属性，快照代码直接读属性。
     """
-    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded", "agv_load_n",
-                 "job_rework")
+    __slots__ = ("job_progress", "job_loc", "job_agv", "cur_op", "agv_loaded", "agv_load_n")
 
     def __init__(self, n_jobs: int, n_machines: int, n_agv: int) -> None:
         self.job_progress = [0] * n_jobs                      # 已完成工序数
@@ -182,9 +181,7 @@ class SimTrack:
         self.cur_op: list[tuple[int, float, float] | None] = [None] * n_machines
         self.agv_loaded = [False] * n_agv                     # 车上是否载货（状态 2 的判据）
         self.agv_load_n = [0] * n_agv                         # 车上**在运件数**（in_flight 的"车上"部分）
-        # ④ 返工：逐作业的**累计**重做次数（`MachineSim.run` 的重做环里 ++，与
-        # `stats["rework_events"]` 同一分支）。⚠️ 只增不减——快照要的是"至今返了几次"。
-        self.job_rework = [0] * n_jobs
+        # ⚠️ **v2：④ 返工的 `job_rework` 已删**（2026-10-08）
 
     def set_load(self, aid: int, n: int) -> None:
         """一趟批次的**装上**（`n = len(batch)`）或**卸下**（`n = 0`）。
@@ -611,20 +608,10 @@ class MachineSim:
             # ⚠️ 上机时刻 = 此刻（换型/故障修复的墙钟延长都不计入剩余——标称口径）
             self.track.cur_op[self.pad.id] = (job, op.time, self.env.now)
             self.track.job_loc[job] = self.pad.id
-            # ④ 返工：同件在本机**原地**重做（工件不离开机台，故不走运输）。
-            # ⚠️ 必须原地——早期版本走 `in_q.put` 会**自锁**：本机是该缓冲的唯一消费者，
-            # 缓冲满时 put 永久阻塞，而此时还占着加工槽 ⇒ 该机位连同工件一起卡死
-            # （实测 MK07/MK10 5/5 掐表，关掉返工即 0/5）。
-            while True:
-                yield from self._process(job, op)
-                if self.con.rework and self.rng.random() < self.cfg.p_rework:
-                    self.stats["rework_events"] += 1
-                    # 快照跟踪（①/④ 特征）：逐作业计数与全局事件数**同分支 ++**，
-                    # 故 `Σ job_rework == stats["rework_events"]` 恒成立（有测试钉）。
-                    self.track.job_rework[job] += 1
-                    continue
-                break
-            # 快照跟踪（P2 Task 1）：工序加工完毕（返工不算进度）→ 清在制、推进度
+            # ⚠️ **v2：④ 返工已删**（2026-10-08）—— 原重做环（`rng < p_rework` 则原地 `continue`）
+            # 整个移除。顺带消失的是它那个自锁风险（原地重做是当年为绕开 `in_q.put` 死锁而选的）。
+            yield from self._process(job, op)
+            # 快照跟踪（P2 Task 1）：工序加工完毕 → 清在制、推进度
             self.track.cur_op[self.pad.id] = None
             self.track.job_progress[job] = oi + 1
             self.stats["ops_done"] = self.stats.get("ops_done", 0) + 1
@@ -1524,7 +1511,7 @@ class SimWorld:
         self._job_progress = track.job_progress
         self._job_loc = track.job_loc
         self._job_agv = track.job_agv
-        self._job_rework = track.job_rework  # ④ 返工：逐作业累计（`snapshot()` 只读）
+        # ⚠️ v2：④ 返工的 `_job_rework` 已删（2026-10-08）
         self._cur_op = track.cur_op
         self._agv_loaded = track.agv_loaded
         self._agv_load_n = track.agv_load_n
@@ -1659,8 +1646,8 @@ class SimWorld:
         让它触底为 0，而工件实际还在机台上）。`JobState.remaining_min` 同理，是剩余各工序的
         **标称**最短候选工时之和。`JobState.due` = ⑧ 的交期（与 `run()` 同口径的 `_due_map`；
         约束关闭或参考运行内为 0.0）。`in_flight` = **队列里待取** + **车上在运**（两种队列形状
-        都算，见下）。另外两个约束量：`JobState.rework_cnt` = 该作业**累计**返工次数（与
-        `stats["rework_events"]` 同分支 ++）；`VehicleState.zone_wait` = 该车**当前**区段等待
+        都算，见下）。⚠️ **v2：④ 返工删后已无 `rework_cnt`**（2026-10-08）。
+        另一个约束量：`VehicleState.zone_wait` = 该车**当前**区段等待
         时长（`ZoneManager.current_wait`，不在等待 = 0.0，放行即清零）。
         `queued_tasks` = **队列内容**（逐件身份，⑩ 拼批头的原料；两种队列形状都接，见下）。
         """
@@ -1689,7 +1676,7 @@ class SimWorld:
                 finished=done >= len(job_ops), due=float(due.get(j, 0.0)),
                 at_machine=int(self._job_loc[j]),
                 in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j]),
-                rework_cnt=int(self._job_rework[j])))
+                ))
         vs = []
         for a, agv in enumerate(self.agvs):
             vs.append(VehicleState(
@@ -1806,7 +1793,7 @@ class SimWorld:
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
                  # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
-                 "rework_events": 0, "pm_events": 0,
+                 "pm_events": 0,
                  "pm_events_forced": 0, "pm_events_chosen": 0,
                  # ② 有限缓冲：因输入缓冲满而**被迫等待**的累计时长 [min]（T3 ② 的激活量）
                  "buffer_block_min": 0.0,
@@ -1869,7 +1856,7 @@ class SimWorld:
         # 泊松流）⟹ 该计数按**护栏**累积而非按 episode：n_agv=6 时实测 25 次，真 episode 的
         # 期望仅 6×711/485 ≈ 8.8 次（MK07 更甚：44 次 vs 5×1527/485 ≈ 15.7）。
         # 受影响的是**尾巴里还会触发的事件计数**（AGV 故障；以及尾巴里仍在跑的行程/充电记账）；
-        # `fail_events`/`rework_events`/`pm_events` 只在加工中触发，末件回站前全部结束 ⟹ 不动。
+        # `fail_events`/`pm_events` 只在加工中触发，末件回站前全部结束 ⟹ 不动。
         # 修法：末件到站（`LuStation.run` 记 `completes` 处）成功 `done`；停表条件用 simpy 的
         # `|` 合成（`done | env.timeout(horizon)`）——跑完即停，永不到站的真死锁仍由护栏兜住。
         # ⚠️ `horizon_hit` 的判据**不变**（`len(completes) < n_jobs`）：完成度是"做完没有"，
@@ -1886,8 +1873,7 @@ class SimWorld:
                 "energy": energy["total_kwh"],         # M2 引证模型（spec §3.4），单位 kWh
                 "energy_breakdown": energy,
                 "setup_minutes_total": float(sum(stats["setup_min"])),
-                "rework_events": stats["rework_events"],
-                "pm_events": stats["pm_events"],
+                                "pm_events": stats["pm_events"],
                 # ⑫ 拆键（T3）：forced = 被阈值强制触发（T3 的激活量）、chosen = 策略主动选
                 "pm_events_forced": stats["pm_events_forced"],
                 "pm_events_chosen": stats["pm_events_chosen"],
@@ -2052,7 +2038,7 @@ class SimWorld:
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
                  # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
-                 "rework_events": 0, "pm_events": 0,
+                 "pm_events": 0,
                  "pm_events_forced": 0, "pm_events_chosen": 0,
                  # ② 有限缓冲：因输入缓冲满而**被迫等待**的累计时长 [min]（T3 ② 的激活量）
                  "buffer_block_min": 0.0,
@@ -2118,8 +2104,7 @@ class SimWorld:
                 "energy": energy["total_kwh"],         # M2 引证模型（同 run()）
                 "energy_breakdown": energy,
                 "setup_minutes_total": float(sum(stats["setup_min"])),
-                "rework_events": stats["rework_events"],
-                "pm_events": stats["pm_events"],
+                                "pm_events": stats["pm_events"],
                 # ⑫ 拆键（T3）：forced = 被阈值强制触发（T3 的激活量）、chosen = 策略主动选。
                 # 规则配置 forced == pm_events、chosen == 0（规则不会主动提前保养）。
                 "pm_events_forced": stats["pm_events_forced"],

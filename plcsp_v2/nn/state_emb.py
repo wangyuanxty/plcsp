@@ -122,16 +122,14 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_jobs, 9)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。
+    """(n_jobs, 8)。顺序 = FEATURE_NAMES["B"]，**不得改序**（有测试按名核对）。
 
     ⚠️ **第 2 维（due_margin）在 ⑧ `due_dates` 关闭时恒 0**（R1b，F2 同型残留）：⑧ 关意味着
     该实例**无交期**（`_due_map` 返回 `{}`，快照 `due` 落 0.0 哨兵）；照读哨兵会得到
     `(0 − now)/M_ref`（不是 0，长 episode 饱和到 −2），等于报出一个不存在的交期紧迫度。
     恒 0 = "无交期信息"；维宽/列序不随配置变。
 
-    ⚠️ **第 8 维（rework_cnt）在 ④ `rework` 关闭时恒 0**（R1d，同型）：④ 关时仿真一次重做环
-    都不进（逐作业计数恒 0），但特征仍**显式读开关**静默——快照里带值也不得外泄。归一化除以
-    本作业工序数（`total_ops`）：返工是"同一道工序重做"，以工序数为分母即"平均每道工序返工几次"。
+    ⚠️ **2026-10-08（v2）：④ 返工的 `rework_cnt` 维已删**（F_B 9 → 8）。
     """
     out = np.zeros((ctx.n_jobs, F_B), dtype=np.float32)
     for j, js in enumerate(snap.jobs):
@@ -150,8 +148,6 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             1.0 if js.in_transit else 0.0,                          # 5 in_transit
             _safe(js.on_agv / max(ctx.n_agv, 1), -1.0, 1.0),        # 6 on_agv
             1.0,                                                    # 7 weight（等权，见 §5.3.1）
-            (_safe(js.rework_cnt / max(js.total_ops, 1), 0.0, 1.0)
-             if ctx.constraints.rework else 0.0),                   # 8 rework_cnt（④ 关恒 0）
         )
     return out
 

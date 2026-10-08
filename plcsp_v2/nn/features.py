@@ -23,7 +23,9 @@ from ..env.des import SimConfig
 from ..env.instances import Instance
 from ..env.layout import Layout
 
-F_M, F_B, F_V, F_G = 7, 9, 11, 3
+F_M, F_B, F_V, F_G = 7, 8, 11, 3
+# ⚠️ 2026-10-08（v2）：**④ 返工已删** ⟹ `F_B` 由 9 降到 8（去掉末位的 `rework_cnt`）。
+# ⑤ 换型从未进过特征层（`prev_job` 是快照里的死字段），故 F_M 不变。
 # ⚠️ 2026-10-05（R2 区段 token）：新增第五段 "Z"（区段）——**只在 `route_zones=True` 时出现**
 # （默认配置的 seg 仍是四元组、序列一位不变）。F_Z=4 ≤ F_MAX ⟹ token 宽度与补齐规则不变。
 F_Z = 4
@@ -36,13 +38,13 @@ SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
 
 # ⚠️ 字段名清单与宽度**必须逐段相等**——有测试守着（test_field_counts_match_declared_widths）。
 # 它同时是论文附录的特征表与排错时的对照表。
-# ⚠️ 2026-10-04：① 拥堵 +1（V 段 `zone_wait`）、④ 返工 +1（B 段 `rework_cnt`）。
-# **一律末位追加**——既有列的下标是 ckpt 与测试的契约，不得插队。
+# ⚠️ 2026-10-08（v2）：④ 返工删 ⟹ B 段去掉 `rework_cnt`。
+# **一律末位追加 / 末位删除**——既有列的下标是 ckpt 与测试的契约，不得插队。
 FEATURE_NAMES: dict[str, tuple[str, ...]] = {
     "M": ("backlog", "in_fill", "out_fill", "busy", "remaining_frac",
           "pm_left", "fail_rate"),
     "B": ("progress", "remaining_work", "due_margin", "finished",
-          "at_machine", "in_transit", "on_agv", "weight", "rework_cnt"),
+          "at_machine", "in_transit", "on_agv", "weight"),
     "V": ("st_idle", "st_empty", "st_loaded", "st_down", "node_x", "node_y",
           "queued", "battery", "capacity", "speed_factor", "zone_wait"),
     "G": ("time_progress", "done_frac", "in_flight"),

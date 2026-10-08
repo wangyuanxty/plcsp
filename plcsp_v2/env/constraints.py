@@ -27,7 +27,7 @@ class ConstraintConfig:
     finite_buffer: bool = True        # ② 有限缓冲（in_cap/out_cap）
     machine_failure: bool = True      # ③ 机器故障（泊松 + 中断恢复）
     # B 类：近乎免费
-    rework: bool = True               # ④ 工件返工
+    # ⚠️ **v2：④ 返工开关已删**（2026-10-08）
     # ⚠️ **v2：⑤ 换型开关已删**（2026-10-08）—— 约束去掉后无对应机制，开关无意义
     due_dates: bool = True            # ⑧ 交期 / 拖期（TF/RDD：LB·τ·(1+R(2ρ−1))，见 due_dates.py）
     agv_failure: bool = True          # ⑨ AGV 故障
@@ -39,7 +39,7 @@ class ConstraintConfig:
     def with_off(self, *names: str) -> "ConstraintConfig":
         """返回**关掉指定开关**的副本（不可变风格，不原地改）。
 
-        用法：`cfg.with_off("rework", "due_dates")`。
+        用法：`cfg.with_off("congestion", "due_dates")`。
         取 `*names` 而非 `**kw` 是刻意的——后者要写 `with_(rework=True)` 才能关，
         值被忽略、靠 key 表意，极易读反。
         """
@@ -54,10 +54,10 @@ _FULL = ConstraintConfig()
 ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "Full": _FULL,
     "-物流": _FULL.with_off("congestion", "agv_failure", "heterogeneous_fleet", "charging"),
-    "-生产": _FULL.with_off("finite_buffer", "machine_failure", "rework",
+    "-生产": _FULL.with_off("finite_buffer", "machine_failure",
                             "maintenance"),   # ② 机台缓冲属生产侧
     "-信息": _FULL.with_off("due_dates"),
-    "None": _FULL.with_off("congestion", "finite_buffer", "machine_failure", "rework",
+    "None": _FULL.with_off("congestion", "finite_buffer", "machine_failure",
                            "due_dates",
                            "agv_failure", "heterogeneous_fleet", "charging", "maintenance"),
 }

@@ -56,10 +56,8 @@ class JobState:
     # 退回队列即清零，故**与重试史相关**——同为"在车里排队"的物理状态，经历过退回的
     # 取 `in_transit=False`，未经历过的（transporter 已派车、还没发车的）取 `True`。
     on_agv: int
-    # ④ 返工：本作业**至今**被原地重做的次数（`des.py` 的重做环逐次 ++；返工不算进度）。
-    # ④ 关闭时恒 0。归一化在特征层（除以本作业工序数，见 `nn/state_emb.job_features`）——
-    # 仿真只计数，标度归特征层。
-    rework_cnt: int
+    # ⚠️ **v2：④ 返工的 `rework_cnt` 已删**（2026-10-08）—— 返工约束去掉后，作业不再有"重做"。
+    # 特征层相应少一维（`F_B` 9 → 8，见 `nn/features.py`）。
 
 
 @dataclass(frozen=True)
