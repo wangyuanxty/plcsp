@@ -7010,8 +7010,67 @@ Ghanbarzadeh 的 **236 篇**频次分析：**计算代价 67.8%** · 可扩展�
 
 `N` · `ΔT` · `Y^i` 合成 · `g` 连续/分档 · 顶层触发事件定义 · 下层观测掩码怎么划
 
-### 68.8 创新评估（诚实）
+### 68.8 ⚠️⚠️ 创新核查（2026-10-08）：**部分是已发表的，且核心假设被部分反证**
 
-**逐件皆已知**（子目标 HRL / options / selection hyper-heuristic / GRPO / Transformer）。**唯一可能的贡献是论断**："免 critic 的组相对优势消除 MAPPO 的 critic 非稳态" —— **需对照实验，且可能有人做过（未查）**。
+**逐件皆已知**（子目标 HRL / options / selection hyper-heuristic / GRPO / Transformer）。
 
-**⟹ 约当一区应用论文，不会是亮点。**
+**已被占：**
+
+| 元素 | 谁占 |
+|---|---|
+| **GRPO + 分层策略** | **HiMAC**（arXiv:2603.00977）· **Hi-Agent**（arXiv:2510.14388 / iFuture 2026） |
+| **"从同一状态采 N 个做组归一化"** | **GiGPO**（**NeurIPS 2025**, arXiv:2505.10978）*anchor state grouping* |
+| GRPO 出 LLM 圈子 | 机器人控制（`cat:cs.RO` 51 篇）· MARL · 组合优化 |
+
+**⚠️ 核心假设被反证 —— HiMAC 的消融：**
+
+它把非稳态修复归给**交替更新**（Iterative Co-Evolution），**不是**去掉 critic：
+
+| 变体（Qwen2.5-7B） | ALFWorld | WebShop |
+|---|---|---|
+| HiMAC 全量 | 92.1 | 84.1 |
+| **去掉交替更新**（免 critic 优势**仍在**） | **85.3（−6.8）** | **74.8（−9.3）** |
+
+> agent 原话：*"critic-freeness alone does not remove the non-stationarity penalty. The paper never claims that it does."*
+
+**⚠️ 第二条反证** —— *Learning Without Critics?*（arXiv:**2511.03527**）：
+
+> *"learned critics remain essential for long-horizon tasks: all critic-free baselines **underperform PPO** except in short-horizon environments like CartPole"*
+
+**⟹ 我们的调度是长时程 ⟹ GRPO 有可能比 MAPPO 差 ⟹ 架构选择本身有风险。**
+
+**仍未找到**：跨层**共享**一个优势（HiMAC/Hi-Agent 都是各层各自）· 非 LLM 调度域的分层 GRPO · options/macro-action 框架下的 GRPO（arXiv `"macro-action"`=0）。
+
+**⟹ 四条剩余可辩护的，没有一条够"发现"级别。评分从"发现新颖性中"下调为"低"。**
+
+**⚠️ 外部核查把我们的下层误判为 "fixed rule-based" —— 但 PA/LA 是学的，下层会漂移，经典非稳态**存在**。不能靠"下层固定"论证。**
+
+### 68.9 参数已定（按推荐拍板）
+
+| # | 项 | 定 |
+|---|---|---|
+| ① | `N` | **8** |
+| ② | `ΔT` | **固定 20 个完工事件**（不足则退化时间上限） |
+| ③ | `Y^i` | **段内完成工件数 + 段内能耗 + 段内拖期增量**（**三个都是段内真增量**；⚠️ makespan 中途无定义，绝不能用） |
+| ④ | `g` | **分档，每维 4 档 ⟹ 4³ = 64 组合** |
+| ⑤ | 顶层触发 | **定时器 + 机障 ③ + AGV 故障 ⑨** |
+| ⑥ | 观测掩码 | **共享编码器 + attention 硬掩码**（分权在**决策层**，不在表征层） |
+| ⑦ | 实例 | 训练 MK01–MK06（MKT 口径）· 同分布测试 MK07–MK09 · 跨布局测试 |
+| ⑧ | 基线 | **至少含 MAPPO 版**（同架构同编码器）+ NSGA-II + 纯规则派工 |
+
+### 68.10 ⭐ 下一步：**最小验证**（不是搭四 agent）
+
+**§68.8 那条风险可以很便宜地测掉：**
+
+| | |
+|---|---|
+| **臂 A** | `A = GAE(回报, V(s))`（加 critic） |
+| **臂 B** | `A = (R − mean)/std`（现行 GRPO） |
+| **其余** | 完全相同：同实例 · 同编码器 · 同约束档 · **多种子** |
+| **用现有 `joint_chain_step`** | **不搭分层、不搭三 agent** |
+
+**测**：训练曲线方差 · 收敛速度 · **扰动（③⑨）下最终业绩**
+
+**判据**：B 明显差 ⟹ **架构方向要重想**；B 不差 ⟹ 再往上搭分层。
+
+**⚠️ 比搭四 agent 便宜一个数量级。**
