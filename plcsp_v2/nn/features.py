@@ -23,18 +23,19 @@ from ..env.des import SimConfig
 from ..env.instances import Instance
 from ..env.layout import Layout
 
-F_M, F_B, F_V, F_G = 7, 8, 8, 3
+F_M, F_B, F_V, F_C, F_G = 7, 8, 8, 4, 3
 # ⚠️ 2026-10-08（v2）：④ 返工删 ⟹ `F_B` 9→8；⑩ 异构车队+拼批删 ⟹ `F_V` 11→9
 # （去掉 `capacity` / `speed_factor` 两维，车队同构单车单载）。
 # ⚠️ **`F_MAX` 因此由 11 降到 9** —— 这是 v2 第一次改 token 宽度。
 # ⑤ 换型从未进过特征层（`prev_job` 是快照里的死字段），故 F_M 不变。
 # ⚠️ 2026-10-08（v2）：① 拥堵删 ⟹ V 段去掉 `zone_wait`（F_V 9→8），**Z 段整段去掉**
 # （区段 token 没有对象）。⚠️ 四段制回到 M/B/V/G；`F_MAX` = max(7,8,8,3) = **8**。
-F_MAX = max(F_M, F_B, F_V, F_G)          # **8**（v2；原 11）—— 补齐后的统一宽度
+F_MAX = max(F_M, F_B, F_V, F_C, F_G)          # **8**（v2；原 11）—— 补齐后的统一宽度
 
 # 各段在补齐张量 (N, F_MAX) 里占的列；超出部分恒为 0
 SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
-                               "V": slice(0, F_V), "G": slice(0, F_G)}
+                               "V": slice(0, F_V), "C": slice(0, F_C),
+                               "G": slice(0, F_G)}
 
 # ⚠️ 字段名清单与宽度**必须逐段相等**——有测试守着（test_field_counts_match_declared_widths）。
 # 它同时是论文附录的特征表与排错时的对照表。
@@ -47,6 +48,10 @@ FEATURE_NAMES: dict[str, tuple[str, ...]] = {
           "at_machine", "in_transit", "on_agv", "weight"),
     "V": ("st_idle", "st_empty", "st_loaded", "st_down", "node_x", "node_y",
           "queued", "battery"),
+    # ⚠️ **v2（2026-10-09）新增 C 段**：桩 token。设计 §10 的掩码表要
+    # `RA·充电 → {AGV, 桩}`，而此前**桩根本没进 token 序列** ⟹ 充电头看不到桩忙不忙，
+    # "选哪根桩"只剩距离一个维度。补上。`F_C = 4 ≤ F_MAX` ⟹ **列宽不变**。
+    "C": ("occupied_frac", "waiting_frac", "node_x", "node_y"),
     "G": ("time_progress", "done_frac", "in_flight"),
 }
 

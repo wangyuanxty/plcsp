@@ -14,11 +14,22 @@ from plcsp_v2.env import layout as layout_mod                     # noqa: E402
 from plcsp_v2.env.corridors import build_corridor_graph, dock_distance_matrix  # noqa: E402
 from plcsp_v2.env.des import SimConfig, SimWorld                  # noqa: E402
 from plcsp_v2.env.instances import load_mk                        # noqa: E402
-from plcsp_v2.hrl.agents import (G_BINS, G_DIM, HierarchicalPolicy,  # noqa: E402
-                                 g_to_vec)
+from plcsp_v2.hrl.agents import (G_BINS, G_DIM, LA_CTX_DIM,  # noqa: E402
+                                 HierarchicalPolicy, g_to_vec)
 from plcsp_v2.hrl.rules import N_LA_RULES, N_PA_RULES             # noqa: E402
 from plcsp_v2.nn.features import norm_context              # noqa: E402
 from plcsp_v2.nn.state_emb import build_tok                       # noqa: E402
+
+
+def _fwd(net, tok, seg, bins=None):
+    """统一前向入口。
+
+    ⚠️ **LA 头声明了 `LA_CTX_DIM` 的逐决策任务上下文 ⟹ 必须给。** 不给会**显式报错**
+    （`agents.py` 里那条 guard）——静默补 0 会让"这个头没接上"变成无声的坏策略。
+    这里给 0 是**调用方在声明**"本测试不关心任务身份"，不是默认值。
+    """
+    ctx = torch.zeros(tok.shape[0], LA_CTX_DIM)
+    return net(tok, seg, bins, la_ctx=ctx)
 
 
 def _tok_seg(name: str = "mk01"):
@@ -36,7 +47,7 @@ def _tok_seg(name: str = "mk01"):
 def test_forward_shapes_and_masks():
     tok, seg, n_ch = _tok_seg()
     net = HierarchicalPolicy(n_chargers=n_ch)
-    out = net(tok, seg)
+    out = _fwd(net, tok, seg)
     b = tok.shape[0]
     assert out.g_logits.shape == (b, G_DIM, G_BINS)
     assert out.g_bins.shape == (b, G_DIM) and out.g.shape == (b, G_DIM)
@@ -47,7 +58,11 @@ def test_forward_shapes_and_masks():
     # 掩码是**唯一一处定义**，且四段拼接与 `seg` 一致
     mk = HierarchicalPolicy.masks(seg)
     assert mk["PA"] == (0, seg[0] + seg[1]) and mk["RA_maint"] == (0, seg[0])
-    assert mk["LA"] == mk["RA_charge"] == (seg[0] + seg[1], seg[0] + seg[1] + seg[2])
+    assert mk["LA"] == (seg[0] + seg[1], seg[0] + seg[1] + seg[2])
+    # ⚠️ **RA·充电 = V ∪ C**（2026-10-09 补的 C 段）：此前桩没进 token 序列，
+    # 充电头看不到桩忙不忙 ⟹ "选哪根桩"只剩距离一个维度。
+    assert mk["RA_charge"] == (seg[0] + seg[1], seg[0] + seg[1] + seg[2] + seg[3])
+    assert mk["C"][1] - mk["C"][0] == seg[3] == n_ch > 0
     assert (out.g >= 0).all() and (out.g <= 1).all()
 
 
@@ -75,8 +90,8 @@ def test_b_matrices_are_zero_initialised_so_g_has_no_effect_at_the_start():
         assert torch.all(b == 0), f"{name} 的 B 不是零初始：{b}"
     g0 = torch.zeros(1, G_DIM, dtype=torch.long)
     g3 = torch.full((1, G_DIM), G_BINS - 1, dtype=torch.long)
-    a = net(tok, seg, g0)
-    b = net(tok, seg, g3)
+    a = _fwd(net, tok, seg, g0)
+    b = _fwd(net, tok, seg, g3)
     assert torch.allclose(a.pa, b.pa) and torch.allclose(a.la, b.la)
     assert torch.allclose(a.ra_charge, b.ra_charge) and torch.allclose(a.ra_maint, b.ra_maint)
 
@@ -98,8 +113,8 @@ def test_sweeping_g_moves_the_action_distribution_once_b_is_learned():
     with torch.no_grad():
         net.pa.b[0, 0] = -10.0
         net.pa.b[1, 0] = +10.0
-    lo = net(tok, seg, torch.zeros(1, G_DIM, dtype=torch.long))
-    hi = net(tok, seg, torch.full((1, G_DIM), G_BINS - 1, dtype=torch.long))
+    lo = _fwd(net, tok, seg, torch.zeros(1, G_DIM, dtype=torch.long))
+    hi = _fwd(net, tok, seg, torch.full((1, G_DIM), G_BINS - 1, dtype=torch.long))
     for head in ("pa", "la", "ra_charge", "ra_maint"):
         d = (getattr(hi, head) - getattr(lo, head)).abs().max().item()
         assert d > 1e-6, f"{head} 对 g 无反应——B 没接上（最大差 {d}）"
@@ -118,14 +133,27 @@ def test_bias_is_a_pure_linear_additive_term():
     tok, seg, n_ch = _tok_seg()
     net = HierarchicalPolicy(n_chargers=n_ch)
     bins = torch.tensor([[0, 2, 3]])
-    base = net(tok, seg, bins).pa
+    base = _fwd(net, tok, seg, bins).pa
     with torch.no_grad():
         net.pa.b.add_(torch.tensor([[1.0, 0.0, 0.0]] * N_PA_RULES))
-    after = net(tok, seg, bins).pa
+    after = _fwd(net, tok, seg, bins).pa
     expect = float(g_to_vec(bins)[0, 0])                  # = (0+0.5)/4 = 0.125
     assert expect == pytest.approx(0.125)
     delta = after - base
     assert torch.allclose(delta, torch.full_like(delta, expect), atol=1e-5),         f"偏置不是齐步常数：{delta.flatten()[:4].tolist()} vs {expect}"
+
+
+@pytest.mark.unit
+def test_missing_la_task_context_is_an_explicit_error():
+    """⚠️ LA 头声明了逐决策上下文 ⟹ **不给就报错**。
+
+    静默补 0 会让"任务身份没接上"变成**无声的坏策略**——LA 头会以为每趟任务的
+    起讫都是 0 号节点。与"掩码为空报错"同一条纪律。
+    """
+    tok, seg, n_ch = _tok_seg()
+    net = HierarchicalPolicy(n_chargers=n_ch)
+    with pytest.raises(ValueError, match="逐决策上下文"):
+        net(tok, seg, torch.zeros(1, G_DIM, dtype=torch.long))
 
 
 @pytest.mark.unit
@@ -142,10 +170,10 @@ def test_empty_mask_is_an_explicit_error():
 def test_forward_is_deterministic_and_batch_rows_are_independent():
     tok, seg, n_ch = _tok_seg()
     net = HierarchicalPolicy(n_chargers=n_ch)
-    a = net(tok, seg, torch.zeros(1, G_DIM, dtype=torch.long)).pa
-    b = net(tok, seg, torch.zeros(1, G_DIM, dtype=torch.long)).pa
+    a = _fwd(net, tok, seg, torch.zeros(1, G_DIM, dtype=torch.long)).pa
+    b = _fwd(net, tok, seg, torch.zeros(1, G_DIM, dtype=torch.long)).pa
     assert torch.allclose(a, b), "同输入必须同输出（无 dropout / 无随机）"
     both = torch.cat([tok, tok], dim=0)
-    c = net(both, seg, torch.zeros(2, G_DIM, dtype=torch.long)).pa
+    c = _fwd(net, both, seg, torch.zeros(2, G_DIM, dtype=torch.long)).pa
     assert torch.allclose(c[0], c[1], atol=1e-5), "批内各行独立（无跨 batch 注意力）"
     assert all(np.isfinite(v) for v in c.flatten().tolist())

@@ -29,12 +29,17 @@
 |---|---|---|
 | **MA** | 全局（编码器给的均值池化） | — |
 | **PA** | **M ∪ B**（机台 + 作业） | ✓ 与设计一致 |
-| **LA** | **V**（AGV） | ⚠️ 设计还要"任务 token"——**v2 没有任务 token**（① 去后无 Z 段、也无任务段）。如实声明 |
-| **RA·充电** | **V**（AGV） | ⚠️ 设计还要"桩 token"——**桩是动作不是 token**（见 `des.CHARGE_CAND_SKIP`）。如实声明 |
+| **LA** | **V**（AGV） | **任务身份**（逐决策上下文，见 `LA_CTX_DIM`）—— 设计要的"任务 token"**表示选错了**：任务随决策变，进不了状态张量 |
+| **RA·充电** | **V**（AGV） ∪ **C**（桩） | ✓ **2026-10-09 补齐 C 段**（此前桩根本没进 token 序列） |
 | **RA·保养** | **M**（机台） | — |
 
 **"分权在决策层，不在表征层"**（设计 §10⑥ 要求论文写明）：四个 agent 共用**同一个**
 编码器、同一份 `Z_t`；差别只在**读哪一段**与**自己的打分头**。
+
+⚠️ **2026-10-09 更正**：此前这里把 LA 与 RA·充电都记成"与设计不一致"。核下来是**两回事**：
+- **RA·充电**是**真缺口**（桩的占用就在快照里，只是没 token 化）⟹ **已补 C 段**；
+- **LA 的"任务 token"**是**表示选错**：任务是**逐决策上下文**，特征随决策变，
+  放进状态张量会让张量依赖决策 ⟹ 走**打分层输入**（v1 的 `task_feat` 就是这个做法）。
 """
 from __future__ import annotations
 
@@ -51,6 +56,13 @@ from .rules import N_LA_RULES, N_PA_RULES
 G_DIM = 3                # [θ_wip, θ_otr, θ_agv]
 G_BINS = 4
 G_NAMES = ("theta_wip", "theta_otr", "theta_agv")
+
+LA_CTX_DIM = 4
+"""LA 的**逐决策任务上下文**宽度：`(起点节点, 终点节点, 可运输时刻 − now, 工序号)`。
+
+⚠️ **这不是 token**（设计 §10 的掩码表写成"任务 token"是**表示选错**）：任务的属性
+**随决策变**，放进状态张量会让张量依赖决策。**正确做法是拼进打分层**——
+`2026-10-02` 的 v1 `algo/group_rel.task_feat(...)` 就是这个口径，此处沿用。"""
 
 
 def g_to_vec(bins: torch.Tensor, n_bins: int = G_BINS) -> torch.Tensor:
@@ -81,19 +93,30 @@ class _MaskedScoreHead(nn.Module):
     解析 `seg`**，因为同一份 `Z_t` 要被四个头读四次，解析只该做一次。
     """
 
-    def __init__(self, d_model: int, n_out: int, hidden: int | None = None):
+    def __init__(self, d_model: int, n_out: int, hidden: int | None = None,
+                 ctx_dim: int = 0):
         super().__init__()
         h = hidden or max(32, d_model // 2)
-        self.base = nn.Sequential(nn.Linear(d_model, h), nn.GELU(), nn.Linear(h, n_out))
+        self.ctx_dim = int(ctx_dim)
+        # ⚠️ **逐决策上下文**（如 LA 的"这一趟运什么"）**拼在池化向量后面**，不进 token。
+        # 放进状态张量会让张量依赖决策——那不是状态。
+        self.base = nn.Sequential(nn.Linear(d_model + self.ctx_dim, h), nn.GELU(),
+                                  nn.Linear(h, n_out))
         # ⚠️ **零初始化**（见模块 docstring）：起始 `g` 不影响动作
         self.b = nn.Parameter(torch.zeros(n_out, G_DIM))
 
     def forward(self, z: torch.Tensor, rows: tuple[int, int],
-                g: torch.Tensor | None) -> torch.Tensor:
+                g: torch.Tensor | None, ctx_feat: torch.Tensor | None = None) -> torch.Tensor:
         lo, hi = rows
         if hi <= lo:
             raise ValueError(f"掩码段为空：[{lo}, {hi})——该 agent 没有可读的 token")
         ctx = z[:, lo:hi, :].mean(dim=1)            # (B, d) —— 段内均值池化
+        if self.ctx_dim:
+            if ctx_feat is None:
+                raise ValueError(
+                    f"本头声明了 ctx_dim={self.ctx_dim} 的逐决策上下文，但没给——"
+                    "静默补 0 会让『这个头没接上』变成无声的坏策略")
+            ctx = torch.cat([ctx, ctx_feat], dim=-1)
         logits = self.base(ctx)                     # (B, n_out)
         if g is not None:
             logits = logits + g @ self.b.t()        # `B·g`：第 j 列 = 目标 j 抬高哪些动作
@@ -120,34 +143,39 @@ class HierarchicalPolicy(nn.Module):
     """
 
     def __init__(self, n_chargers: int, d_model: int = 128, n_heads: int = 4,
-                 n_layers: int = 4, feat_dim: int = F_MAX, n_bins: int = G_BINS):
+                 n_layers: int = 4, feat_dim: int = F_MAX, n_bins: int = G_BINS,
+                 la_ctx_dim: int = LA_CTX_DIM):
         super().__init__()
         self.enc = LayoutEncoder(d_model=d_model, n_heads=n_heads, n_layers=n_layers,
                                  feat_dim=feat_dim)
         self.n_bins = int(n_bins)
         self.ma = MAHead(d_model, n_bins)
         self.pa = _MaskedScoreHead(d_model, N_PA_RULES)
-        self.la = _MaskedScoreHead(d_model, N_LA_RULES)
+        self.la = _MaskedScoreHead(d_model, N_LA_RULES, ctx_dim=la_ctx_dim)
         self.ra_charge = _MaskedScoreHead(d_model, 1 + int(n_chargers))
         self.ra_maint = _MaskedScoreHead(d_model, 2)
 
-    # ── 掩码：`seg = (n_m, n_jobs, n_agv, 1)` → 各 agent 读哪一段 ──
+    # ── 掩码：`seg = (n_m, n_jobs, n_agv, n_ch, 1)` → 各 agent 读哪一段 ──
     @staticmethod
     def masks(seg: tuple[int, ...]) -> dict[str, tuple[int, int]]:
         """逐 agent 的 token 行区间（半开）。**唯一的掩码定义处**——别处不得再算一遍。"""
-        n_m, n_jobs, n_agv = int(seg[0]), int(seg[1]), int(seg[2])
+        n_m, n_jobs, n_agv, n_ch = (int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
+        v_lo = n_m + n_jobs
+        c_lo = v_lo + n_agv
         return {
             "M": (0, n_m),
-            "B": (n_m, n_m + n_jobs),
-            "V": (n_m + n_jobs, n_m + n_jobs + n_agv),
-            "PA": (0, n_m + n_jobs),                              # M ∪ B
-            "LA": (n_m + n_jobs, n_m + n_jobs + n_agv),           # V
-            "RA_charge": (n_m + n_jobs, n_m + n_jobs + n_agv),    # V
+            "B": (n_m, v_lo),
+            "V": (v_lo, c_lo),
+            "C": (c_lo, c_lo + n_ch),
+            "PA": (0, v_lo),                                      # M ∪ B
+            "LA": (v_lo, c_lo),                                   # V（+ 任务上下文，见 `ctx_dim`）
+            "RA_charge": (v_lo, c_lo + n_ch),                     # **V ∪ C**（2026-10-09 补 C）
             "RA_maint": (0, n_m),                                 # M
         }
 
     def forward(self, tok: torch.Tensor, seg: tuple[int, ...],
                 g_bins: torch.Tensor | None = None, *,
+                la_ctx: torch.Tensor | None = None,
                 bias: torch.Tensor | None = None,
                 hard: bool = True) -> PolicyOut:
         """`tok (B,N,F)` + `seg` → `PolicyOut`。
@@ -166,7 +194,7 @@ class HierarchicalPolicy(nn.Module):
         return PolicyOut(
             g_logits=g_logits, g_bins=g_bins, g=g,
             pa=self.pa(z, mk["PA"], g),
-            la=self.la(z, mk["LA"], g),
+            la=self.la(z, mk["LA"], g, la_ctx),
             ra_charge=self.ra_charge(z, mk["RA_charge"], g),
             ra_maint=self.ra_maint(z, mk["RA_maint"], g),
         )

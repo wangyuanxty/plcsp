@@ -16,7 +16,7 @@ from plcsp_v2.env.instances import load_mk
 from plcsp_v2.nn import state_emb
 from plcsp_v2.nn.cuda_graph import CudaGraphForward
 from plcsp_v2.nn.encoder import AttnLayer, LayoutEncoder
-from plcsp_v2.nn.features import (F_B, F_G, F_M, F_MAX, F_V, FEATURE_NAMES,
+from plcsp_v2.nn.features import (F_B, F_C, F_G, F_M, F_MAX, F_V, FEATURE_NAMES,
                                   SEG_SLICE, NormContext, norm_context)
 
 
@@ -31,9 +31,9 @@ def _world(name: str = "mk01") -> SimWorld:
 @pytest.mark.unit
 def test_feature_widths_and_column_order_are_frozen():
     """列序/维宽是**契约**（有测试按名核对、ckpt 兼容）——改它就是破坏兼容。"""
-    assert (F_M, F_B, F_V, F_G) == (7, 8, 8, 3)
+    assert (F_M, F_B, F_V, F_C, F_G) == (7, 8, 8, 4, 3)
     assert F_MAX == max(F_M, F_B, F_V, F_G) == 8
-    for k, n in (("M", F_M), ("B", F_B), ("V", F_V), ("G", F_G)):
+    for k, n in (("M", F_M), ("B", F_B), ("V", F_V), ("C", F_C), ("G", F_G)):
         assert len(FEATURE_NAMES[k]) == n, k
         assert SEG_SLICE[k] == slice(SEG_SLICE[k].start, SEG_SLICE[k].start + n)
     assert FEATURE_NAMES["B"][1] == "remaining_work"
@@ -47,12 +47,15 @@ def test_norm_context_and_token_tensor_shape():
     assert isinstance(ctx, NormContext) and ctx.n_jobs == w.inst.n_jobs
     assert ctx.n_m == w.inst.n_machines and ctx.n_agv == w.cfg.n_agv
     tok, seg = state_emb.build_tok(w.snapshot(), w.inst, w.layout, ctx)
-    assert seg == (ctx.n_m, ctx.n_jobs, ctx.n_agv, 1)
+    assert seg == (ctx.n_m, ctx.n_jobs, ctx.n_agv, len(w.layout.chargers), 1)
     assert tok.shape == (sum(seg), F_MAX) and tok.dtype == np.float32
     # 补零列恒 0（spec §5.3.1）
     assert np.all(tok[:ctx.n_m, F_M:] == 0.0)
     assert np.all(tok[ctx.n_m:ctx.n_m + ctx.n_jobs, F_B:] == 0.0)
     assert np.all(tok[-1, F_G:] == 0.0)
+    # C 段由 `layout.chargers` 定行数（不是由快照）——`_cold_start` 的快照不带桩表，
+    # 该段仍须在，否则同一网络在不同时点收到不同的段结构
+    assert seg[3] == len(w.layout.chargers) and seg[3] > 0
 
 
 @pytest.mark.unit
@@ -63,6 +66,8 @@ def test_segment_feature_builders_agree_with_the_concatenated_tensor():
     m = state_emb.machine_features(snap, ctx)
     j = state_emb.job_features(snap, ctx)
     v = state_emb.vehicle_features(snap, ctx)
+    c = state_emb.charger_features(snap, w.layout, ctx)
+    assert c.shape == (len(w.layout.chargers), F_C) and np.isfinite(c).all()
     g = state_emb.global_features(snap, ctx)
     assert m.shape == (ctx.n_m, F_M) and j.shape == (ctx.n_jobs, F_B)
     assert v.shape == (ctx.n_agv, F_V) and g.shape == (1, F_G)

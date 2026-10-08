@@ -3,16 +3,16 @@
 序列 = [M...M (机台) | B...B (作业) | V...V (车辆) | G (全局)]，四段行数 (n_m, n_jobs, n_agv, 1)。
 ⚠️ 2026-10-05（R2）：**可选第五段 Z（区段 token）**——只在 `route_zones=True` 时由
 `build_tok` 追加在末位，`seg` 随之变五元；默认配置四段、四元组、**序列一位不变**。
-输入是 **(B, N, F_MAX)** 张量（`B ≥ 1`；列定义见 `features.py`：各段补零到 `F_MAX=11`）：
+输入是 **(B, N, F_MAX)** 张量（`B ≥ 1`；列定义见 `features.py`：各段补零到 `F_MAX=8`）：
 
-- **每段一个自己的 `Linear`**（`proj`，2026-10-04 改）：M/B/V/G 各自投到 `d_model`，
-  每段只吃自己那几列（7/9/11/3）。**推翻 P2 的"单个共享 Linear"决定**——旧方案白乘补零列
+- **每段一个自己的 `Linear`**（`proj`，2026-10-04 改）：M/B/V/C/G 各自投到 `d_model`，
+  每段只吃自己那几列（7/8/8/4/3）。**推翻 P2 的"单个共享 Linear"决定**——旧方案白乘补零列
   （G 段只有 3/10 列有效），且同一列在不同段语义不同（第 0 列在 M 段是 `backlog`、
   在 V 段是 `st_idle`），共享权重被迫用一组系数解释两个意思。
   ⚠️ **A/B 实测测不出性能差别**（见 `test_per_segment_projection` 的 docstring）——
   这是**工程整洁**，**论文里不作为贡献**。
-- **类型嵌入 `type_emb (4, d_model)`**：由 `seg` 给每个 token 定类型 id（0=M/1=B/2=V/3=G）。
-  ⚠️ **仍然必需**：四段投到**同一个 d 维空间**，注意力算 q·k 相似度时，
+- **类型嵌入 `type_emb (5, d_model)`**：由 `seg` 给每个 token 定类型 id（0=M/1=B/2=V/3=C/4=G）。
+  ⚠️ **仍然必需**：五段投到**同一个 d 维空间**，注意力算 q·k 相似度时，
   没有任何东西保证不同类型的 token 落在可区分的位置。类型嵌入是那个显式抓手。
 - **全连接注意力**（spec §5.1）：原双轴块稀疏掩码（`block_mask` / `DualAxisLayer`）整体删除。
 - **补零列必须恒为 0**（spec §5.3.1）：`SEG_SLICE` 之外的列一旦非零即抛 `ValueError`——**不静默清零**。
@@ -31,12 +31,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .cuda_graph import CudaGraphForward
-from .features import F_B, F_G, F_M, F_MAX, F_V, SEG_SLICE
+from .features import F_B, F_C, F_G, F_M, F_MAX, F_V, SEG_SLICE
 
-_SEG_KEYS = ("M", "B", "V", "G")          # 与 seg 元组的段序一一对应（不可改动）
-_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 四段实际列数（= `SEG_SLICE` 的宽度）
-# ⚠️ **v2：① 拥堵去后 Z 段（区段 token）整段移除**（2026-10-08）—— `proj_z` /
-# `zone_type_emb` / 五元 seg 三条路径一并删。`seg` 现在恒为四元。
+_SEG_KEYS = ("M", "B", "V", "C", "G")     # 与 seg 元组的段序一一对应（不可改动）
+_SEG_DIMS = (F_M, F_B, F_V, F_C, F_G)     # 五段实际列数（= `SEG_SLICE` 的宽度）
+# ⚠️ **v2：① 拥堵去后 Z 段（区段 token）整段移除**（2026-10-08）。
+# ⚠️ **v2（2026-10-09）加 C 段（桩 token）**：`seg` 由四元变**五元**。
+#    理由：设计 §10 的掩码表要 `RA·充电 → {AGV, 桩}`，而此前桩根本没进 token
+#    序列 ⟹ 充电头看不到桩忙不忙（见 progress-log §84）。
 
 
 class AttnLayer(nn.Module):
@@ -81,7 +83,7 @@ class LayoutEncoder(nn.Module):
     前向数值一致（仅矩阵乘分块的末位漂移，≤1e-5）。
     """
 
-    N_SEG_TYPES = 4                                # M / B / V / G
+    N_SEG_TYPES = 5                                # M / B / V / C / G（C 段 2026-10-09 加）
 
     # ⚠️ **层数 8 → 4**（2026-10-09 执行）：`2026-10-02-plcsp-rebuild-design.md` §6.3 早已裁定
     # 4 层，但代码默认一直是 8 —— **"已裁定，未实施"挂了半年**（§77.4 第 15/16 行同源的欠账：
@@ -109,14 +111,14 @@ class LayoutEncoder(nn.Module):
 
     def forward(self, tok_feat: torch.Tensor, seg: tuple[int, ...],
                 bias: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_g=1) —— **v2 恒为四元**。
+        """tok_feat: **(B, N, F_MAX)**（B ≥ 1）；seg=(n_m, n_jobs, n_agv, n_ch, 1)
+        —— **v2 恒为五元**（M/B/V/C/G）。
 
         返回 (token 嵌入 (B, N, d), 全局上下文 (B, d)=按 token 均值池化)。
         `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
         核对补零列为 0，并核对总长。
-        ⚠️ **`seg` 允许四元或五元**（2026-10-05，R2）：四元 = 默认配置（M/B/V/G，逐位等于今日）；
-        五元 = `route_zones=True` 时多出的 Z 段（区段 token，类型 id 4，走独立的 `proj_z`
-        与 `zone_type_emb`）。两种长度都由调用方（`build_tok`）决定。
+        ⚠️ **段序与类型 id 由 `_SEG_KEYS` 定死**：0=M / 1=B / 2=V / **3=C** / 4=G。
+        改段序就是改 ckpt 兼容，必须动 `_SEG_KEYS`/`_SEG_DIMS`/`N_SEG_TYPES` 三处。
         ⚠️ **`bias`（② 几何/度量偏置，2026-10-05）**：`(N,N)` 或 `(B,N,N)` 的可加偏置，
         逐层加在注意力分数上（见 `AttnLayer._attn`）。`None`（默认）⟹ 与今日**逐位相同**；
         非空时**跳过 CUDA 图快路**（图只捕获 `tok_feat` 一个输入，见 `_graph_ok`）。
