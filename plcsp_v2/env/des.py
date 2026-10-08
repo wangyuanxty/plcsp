@@ -52,6 +52,16 @@ PA_TIE_SEED = 2000
 "连扰动流都换了"。独立子流使"平局开/关"成为一次**干净的消融**。
 """
 
+# ⚠️ **AEI2025 式(48) 的成本常数**（`uc = 0.5`、`c = 7`，见其 §5.1 参数设置）。
+# 只用于 `metrics["logistics_cost"]` 这个**报告桥**——我们的目标函数里**没有**成本项。
+# 名字带来源，避免被误读成"我们自己的参数"。
+DISTURBANCE = -1
+"""事件流的**扰动哨兵**（`frm_idx` 位）——不是工序完工，而是"开一个决策点"。
+原文的决策点定义：*"the time when an operation is assigned **or an AGV breakdown occurs**"*。"""
+
+AEI2025_AGV_ACTIVATION_COST = 7.0      # c：启用一台 AGV 的费用
+AEI2025_UNIT_TRANSPORT_COST = 0.5      # uc：单位运输时间成本
+
 
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
             cfg: SimConfig | None = None, op_choices: list[list[int]] | None = None,
@@ -279,6 +289,27 @@ def reference_run(inst: Instance, cfg: SimConfig | None = None,
         _MREF_BUSY = False
     _MREF_CACHE[key] = r
     return r
+
+
+def scaled_agv_mtbf(inst: Instance, target_failures: float = 4.0,
+                    cfg: SimConfig | None = None, seed_layout: int = 0) -> float:
+    """按"**每局期望故障次数**"反推 `agv_mtbf`（⑨ 的**激活**口径，2026-10-09）。
+
+    ⚠️ **为什么需要它**：`SimConfig.agv_mtbf` 默认 480 min，而 MK01 的 makespan 只有 ~73 min
+    ⟹ **10 个 seed 合计只触发 1 次故障**（实测）。**⑨ 是小实例上等于不存在的一条约束**——
+    这正是 §65 记过的"约束不触发是这个领域系统性的沉默"。
+
+    口径：一局里 `n_agv` 条独立泊松流，期望故障数 `= n_agv × T / MTBF`，其中 `T` 取
+    **参考调度的 makespan**（纯实例数据，与布局/策略无关 ⟹ 同一实例的配置可复现）。
+    故 `MTBF = n_agv × T / target_failures`。
+
+    ⚠️ **与 AEI2025 的扰动模型不同**（他们的：每实例故障总次数在 **1–8** 随机、时间随机、
+    随机指派某台车、修复时间 5–10）。我们保留泊松可靠性模型（更标准），
+    但**用本函数把期望次数对齐到同一量级**——否则"⑨ 是主打扰动"这句话在我们的小实例上不成立。
+    """
+    c = cfg or SimConfig()
+    t = reference_makespan(inst, c, seed_layout=seed_layout)
+    return max(1.0, float(c.n_agv) * float(t) / max(target_failures, 1e-9))
 
 
 def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
@@ -666,7 +697,7 @@ class AgvSim:
                  stats: dict,
                  tasks_in, machines: list, graph, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 charge=None, fleet: list | None = None):
+                 charge=None, fleet: list | None = None, events_q=None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -681,6 +712,10 @@ class AgvSim:
         # `None` = **规则配置**（低电 → 最近空闲桩，今日行为逐位不变）；
         # 非 None = 策略配置，`_maybe_charge` 在**每个空闲点**问它 {不去充} ∪ {各桩}。
         self.charge_policy = charge
+        # ⑨/决策点：故障要**通知** transporter 开一个决策点（原文："the decision point t is
+        # defined as the time when an operation is assigned **or an AGV breakdown occurs**"）。
+        # `None` = 不通知（手搓夹具的既有用法逐字不变）。
+        self.events_q = events_q
         self.pos_node: int | None = None    # 当前所在通道节点；None = 尚未出车（停在首个取货点）
         # ⚠️ **v2：⑩ 异构车队已删**（2026-10-08）—— 车队**同构、单车单载**：
         # 载量恒 1（`capacity` 字段整个去掉），速度取 `cfg.agv_speed_mps`（无倍率）。
@@ -772,6 +807,9 @@ class AgvSim:
             # 已经 succeed 的事件 → 仿真时间不推进、空转成死循环（实测 pytest 直接挂死）。
             self.up = simpy.Event(self.env)
             self.down = True
+            if self.events_q is not None:
+                # 扰动事件（哨兵：`frm_idx = -1`）——transporter 收到后**开一个决策点**。
+                yield self.events_q.put((DISTURBANCE, self.aid, -1, None, False))
             yield self.env.timeout(self.cfg.agv_mttr)
             self.down = False
             self.up.succeed()
@@ -1186,7 +1224,8 @@ class SimWorld:
                                entities, self.g, self.constraints, specs[a],
                                np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
                                track, chargers=self.layout.chargers, charger_res=charger_res,
-                               bound=bound, charge=charge, fleet=agvs))
+                               bound=bound, charge=charge, fleet=agvs,
+                               events_q=events_q))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
@@ -1634,12 +1673,23 @@ class SimWorld:
                 # 步 3：PA 派工次数（**"派工器真的被调用了"的硬证据**——步 2 曾实测为 0，
                 # 原因是 `plans` 被离线路径预填满、池恒空。见 progress-log §69）。
                 "pa_assigns": stats.get("pa_assigns", 0),
+                # 扰动触发的决策点数（原文决策点定义的**另一半**，2026-10-08 补齐）
+                "dist_events": stats.get("dist_events", 0),
                 "task_flow": stats.get("task_flow", []),
                 "agv_load": stats.get("agv_load", []),
                 "dbg": {k: v for k, v in stats.items()
                         if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue",
-                                 "pa_assigns")},
+                                 "pa_assigns", "dist_events")},
                 "travel_time_total": float(stats["travel_time"]),
+                # 物流成本（**借 AEI2025 式(48) 的成本模型**，只为让读数可与其表并列）：
+                #   `TC = c·Σ y_v + uc·(Σ(nct−nst+lct−lst) + at)`
+                # - `Σ y_v = n_agv`：本仓**车队固定、全部常开**（⑩ 异构车队删后无启用决策）；
+                # - `Σ(空载段+负载段) = travel_time_total`（逐车累计行驶工时的车队合计）；
+                # - `at`（故障中断时间）**恒 0**：⑨ 段间检出、不打断正在进行的行驶。
+                # ⚠️ **这不是我们的目标函数**（我们的是 makespan + energy + TWT），
+                # 只是**报告桥**——不加它，任何"比较 TC"的说法都不成立。见 §77.4 第 2 行。
+                "logistics_cost": (AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
+                                   + AEI2025_UNIT_TRANSPORT_COST * float(stats["travel_time"])),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径**随结果自报**（P4-A Review Focus #1 同型）：两种口径的数并排放时靠这两行分辨
                 "transport": self.inst.transport,
@@ -1860,8 +1910,19 @@ class SimWorld:
                 # 步 3：PA 派工次数（**"派工器真的被调用了"的硬证据**——步 2 曾实测为 0，
                 # 原因是 `plans` 被离线路径预填满、池恒空。见 progress-log §69）。
                 "pa_assigns": stats.get("pa_assigns", 0),
+                # 扰动触发的决策点数（原文决策点定义的**另一半**，2026-10-08 补齐）
+                "dist_events": stats.get("dist_events", 0),
                 "task_flow": stats.get("task_flow", []),
                 "travel_time_total": float(stats["travel_time"]),
+                # 物流成本（**借 AEI2025 式(48) 的成本模型**，只为让读数可与其表并列）：
+                #   `TC = c·Σ y_v + uc·(Σ(nct−nst+lct−lst) + at)`
+                # - `Σ y_v = n_agv`：本仓**车队固定、全部常开**（⑩ 异构车队删后无启用决策）；
+                # - `Σ(空载段+负载段) = travel_time_total`（逐车累计行驶工时的车队合计）；
+                # - `at`（故障中断时间）**恒 0**：⑨ 段间检出、不打断正在进行的行驶。
+                # ⚠️ **这不是我们的目标函数**（我们的是 makespan + energy + TWT），
+                # 只是**报告桥**——不加它，任何"比较 TC"的说法都不成立。见 §77.4 第 2 行。
+                "logistics_cost": (AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
+                                   + AEI2025_UNIT_TRANSPORT_COST * float(stats["travel_time"])),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径随结果自报（同 run()）
                 "transport": self.inst.transport,
@@ -2071,8 +2132,14 @@ class SimWorld:
         while True:
             frm_idx, job, oi, op, is_last = yield events_q.get()
             stats["trans_evt"] = stats.get("trans_evt", 0) + 1
-            n_ops = len(self.inst.jobs[job])
-            if is_last:                                     # 末工序完工 → 回装卸站
+            n_ops = len(self.inst.jobs[job]) if job >= 0 else 0
+            if frm_idx == DISTURBANCE:
+                # ⚠️ **扰动事件（AGV 故障）**：原文的决策点定义含它
+                # （*"…or an AGV breakdown occurs"*）。它**不产生件**、也不改 `pending`，
+                # 只是让 PA/LA 在扰动那一刻**再决策一次**（往下走到决策点即可）。
+                # 见 §77.4 第 5 行；LA 侧对"趴窝车已订任务的重订"**未实现**，登记 §77.5。
+                stats["dist_events"] = stats.get("dist_events", 0) + 1
+            elif is_last:                                   # 末工序完工 → 回装卸站
                 # ⚠️ 回站**不由 PA 决定**（终点恒为装卸站）⟹ 不走决策点，直接发。
                 # 这是与原文的一处小差异：他们的 dummy 工序（`J_i+1`）也进 PA 的动作。
                 yield entities[frm_idx].out_q.get()
@@ -2100,7 +2167,7 @@ class SimWorld:
                     if agv3 not in cand3:
                         raise ValueError(f"policy_l 派了不存在的车 {agv3}；候选={cand3}")
                     booking[(j3, oi3)] = agv3
-            elif online_s:
+            elif online_s and job >= 0:
                 # 旧消融路径：S 层当场定机台（`_pick_machine` 把结果写进 `plans`）
                 self._pick_machine(job, oi + 1, policy_s, True, plans)
             # ── 冲账：所有"件已到 + 目的地已定"的作业，此刻发车 ──

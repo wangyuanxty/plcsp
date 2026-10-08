@@ -493,3 +493,61 @@ def test_vehicle_busy_min_is_tracked_per_vehicle():
     assert len(busy) == w2.cfg.n_agv
     assert sum(busy) == pytest.approx(m["travel_time_total"])
     assert all(b >= 0.0 for b in busy)
+
+
+# ══════════════════ 8. CDR 基线跑器 ══════════════════
+
+@pytest.mark.unit
+def test_cdr_pairs_are_the_two_published_sizes():
+    """**27 = 他们的（9×3）；36 = 我们的（12×3）**。两个数不可混为一谈。"""
+    from plcsp_v2.hrl.cdr import (N_AEI2025_RULES, N_PA_RULES, cdr_pairs,
+                                  sweep_cdr)
+
+    theirs = cdr_pairs(N_AEI2025_RULES)
+    ours = cdr_pairs(N_PA_RULES)
+    assert len(theirs) == 27 and len(ours) == 36
+    assert set(theirs) < set(ours)                       # 他们的 27 是我们 36 的子集
+    assert {p for p, _ in ours} - {p for p, _ in theirs} == {
+        "EDD+SMPT", "EDD+MINU", "EDD+EAM"}               # 多出来的只有 EDD 那一块
+    with pytest.raises(ValueError, match="须在"):
+        cdr_pairs(0)
+    with pytest.raises(ValueError, match="须在"):
+        cdr_pairs(13)
+    with pytest.raises(ValueError, match="只接受"):
+        sweep_cdr(_world, seed_chain=0, n_pa_rules=10)
+
+
+@pytest.mark.unit
+def test_cdr_sweep_runs_and_ranks():
+    """真跑一遍**他们的 27 条**并出一张按 makespan 排的表。"""
+    from plcsp_v2.hrl.cdr import run_cdr, summarise, sweep_cdr
+
+    rows = sweep_cdr(_world, seed_chain=0, n_pa_rules=9)
+    assert len(rows) == 27
+    assert all(m["jobs_done"] == 10 for m in rows.values())
+    table = summarise(rows)
+    assert len(table) == 27 and table[0][2] <= table[-1][2]
+    # 单跑一条应与扫描里那条一致（世界工厂一局一用 ⟹ 可复现）
+    again = run_cdr(_world(), "EAJ+EAM", "MINCOST", seed_chain=0)
+    assert again["makespan"] == rows[("EAJ+EAM", "MINCOST")]["makespan"]
+
+
+@pytest.mark.unit
+def test_scaled_agv_mtbf_activates_constraint_9():
+    """⚠️ **⑨ 在默认 MTBF 下对小实例等于不存在**（MK01：10 seed 只触发 1 次）。
+
+    `scaled_agv_mtbf` 按"每局期望故障次数"反推 MTBF —— 目标是让 ⑨ **真的被测到**
+    （AEI2025 的扰动参数是每实例 1–8 次）。
+    """
+    from plcsp_v2.env.des import scaled_agv_mtbf
+
+    inst = load_mk("mk01")
+    mtbf = scaled_agv_mtbf(inst, target_failures=4.0)
+    assert 0.0 < mtbf < SimConfig().agv_mtbf, "小实例的 MTBF 必须比默认 480 短"
+    cfg = SimConfig(agv_mtbf=mtbf)
+    lay = sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
+    g = build_corridor_graph(lay)
+    dm = dock_distance_matrix(g)
+    hits = sum(SimWorld(inst, lay, dm, cfg, graph=g).run(seed_chain=s)["dist_events"]
+               for s in range(6))
+    assert hits >= 6, f"6 个 seed 只触发 {hits} 次 —— ⑨ 仍未被测到"
