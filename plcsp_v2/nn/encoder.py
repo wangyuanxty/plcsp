@@ -83,7 +83,10 @@ class LayoutEncoder(nn.Module):
 
     N_SEG_TYPES = 4                                # M / B / V / G
 
-    def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = 8,
+    # ⚠️ **层数 8 → 4**（2026-10-09 执行）：`2026-10-02-plcsp-rebuild-design.md` §6.3 早已裁定
+    # 4 层，但代码默认一直是 8 —— **"已裁定，未实施"挂了半年**（§77.4 第 15/16 行同源的欠账：
+    # 决定了的事没有落地）。改后旧读数（若依赖 8 层）作废，重跑即可。
+    def __init__(self, d_model: int = 128, n_heads: int = 4, n_layers: int = 4,
                  feat_dim: int = F_MAX):
         super().__init__()
         self.d_model, self.n_heads, self.n_layers = d_model, n_heads, n_layers
