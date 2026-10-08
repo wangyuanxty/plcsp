@@ -695,13 +695,41 @@ for 每个顶层决策点 t:
 
 ### 14.4 复用 / 不改的
 
-**整个包复制**，但以下**不动**（v2 仍用）：
+> ⚠️ **2026-10-09 更正**：本节原写「**废弃**：`env/corridors.py`（① 去了）」——
+> **那是错的，而且与代码直接矛盾**：`env/des.py` **在用**它（`build_corridor_graph` /
+> `shortest_node_path` / `dock_distance_matrix`，4 处），且 `plcsp_v2/__init__.py` 明写
+> 「**不删 `env/corridors.py`** —— 它是**纯寻路**」。
+> **错因**：把 **`ZoneManager`（区段管理，真随 ① 删了）** 和 **`corridors`（格点图与最短路，
+> 与 ① 无关）** 混成一个东西。**① 删的是"区段争用"，不是"寻路"。**
 
-`env/snapshot.py` · `env/instances.py` · `env/mkt.py` · `env/layout.py` · `nn/encoder.py` · `nn/features.py` · `nn/state_emb.py` · `env/due_dates.py` · `env/energy.py` · `env/transport.py` · `baselines/`
+**整个包复制**，以下**复用**（**不重写**）：
+⚠️ **不是"逐字节不动"** —— 2026-10-09 机械核了一遍（`cmp` + 去行尾 `diff`）：
 
-**大改**：`env/des.py`（流 + 删约束）· `algo/*`（换成分层训练）
+| 文件 | 与 v1 的差异 | 为什么 |
+|---|---|---|
+| `env/instances.py` · `env/mkt.py` · `env/due_dates.py` · `energy.py` · `env/transport.py` | **逐字节相同** ✓ | **真·没动** |
+| **`env/corridors.py`** | 代码 **0 行**差异；**行尾**从 CRLF 变 LF | ⚠️ **复制时行尾被转**，不是改代码。**"逐字节相同"不成立，但语义不变** |
+| `env/snapshot.py` | 42 行 | **删约束的减法**：② `in_cap/out_cap` · ① `zone_wait` · ④ `rework_cnt` · ⑤ `prev_job` · ⑩ `capacity/speed_factor`；**加** `VehicleState.busy_min` |
+| `env/layout.py` | 27 行 | ② `in_cap/out_cap` · ⑩ `speed_factor`/`capacity`/`max_agv_capacity` |
+| `nn/features.py` | 40 行 | ④ `F_B` 9→8 · ⑩ `F_V` 11→9 · ① `F_Z` 删 · **v2 加 `C` 段** |
+| `nn/state_emb.py` | 136 行 | 同上（列定义 + `charger_features`） |
+| `nn/encoder.py` | 63 行 | Z 段删 · `F_MAX` 11→8 · 层数 8→4 · **C 段类型 id** |
+| `baselines/` | 见 `baselines/nsga2.py` 的注释 | ⑩ 删后 `SimConfig.multi_drop` 没了，基线跟着改 |
 
-**废弃**（v2 不用）：`env/corridors.py`（① 去了）· `algo/group_rel.py` 的联合链部分（换成分层组）
+**⟹ 一句话**：**"复用"的准确含义是"不重写结构、但随删约束做减法"**，不是"一行不动"。
+**上面那张表就是减法的全部**；表外的文件才是逐字节相同。
+
+**大改**：`env/des.py`（流 + 删约束）· 训练侧（v2 自建 `hrl/`，对应 v1 的 `algo/`）
+
+**废弃**（v2 不用）：**`ZoneManager` 一族**（区段争用 + 等待环检测，随 ① 删除）·
+`algo/group_rel.py` 的联合链部分（换成分层组）
+
+**⚠️ 一处此前未登记的复用（2026-10-09 补记）**：`env/des.py` 里的
+**工序排序入口（`seq_rank` / `_PriorityStore` / `check_seq_rank`）是 v1 的遗产**——
+它的契约出自 **v1 的 spec** `docs/superpowers/specs/2026-10-06-sequencing-design.md`。
+**v2 保留它只有一个用途：给基线的 OS 段留入口**（NSGA-II / HGS 把外部算好的工序顺序注入）。
+**它不是 v2 的策略动作** —— v2 的四个 agent 是 MA/PA/LA/RA，**没有排序头（Q）**。
+**本文档此前没有这一节，是漏登记。**
 
 ### 14.5 步 3 落地的契约（2026-10-08）
 

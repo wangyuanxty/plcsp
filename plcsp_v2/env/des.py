@@ -84,8 +84,14 @@ def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, see
     ⚠️ **`seq_rank`（工序排序入口，2026-10-06）**：`seq_rank[job][oi] -> int`（越小越先；
     `None` = 该工序未覆盖 = `+inf`）。**基线侧**（NSGA-II / HGS 的 OS 段）由此把外部算好的
     工序顺序注入非延迟解码器——语义是"**缓冲内优先级**"（机台在已入缓冲的件里挑），
-    不是"等指定的下一件"（设计 §2）。`None`（默认）= 裸 FIFO 取件 = **逐位不变**。
-    契约与解码口径见 `docs/superpowers/specs/2026-10-06-sequencing-design.md` §5。
+    不是"等指定的下一件"。`None`（默认）= 裸 FIFO 取件 = **逐位不变**。
+
+    ⚠️ **本机制是 v1 的遗产，v2 保留它只有一个用途：给基线的 OS 段留入口。**
+    - **不是 v2 的策略动作**：v2 的四个 agent 是 MA / PA / LA / RA，**没有排序头（Q）**；
+    - **契约与解码口径的出处是 v1 的 spec** ——
+      `docs/superpowers/specs/2026-10-06-sequencing-design.md` §5。
+      **那份文档只描述 v1**（顶部有版本横幅）；**v2 是有意复用它，不是"照它实现 v2"**。
+      ⚠️ v2 的 `docs/v2/design.md` 里**没有排序这一节** —— 这处复用**此前没登记**。
     """
     from .corridors import build_corridor_graph, dock_distance_matrix
     from .layout import sample_layout
@@ -317,15 +323,18 @@ def reference_makespan(inst: Instance, cfg: SimConfig | None = None,
     """参考调度的 makespan —— `reference_run` 的薄封装（既有调用点不变）。
 
     ⚠️ 用途**只剩两个**（2026-10-03 ⑧ 重设计后）：① 特征归一化的 `m_ref`（`build_setup` 取它）；
-    ② 奖励侧参考运行/权重口径的**同源守卫**（`joint_chain_step` 的 `layout_seed=0` 前提）。
+    ② 奖励侧参考运行/权重口径的**同源守卫**（v1 的 `joint_chain_step` 曾以 `layout_seed=0`
+    为前提；**v2 删了 `algo/`，那个消费者已不存在** —— 本项在 v2 里**暂无消费者**，
+    留给步 5 的训练侧）。
     ⑧ 交期**不再由它导出**——交期是外生的 TF/RDD（见 `due_dates.py`），与 `M_ref` 无关。
     """
     return float(reference_run(inst, cfg, seed_layout)["makespan"])
 
 
 # ⑫ 维护头（M）的候选（动作码）：0 = 现在保养，1 = 不保养。**动作语义的唯一真相在此**
-# ——`MachineSim._pm_after_op` 按它执行，`algo/group_rel._pm_cand_feat` 按同一行序造候选
-# 特征（行 0 = 现在保养）。候选**是动作**而不是实体（机台）：两个候选都属于同一台机台。
+# ——`MachineSim._pm_after_op` 按它执行；（v1 里 `algo/group_rel._pm_cand_feat` 按同一行序造
+# 候选特征，**v2 删了 `algo/`**，特征侧在步 5 由 `hrl/` 自建，**行序仍以本常量为准**）。
+# 候选**是动作**而不是实体（机台）：两个候选都属于同一台机台。
 PM_CAND_NOW = 0
 PM_CAND_DEFER = 1
 PM_CANDS: tuple[int, int] = (PM_CAND_NOW, PM_CAND_DEFER)
@@ -361,9 +370,12 @@ def machine_fail_rate(base_rate: float, age: float, beta: float, eta: float) -> 
     return float(base_rate) * beta * (a / float(eta)) ** (beta - 1.0)
 
 # ⑪ 充电头（C）的候选（动作码）：0 = 不去充，码 i≥1 = 第 (i−1) 号充电桩。
-# **动作语义的唯一真相在此**——`AgvSim._maybe_charge` 与 `algo/group_rel._charge_cand_feat`
-# 按同一约定解读（候选 0 不去充、候选 i≥1 对应 `layout.chargers[i−1]`）。
-# 与 `PM_CANDS` 同构：候选**是动作**（去/不去、去哪根桩），充电桩在 token 序列里没有 token。
+# **动作语义的唯一真相在此**——`AgvSim._maybe_charge` 与（v1 的 `algo/group_rel.`
+# `_charge_cand_feat`；**v2 删了 `algo/`**，特征侧在步 5 由 `hrl/` 自建）按同一约定解读
+# （候选 0 不去充、候选 i≥1 对应 `layout.chargers[i−1]`）。
+# 与 `PM_CANDS` 同构：候选**是动作**（去/不去、去哪根桩）。
+# ⚠️ **2026-10-09**：桩**现在是 token**（C 段，见 `nn/features.FEATURE_NAMES["C"]`）——
+# 本行原写"充电桩在 token 序列里没有 token"，那是**桩没进 token 的那一版**的说法。
 CHARGE_CAND_SKIP = 0
 
 
@@ -378,7 +390,9 @@ def charge_cands(n_chargers: int) -> tuple[int, ...]:
 
 
 
-# ══ 工序排序入口（spec `docs/superpowers/specs/2026-10-06-sequencing-design.md` §3）══
+# ══ 工序排序入口 —— ⚠️ **v1 的遗产，v2 只为基线的 OS 段保留**（见 `rollout` 的 `seq_rank` 注释）
+# 契约与解码口径的出处是 **v1 的 spec** `docs/superpowers/specs/2026-10-06-sequencing-design.md`
+# §3（那份文档**只描述 v1**）。**v2 没有排序头（Q）**，本入口不参与 v2 的策略。
 
 # 排序回调的契约（spec §3.2）：`decide(机台号, 候选作业元组) -> 候选**序号**`。
 # 候选 = 缓冲内各件、**按到达序**（与 `in_q.items` 同序；序号 0 = FIFO 队首）。
