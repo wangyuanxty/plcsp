@@ -32,6 +32,7 @@ from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
+from .rule_views import build_pa_view          # 步 3：PA 规则求值的只读视图（纯数据）
 from .snapshot import ChargerState    # ⑪ C 头：`snapshot()` 逐桩报占用（顶部导入，不每帧重导）
 from .transport import MATRIX, UNMAPPED_RAISE, TransportCaliber
 
@@ -703,8 +704,11 @@ class AgvSim:
         """**整段** src→dst 的行驶时长 [min]——两种口径的唯一汇合点（不含区段拆分）。
 
         - 几何口径：转调 `_seg_min`（现状，逐位不变）；
-        - 矩阵口径：**直接查表**（矩阵已是分钟，**不得**再套任何换算），只再乘 ⑩ 的**相对**
-          速度倍率（⑩ 关 ⟹ 倍率恒 1 ⟹ 与"该约束从未存在"逐位相同）；
+        - 矩阵口径：**直接查表**（矩阵已是分钟，**不得**再套任何换算）。
+          ⚠️ **修（步 3）**：原式 `t / self.speed_ratio` 的 `self.speed_ratio` 是 ⑩ 的
+          产物——⑩ 删除时定义行被一并删掉，**却漏了这处使用**（矩阵口径一查表就
+          `AttributeError`；MK 实例走几何口径，故一直没暴露）。车队同构 ⟹ 倍率恒 1，
+          直接返回查表值；
         - 任一端点**没有矩阵对应项**（充电桩）⟹ 按 `transport.unmapped` 处置：`raise` 显式报错；
           `geometry` **声明式**降级为几何口径并计数（metrics 带出，供表里如实声明）。
         `count_unmapped=False` 供**排序**之类的查数用（只选一个桩却把候选全计一遍会虚高）。
@@ -714,7 +718,7 @@ class AgvSim:
             return self._seg_min(src, dst)
         t = self.transport.minutes(src, dst)
         if t is not None:
-            return t / self.speed_ratio
+            return t
         if self.transport.unmapped == UNMAPPED_RAISE:
             raise ValueError(
                 f"节点 {src}→{dst} 在行程时间矩阵里**没有对应项**（矩阵只覆盖机台与装卸站）——"
@@ -723,6 +727,15 @@ class AgvSim:
         got = self._seg_min(src, dst)
         self.stats["unmapped_min"] = self.stats.get("unmapped_min", 0.0) + got
         return got
+
+    def leg_min(self, src: int, dst: int) -> float:
+        """`_leg_min(..., count_unmapped=False)` 的**公开**入口（步 3）。
+
+        LA 的规则求值要"车到取货点要多久"，必须与仿真**同一条**口径（`shortest_node_path`
+        的同一张矩阵、同一套换算）——另造一个距离函数就是给口径漂移留口子。
+        借首台车的实现即可：本口径与车号无关（v2 车队同构 ⟹ `speed` 逐车相同）。
+        """
+        return self._leg_min(src, dst, count_unmapped=False)
 
     def _drain(self, leg: str, minutes: float) -> None:
         """⑪ 行驶耗电：kWh = kW × min ÷ 60（与 `energy.py` 同一套三态功率）。"""
@@ -966,6 +979,9 @@ class AgvSim:
         self._drain(leg, seg)                   # ⑪ 行驶耗电
         self.stats["travel_time"] += seg
         self.stats[f"agv_{leg}_min"] += seg
+        # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量）。与上面两个车队合计
+        # 键**同处写**——分两处记会有"合计说跑了、逐车说没跑"的失同步口子。
+        self.stats["agv_busy_min"][self.aid] += seg
         self.stats["moves"] += 1
         return True, dst
 
@@ -1093,6 +1109,9 @@ class SimWorld:
         self._due_val: dict[int, float] = {}
         # 逐作业**标称剩余工时**的查表（见 `_remaining_min`）：纯实例数据，与仿真状态无关。
         self._rem_tbl: list[list[float]] | None = None
+        # 步 3：本局 stats 的活引用（由 `_build_entities` 挂上）。此处先置空 dict，
+        # 使 `snapshot()` 在任何路径上都有可读对象（缺键走 `.get` 兜底）。
+        self._live_stats: dict = {}
         self._cold_start()                  # t=0 快照骨架（P2 Task 1，run() 会整套换掉）
 
     def _fleet(self) -> list:
@@ -1174,7 +1193,20 @@ class SimWorld:
         self._agv_loaded = track.agv_loaded
         self._agv_load_n = track.agv_load_n
         self.agvs = agvs
+        # 步 3：本局的 stats **活引用**（快照要读其中的累计量：`agv_busy_min`）。
+        # 只在 `_build_entities` 这一处挂——`run()` / `run_gated()` / `_cold_start()`
+        # 三条路径共用它，不存在"某条路径忘了挂"的形状。`_cold_start` 传的是空 dict ⟹
+        # 快照对缺失键有 `.get` 兜底（见 `snapshot()`）。
+        self._live_stats = stats
         return entities, tasks_in, events_q
+
+    def leg_min(self, src: int, dst: int) -> float:
+        """节点 `src → dst` 的行驶时长 [min]（步 3：**LA 规则求值**的公开入口）。
+
+        转调首台车的 `AgvSim.leg_min`——同一套行程时长口径（矩阵/几何 + 未映射处置），
+        与仿真**逐位同源**。车队同构 ⟹ 该口径与车号无关，故借哪台都一样。
+        """
+        return self.agvs[0].leg_min(src, dst)
 
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
@@ -1335,13 +1367,17 @@ class SimWorld:
                 in_transit=bool(self._job_agv[j] >= 0), on_agv=int(self._job_agv[j]),
                 ))
         vs = []
+        # 步 3：逐车累计行驶工时（LA 的 `MINU` 自变量）。`_cold_start` 与手搓 stats 的夹具
+        # 不带此键 ⟹ `.get` 兜底成"全 0"（= 还没跑过，真值，不是哨兵）。
+        agv_busy = self._live_stats.get("agv_busy_min") or []
         for a, agv in enumerate(self.agvs):
             vs.append(VehicleState(
                 status=3 if agv.down else (2 if self._agv_loaded[a] else
                                            (1 if agv.pos_node is not None else 0)),
                 node=int(agv.pos_node if agv.pos_node is not None else -1),
                 queued=len(self.tasks_in[a].items) if agv.bound else 0,
-                battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9))))
+                battery_frac=float(agv.battery / max(agv.battery_cap, 1e-9)),
+                busy_min=float(agv_busy[a]) if a < len(agv_busy) else 0.0))
         # 在途 = **队列里待取** + **车上在运**。队列有两种形状（绑定=每车一 Store，
         # FIFO=单个共享 Store）——只看 `agv.bound` 那种形状会让 FIFO 路径恒为 0（F5）；
         # 车上那部分必须单独数，因为已装车的批次**已经离开队列**。
@@ -1411,6 +1447,12 @@ class SimWorld:
           `EvalSpec.from_cfg` / `check_same_dynamics` 按名枚举、看不见新字段（静默缺口）。
           实例规模的数据不是运行时标度参数。
 
+        ⚠️ **`policy_pa`（生产派工头，PA；步 3）**：`None`（默认）= 不启用——`plans` 走
+          离线预填，**逐位等于 step 2 之前的行为**。非空 = `_pa_dispatch` 在「未完工工件的
+          最早待加工工序」池里挑一件**并定机台**写进 `plans`（预留表），transporter 只读。
+          契约：`policy_pa(view, pool) -> (池下标, 机台号)`，`view` = `env/rule_views.PAView`。
+          固定规则用 `hrl.rules.pa_rule_policy(...)` 造。
+
         返回 metrics：makespan / energy / fail_events / tardy / moves / deliveries / seq_*。
         """
         seq_decide = (None if seq_rank is None
@@ -1423,6 +1465,8 @@ class SimWorld:
                  "proc_min": [0.0] * self.inst.n_machines,
                  "setup_min": [0.0] * self.inst.n_machines,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
+                 # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量；快照逐车报出）
+                 "agv_busy_min": [0.0] * self.cfg.n_agv,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
                  # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
                  "pm_events": 0,
@@ -1542,10 +1586,14 @@ class SimWorld:
                 "seq_reorders": stats.get("seq_reorders", 0),
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
+                # 步 3：PA 派工次数（**"派工器真的被调用了"的硬证据**——步 2 曾实测为 0，
+                # 原因是 `plans` 被离线路径预填满、池恒空。见 progress-log §69）。
+                "pa_assigns": stats.get("pa_assigns", 0),
                 "task_flow": stats.get("task_flow", []),
                 "agv_load": stats.get("agv_load", []),
                 "dbg": {k: v for k, v in stats.items()
-                        if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue")},
+                        if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue",
+                                 "pa_assigns")},
                 "travel_time_total": float(stats["travel_time"]),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径**随结果自报**（P4-A Review Focus #1 同型）：两种口径的数并排放时靠这两行分辨
@@ -1600,17 +1648,29 @@ class SimWorld:
         ⚠️ **v2：⑩ 拼批头（B）与 `policy_b` 已删**（2026-10-08）—— `SimConfig.multi_drop`
         与拼批一起移除，本入口不再有第六个回调。
 
+        ⚠️ **`policy_pa`（生产派工头，PA）**：`None`（默认）= 不启用（离线预填计划）；
+        非空 = **策略/规则驱动**：`_pa_dispatch` 在「未完工工件的最早待加工工序」池里挑
+        **一件并定机台**，写进 `plans`（预留），transporter 只读。契约见 `_pa_dispatch`：
+        `policy_pa(view, pool) -> (池下标, 机台号)`，`view` = `env/rule_views.PAView`。
+        ⚠️ 与 `online_s=True` **互斥**（显式报错）：两者都定机台，会互相覆盖同一格预留。
+
         ⚠️ 多个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
         `algo/` 层做。决策留痕同理：`group_rel.roll_chain` 自记自己的 `Decision` 链
         （旧的 `dict["decision_log"]` 回传因零消费者已删，评审 M-2）。
         """
-        if (policy_l is None and not online_s and policy_m is None and policy_c is None):
-            return self.run(seed_chain=seed_chain, op_choices=op_choices)
+        if (policy_l is None and not online_s and policy_m is None and policy_c is None
+                and policy_pa is None):
+            return self.run(seed_chain=seed_chain, op_choices=op_choices, policy_pa=policy_pa)
         if online_s and policy_s is None:
             raise ValueError("online_s=True 需要 policy_s 回调（S 层决策入口）")
         if online_s and op_choices is not None:
             raise ValueError("online_s=True 时计划由 policy_s 在线产生，op_choices 不生效——"
                              "两者同传会静默忽略计划，故直接报错")
+        if online_s and policy_pa is not None:
+            raise ValueError(
+                "online_s=True 与 policy_pa 同传：步 3 起**机台由 PA 定**（复合规则的机台那一半），"
+                "`_pick_machine` 只读 PA 写下的预留；再开在线 S 层会让它当场覆盖同一格预留，"
+                "两个机台决定互相打架。请二选一。")
         pm_fn = None
         if policy_m is not None:
             if not self.constraints.maintenance:
@@ -1636,6 +1696,8 @@ class SimWorld:
                  "proc_min": [0.0] * self.inst.n_machines,
                  "setup_min": [0.0] * self.inst.n_machines,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
+                 # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量；快照逐车报出）
+                 "agv_busy_min": [0.0] * self.cfg.n_agv,
                  # 生产侧约束的事件计数（④⑤⑫）——binding 实测与消融表的读数口径
                  # ⚠️ T3 ⑫：`pm_events` = forced + chosen（拆键见 `MachineSim._pm_after_op`）。
                  "pm_events": 0,
@@ -1662,7 +1724,10 @@ class SimWorld:
         # 由 `_pick_machine` 决策后写入（`None` = 尚未决策，决策前读它即 bug）。
         plans: dict[int, list] = {}
         for j, job_ops in enumerate(inst.jobs):
-            if online_s:
+            if online_s or policy_pa is not None:
+                # 在线 S 层：`plans` 是**决策日志**（`_pick_machine` 决策后写入）。
+                # 步 3 的 PA：`plans` 是**预留表**（`_pa_dispatch` 批量填满，transporter 只读）。
+                # 两条路的共同点 = 决策前不得读它。
                 plans[j] = [None] * len(job_ops)
             else:
                 plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
@@ -1741,6 +1806,9 @@ class SimWorld:
                 "seq_reorders": stats.get("seq_reorders", 0),
                 "horizon_hit": stats.get("horizon_hit", False),
                 "ops_done": stats.get("ops_done", 0), "jobs_done": len(completes),
+                # 步 3：PA 派工次数（**"派工器真的被调用了"的硬证据**——步 2 曾实测为 0，
+                # 原因是 `plans` 被离线路径预填满、池恒空。见 progress-log §69）。
+                "pa_assigns": stats.get("pa_assigns", 0),
                 "task_flow": stats.get("task_flow", []),
                 "travel_time_total": float(stats["travel_time"]),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
@@ -1830,37 +1898,60 @@ class SimWorld:
         yield store.put(item)
 
     def _pa_dispatch(self, plans, policy_pa, stats) -> None:
-        """**v2：PA 派工点** —— 在「未完工工件的最早待加工工序 × 兼容机台」里挑，写进 `plans`（预留）。
+        """**v2：PA 派工点** —— 在「未完工工件的最早待加工工序」里挑一件，**并给它定机台**，
+        写进 `plans`（预留）。
 
         ⚠️ **口径照抄 AEI2025 原文**：*"select an **unfinished job** and assign an appropriate
         machine to process the **earliest pending operation** of the selected job"*。
 
         **池 = { (j, oi) : j 未完工 且 `plans[j][oi]` 尚未定 }**，`oi` = 该作业的**最早待加工
         工序**（= 已完成工序数）。⚠️ **正在加工的工件也在池里** —— 它要被派的正是**下一道**
-        工序。这与"就绪队列"（前道刚完工、待派机）**不是一回事**，是本函数与上一版的分野。
+        工序。这与"就绪队列"（前道刚完工、待派机）**不是一回事**。
 
         **本函数把池**排空**（有多少派多少）**：这样下游 `_pick_machine` 读 `plans` 时必然已
         有值，不存在"派工器还没走到"的竞态。
 
-        `policy_pa(snap, pool) -> 池下标`（契约与其余头对称：只给原始快照与池，**不构造特征**）。
-        `None` = 规则驱动，取**池首**。
-        ⚠️ **步 3 会把 `policy_pa` 升级成「返回 12 条复合规则的下标」**，届时机台也由 PA 选；
-        步 2 里机台仍走"该工序最短加工时间"（= 旧的贪婪口径，便于对照）。
+        ══ 契约（步 3 升级）══
+
+        `policy_pa(view, pool) -> (池下标, 机台号)`——`view` 是 `env/rule_views.PAView`
+        （纯数据，装好规则的自变量；`view.snap` 留给步 4 的编码器）。
+        机台**由 PA 定**（复合规则的机台那一半）；transporter 只读预留。
+        ⚠️ 返回**两个**值而不是一个：复合规则是"先工件、后机台"，机台必须与工件的选择
+        **同一刻**定下来（同一个 `view`），分两次回调会看到两个不同的状态。
+
+        `None` = **不启用 PA**（离线路径：`plans` 已预填）⟹ 本函数是空操作（池为空）。
+        非 None 时**池必被排空**，故 `plans` 里不会留 `None` 给 `_pick_machine`。
+
+        ⚠️ **批内投影**：同批里状态不变，若规则只看静态快照，`EAM`/`MINU` 会给整批挑
+        同一台机台。故每次派工后用 `PAView.reserved` 把这笔预留记进视图再继续
+        （见 `env/rule_views.py` 的模块 docstring）。
         """
+        view = build_pa_view(self.snapshot(), self.inst, plans,
+                             self._live_stats.get("proc_min") or [])
         while True:
-            pool = []
-            for j in range(self.inst.n_jobs):
-                oi = int(self.track.job_progress[j])
-                if oi < len(self.inst.jobs[j]) and plans[j][oi] is None:
-                    pool.append((j, oi))
+            pool = tuple((j, v.oi) for j, v in enumerate(view.jobs)
+                         if v.oi < len(self.inst.jobs[j]) and plans[j][v.oi] is None)
             if not pool:
                 return
-            idx = 0 if policy_pa is None else int(policy_pa(self.snapshot(), tuple(pool)))
-            if not (0 <= idx < len(pool)):
-                raise ValueError(f"policy_pa 选了不存在的池下标 {idx}；池={pool}")
-            j, oi = pool[idx]
-            alts = self.inst.jobs[j][oi]
-            plans[j][oi] = min(alts, key=lambda mt: mt[1])[0]   # 步 2：最短加工时间（步 3 换 PA 的规则）
+            if policy_pa is None:
+                # 规则驱动（步 2 口径，逐位不变）：池首 + 该工序**最短加工时间**。
+                # ⚠️ 平局取 `alts` 里第一个（不加机台号做次序键）——改了就与步 2 的黄金值分家。
+                pi, m = 0, min(view.jobs[pool[0][0]].alts, key=lambda mt: mt[1])[0]
+            else:
+                pi, m = policy_pa(view, pool)
+                pi = int(pi)
+                if not (0 <= pi < len(pool)):
+                    raise ValueError(f"policy_pa 选了不存在的池下标 {pi}；池={pool}")
+                cand = [mm for mm, _t in view.jobs[pool[pi][0]].alts]
+                if int(m) not in cand:
+                    raise ValueError(
+                        f"policy_pa 给作业 {pool[pi][0]} 的第 {pool[pi][1]} 道工序选了非候选"
+                        f"机台 {m}；候选={cand}")
+                m = int(m)
+            j, oi = pool[pi]
+            plans[j][oi] = m
+            proc = next(t for mm, t in view.jobs[j].alts if mm == m)
+            view = view.reserved(m, float(proc))
             stats["pa_assigns"] = stats.get("pa_assigns", 0) + 1
 
     def _transporter(self, env, events_q, tasks_in, plans, entities, stats, lu_idx: int,
@@ -1890,17 +1981,14 @@ class SimWorld:
         L 层（bound，`policy_l` 为空）：任务按 agv_phi[task_i] 绑定 AGV（task_i = 本函数生成序）；
         超出补轮询。
 
-        ══ v2：**就绪池 + 批量派工**（2026-10-08，设计 §14.3）══
+        ══ v2：**批量派工**（2026-10-08，设计 §14.3；步 3 加规则集）══
 
-        机台完工事件先**入池**，不再立刻处理。池非空时由 **PA** 在「就绪池 ×
-        候选机台」里挑一个 **(工件, 机台) 对**——这才是 AEI2025 的 PA 语义。
+        `policy_pa` 非空时，机台不再由 `_pick_machine` 当场选：**PA 提前把 `plans` 填满**
+        （`_pa_dispatch`），transporter 只**读预留**（`online_s` 必须为 False，见 `run` 的校验）。
+        分工 = AEI2025 的 PA/LA：**PA 定 (工件, 机台)，LA 定车**。
 
-        `policy_pa(snap, pool) -> 规则下标`（契约与其余头对称：只给原始快照与就绪池，
-        **不构造特征**）。`None` = 规则驱动，默认取**池首**（= 按事件到达序，接近旧行为，
-        可作对照）。
-
-        ⚠️ 回站任务（`is_last`）的终点恒为装卸站 ⟹ **不参与机台选择**；但它仍在池里，
-        可以被 PA 优先挑走（"先回站腾出车"是合法策略）。
+        ⚠️ 回站任务（`is_last`）的终点恒为装卸站 ⟹ **不参与机台选择**，也不在 PA 的池里
+        （池只含"还没定机台的待加工工序"，回站不是工序）。
         """
         task_i = 0
 
