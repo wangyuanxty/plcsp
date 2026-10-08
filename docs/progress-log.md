@@ -8222,3 +8222,66 @@ v2 删了 5 条约束、重写了流，**v1 的测试跑不到 v2 的模块上**
    剩 **#7（SC1–SC3，9 条方程）** + 评价口径 + Gurobi 对标。
 2. **把 `plcsp_v2/tests/` 从 41 涨到覆盖全部公开符号** —— 这是**唯一能终止"再冒一批"的动作**。
    门禁绿 = 跑过一遍；门禁不绿 = 有错。**不再需要问"有没有错"。**
+
+---
+
+## 八十一、⭐⭐⭐ 终止条件执行：把 v2 的可执行规格从 22% 铺到覆盖全公开面（2026-10-09）
+
+用户："继续"。按 §80.5 执行第 2 条 —— **这是唯一能终止"一问就冒一批"的动作**。
+
+### 81.1 度量换了：**名字覆盖 → 行覆盖**
+
+⚠️ 我上一节用的"名字出现在测试里"**正是我批评过的名义覆盖**。装了 `coverage`（**新增开发依赖；
+gate 的解释器不变**），改量**真·行覆盖**：
+
+```
+改造前：TOTAL 3107 行，未覆盖 1615 行 = 48%
+        其中 plcsp_v2/baselines/ 1300 行 **全部 0%**
+改造后：TOTAL 3104 行，未覆盖  809 行 = **74%**
+```
+
+**新增 3 个测试文件、共 42 条**（`test_env_api.py` · `test_nn_api.py` · `test_baselines_api.py`），
+`plcsp_v2/tests/` 从 39 → **81 条**。
+
+### 81.2 ⭐⭐ 覆盖率一铺开**当场抓到一个真 bug**（`baselines/` 在 v2 上整个是坏的）
+
+```
+plcsp_v2/baselines/nsga2.py:113  AttributeError: 'SimConfig' object has no attribute 'multi_drop'
+```
+
+v2 删 ⑩（异构车队 + 拼批）时把 `SimConfig.multi_drop` 去掉了，
+**但 `nsga2.py` 的 `EvalSpec` / `from_cfg` / `check_same_dynamics` / `Nsga2Result` / CLI 里
+还在读它** ⟹ **任何从 `SimConfig` 建 spec 的调用都会崩**。
+
+**与 `speed_ratio`（§70.7）同一类**：删约束时的漏网引用。
+**两个都是"覆盖率 0% 的模块"里躺着的** —— 这正好说明 §80 的诊断对：
+**没有可执行规格的地方，错误只能靠人读，而人读不到自己没看的地方。**
+
+**已修**：删掉 `EvalSpec.multi_drop` / `Nsga2Result.multi_drop` / `from_cfg` 与
+`check_same_dynamics` 里的读取 / `--multi-drop` CLI 参数（留着它会让人"以为开了"）。
+
+### 81.3 三个新测试文件覆盖了什么
+
+| 文件 | 覆盖 | 要点 |
+|---|---|---|
+| `test_env_api.py` | `env/*` · `energy.py` · `hrl/cdr.py` | 特征列序契约 · 快照 dataclass 冻结性 · 运输口径（**几何口径查表是显式报错，不是返回 None**） · 交期（**无参走冻结标定表**，不是 (1.5,0.3)） · `machine_fail_rate` 的 Weibull 形状（λ(0)=0、λ(η)=base·β、β=1 ⟹ 恒为 base） |
+| `test_nn_api.py` | `nn/*` | 列序/维宽 = **ckpt 兼容契约** · `build_tok` 的补零列恒 0 · 几何偏置对称/零对角/恒 ≤ 0 · 编码器**层数默认 4**（§79.2 才落地的那条裁定） · **CUDA 图构造时显式拒绝 CPU 张量** |
+| `test_baselines_api.py` | `baselines/*` | nsga2 染色体长度/上下界/`decode`/端到端小跑 · HGS 环境状态机 + 网络前向 · **exact_cpsat 只吃矩阵口径（几何实例显式报错）** · 缺 `ortools` 时 `solve` 抛 **`OrtoolsMissing`** |
+
+**"用不了的路径就断言它显式报错"，不 `skip` —— `skip` 等于没测。**
+
+### 81.4 剩下的 26%（809 行）
+
+集中在三处，都是**需要外部条件**的：`exact_cpsat` 的求解器路径（缺 `ortools`）、
+`hgs/train.py` 的训练循环（要长跑）、`des.py` 的分支（`online_s` 消融、`agv_phi` 绑定、
+失败/回收路径）。**这些不是"没人看"，是"要条件"** —— 与"0% 的模块"是两回事。
+
+### 81.5 结论：**"有没有错"现在跑门禁就行**
+
+```
+plcsp_v2/tests  81 passed      plcsp/tests  625 passed / 16 skipped
+ruff check plcsp/ plcsp_v2/   干净
+coverage（v2）                74%
+```
+
+**不再需要问"有没有错"** —— 门禁绿 = 跑过；不绿 = 有错。
