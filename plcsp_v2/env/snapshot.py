@@ -30,7 +30,8 @@ class MachineState:
     remaining_min: float
     pm_used_min: float      # 距上次保养已累计的主轴工时（⑫）
     fail_rate: float        # ③
-    prev_job: int           # 本机上一件加工的作业号；-1 = 还没加工过（⑤ 换型的依据）
+    # ⚠️ **v2：⑤ 换型的 `prev_job` 已删**（2026-10-08）—— 换型约束去掉后，机台不再需要
+    # 记上一件加工的是谁。特征层相应少一维（`nn/state_emb.machine_features`）。
 
 
 @dataclass(frozen=True)

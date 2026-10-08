@@ -97,7 +97,7 @@ class SimConfig:
     aisle_width: float = 1.5      # 通道宽（米）：窄通道限速 = Phase A2 真权衡来源
     # ── 约束参数（**全部 assumed**，无文献出处；见 spec §9 的 assumed 表）──
     p_rework: float = 0.05        # ④ 返工率 [1/工序]
-    setup_min_default: float = 2.0   # ⑤ 异型换型时长 [min]（同作业连做 = 0）
+    # ⚠️ v2：⑤ 换型已删（2026-10-08）—— `setup_min_default` 一并去掉
     pm_interval: float = 120.0    # ⑫ 预防性维护间隔 [min 主轴工时]
     pm_duration: float = 10.0     # ⑫ 维护停机时长 [min]
     max_agv_capacity: int = 3     # ⑩ 车队载量上限 [件]（1 = 退化为单载）
@@ -505,20 +505,19 @@ class MachineSim:
                      _PriorityStore(env, capacity=cap_in, decide=seq, mach=pad.id, stats=stats))
         self.out_q = simpy.Store(env, capacity=cap_out)
         self.slot = simpy.Resource(env, 1)   # 机台加工槽（故障/保养期间占用）
-        self.prev_job: int | None = None     # ⑤ 换型：本机上一件加工的作业
+        # ⚠️ v2：⑤ 换型的 `prev_job` 已删（2026-10-08）
         self.pm_clock = 0.0                  # ⑫ 距上次保养累计的主轴工时 [min]
         # ③ 役龄故障率（默认关）：开时 `fail_rate` 按 `pm_clock` 放大（见 `machine_fail_rate`）。
         self.aging = bool(cfg.machine_age_failure)
 
     def _process(self, job: int, op):
-        """⑤ 换型 → 加工（含故障中断-恢复）→ ⑫ 保养。**不含返工判定**（见 `run`）。"""
+        """加工（含故障中断-恢复）→ ⑫ 保养。**不含返工判定**（见 `run`）。
+
+        ⚠️ **v2：⑤ 换型已删**（2026-10-08）—— 原换型段（`prev_job` 不同则等 `setup_min_default`）
+        已移除；`stats["setup_min"]` 恒 0（energy 的 setup 项因此恒 0，属惰性残留，步 2 清）。
+        """
         with self.slot.request() as req:
             yield req
-            # ⑤ 换型：与上一件**不同作业**才需换型（同作业连做 = 0；序列相关的最简形）
-            if self.con.setup_time and self.prev_job is not None and self.prev_job != job:
-                yield self.env.timeout(self.cfg.setup_min_default)
-                self.stats["setup_min"][self.pad.id] += self.cfg.setup_min_default
-            self.prev_job = job
             t = self.env.now
             finish = t + op.time
             if not self.con.machine_failure:
@@ -1676,8 +1675,7 @@ class SimWorld:
                 out_q_len=len(m.out_q.items), out_cap=float(m.out_q.capacity),
                 busy=bool(m.slot.count),
                 remaining_min=(max(0.0, cur[2] + cur[1] - float(self.env.now)) if cur else 0.0),
-                pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate),
-                prev_job=(-1 if m.prev_job is None else int(m.prev_job))))
+                pm_used_min=float(m.pm_clock), fail_rate=float(m.pad.fail_rate)))
         js = []
         # ⑧ 交期与 run() **同口径**（`_due_map`）：未 run 的 t=0 快照也取（交期是纯实例数据的
         # 查询，无墙钟开销）；参考运行自身运行时返回 {}（0.0 哨兵）。
