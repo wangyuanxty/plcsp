@@ -7,7 +7,8 @@
 本包是**目标条件化双层**版（MA 输出运行目标 `g`；PA/LA/RA 三个下层 agent；
 **分层组 + 交替更新**）。**两者并行存在，互不影响。**
 
-完整设计：`docs/superpowers/specs/2026-10-08-goal-conditioned-two-level-design.md`
+完整设计：`docs/v2/design.md`（**v2 的唯一设计记录**；v1 的在
+`docs/superpowers/specs/2026-10-02-plcsp-rebuild-design.md`，**不得跨版本引用**）
 决策记录：`docs/progress-log.md` §68
 
 ## 与 `plcsp/` 的关系

@@ -6952,7 +6952,7 @@ Ghanbarzadeh 的 **236 篇**频次分析：**计算代价 67.8%** · 可扩展�
 
 ## 六十八、⭐ 架构转向：**目标条件化双层 + 三下层 agent**（2026-10-08，用户裁定）
 
-**完整设计**：`docs/superpowers/specs/2026-10-08-goal-conditioned-two-level-design.md`
+**完整设计**：`docs/v2/design.md`
 
 ### 68.1 决定
 
