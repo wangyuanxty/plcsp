@@ -26,9 +26,6 @@ from plcsp_v2.hrl.rules import (LA_RULE_NAMES, N_AEI2025_RULES, N_LA_RULES,
 
 # ══════════════════ 夹具 ══════════════════
 
-PA = 1e9                       # "不参与"的哨兵：打分里当一个够大的数用
-
-
 def _view(jobs, machines, now=10.0) -> PAView:
     """手搓一份纯规则视图（`snap=None`——规则不读快照，见 `PAView.snap` 的注释）。"""
     return PAView(now=now, jobs=tuple(jobs), machines=tuple(machines))
@@ -110,8 +107,8 @@ def _four_job_view() -> PAView:
         PAJob(oi=0, alts=((0, 9.0),), apt=9.0, rem_apt=30.0, ready_at=40.0, due=100.0),
         PAJob(oi=0, alts=((1, 11.0),), apt=11.0, rem_apt=40.0, ready_at=10.0, due=50.0),
     )
-    machines = (PAMachine(avail_at=10.0, busy_min=0.0),      # 空闲 0
-                PAMachine(avail_at=13.0, busy_min=0.0))      # 空闲 3
+    machines = (PAMachine(avail_at=10.0, assigned_min=0.0),      # 空闲 0
+                PAMachine(avail_at=13.0, assigned_min=0.0))      # 空闲 3
     return _view(jobs, machines)
 
 
@@ -142,9 +139,9 @@ def _machine_race_view() -> PAView:
     """
     job = PAJob(oi=0, alts=((0, 4.0), (1, 8.0), (2, 6.0)), apt=6.0, rem_apt=6.0,
                 ready_at=0.0, due=INF)
-    machines = (PAMachine(avail_at=5.0, busy_min=90.0),
-                PAMachine(avail_at=20.0, busy_min=10.0),
-                PAMachine(avail_at=2.0, busy_min=50.0))
+    machines = (PAMachine(avail_at=5.0, assigned_min=90.0),
+                PAMachine(avail_at=20.0, assigned_min=10.0),
+                PAMachine(avail_at=2.0, assigned_min=50.0))
     return _view((job,), machines, now=100.0)
 
 
@@ -160,20 +157,42 @@ def test_machine_rules_pick_the_expected_machine(mach_rule: str, expected_machin
 
 
 @pytest.mark.unit
-def test_ties_are_broken_deterministically():
-    """平局**不抽随机数**：工件取池序最小、机台取机台号最小。
+def test_ties_are_deterministic_only_when_no_stream_is_given():
+    """`tie_rng=None` ⟹ 确定性（工件取池序最小、机台取机台号最小）。
 
-    为什么不用 AEI2025 的随机平局：共享随机流里插一个新消费者会**移位故障抽样**
-    ⟹ "只改了平局"变成"连扰动流都换了"（见 `hrl/rules.py` 的模块 docstring）。
+    ⚠️ **这是显式选择，不是默认路径**：生产路径（`run` / `run_gated`）恒给 `tie_rng`，
+    即 AEI2025 的**随机平局**。确定性留给"要钉死具体选择"的单测与消融。
     """
     job = PAJob(oi=0, alts=((4, 7.0), (2, 7.0), (3, 7.0)), apt=7.0, rem_apt=7.0,
                 ready_at=0.0, due=50.0)
     view = _view((job, job, job), (PAMachine(0.0, 0.0), PAMachine(0.0, 0.0),
                                    PAMachine(0.0, 0.0), PAMachine(0.0, 0.0),
                                    PAMachine(0.0, 0.0)))
-    pi, m = apply_pa_rule("EDD+SMPT", view, ((2, 0), (0, 0), (1, 0)))
+    pi, m = apply_pa_rule("EDD+SMPT", view, ((2, 0), (0, 0), (1, 0)), tie_rng=None)
     assert pi == 0, "工件平局应取**池序**最小"
     assert m == 2, "机台平局应取**机台号**最小"
+
+
+@pytest.mark.unit
+def test_random_tie_break_covers_all_tied_candidates_and_is_seed_reproducible():
+    """给了 `tie_rng` ⟹ **照 AEI2025 在并列最优里等概率抽**，且同一 seed 可复现。
+
+    ⚠️ 车队的流是 `[seed_chain, 1000+a]`、故障是 `default_rng(seed_chain)`；
+    PA 的平局流是 `[seed_chain, PA_TIE_SEED]` —— **三条互不干扰**。
+    本测试同时核对"换 seed 会变"（= 真的在抽）与"同 seed 不变"（= 可复现）。
+    """
+    job = PAJob(oi=0, alts=((4, 7.0), (2, 7.0), (3, 7.0)), apt=7.0, rem_apt=7.0,
+                ready_at=0.0, due=50.0)
+    view = _view((job,), (PAMachine(0.0, 0.0), PAMachine(0.0, 0.0),
+                          PAMachine(0.0, 0.0), PAMachine(0.0, 0.0),
+                          PAMachine(0.0, 0.0)))
+    picks = {apply_pa_rule("SPT+SMPT", view, ((0, 0),),
+                           np.random.default_rng([0, 2000]))[1] for _ in range(1)}
+    same = apply_pa_rule("SPT+SMPT", view, ((0, 0),), np.random.default_rng([0, 2000]))[1]
+    assert picks == {same}, "同一 seed 必须给同一个选择"
+    draws = {apply_pa_rule("SPT+SMPT", view, ((0, 0),),
+                           np.random.default_rng([s, 2000]))[1] for s in range(40)}
+    assert draws == {2, 3, 4}, f"并列的三台都该有机会被抽到，实得 {draws}"
 
 
 @pytest.mark.unit
@@ -197,8 +216,8 @@ def test_reserved_projection_moves_eam_and_minu_off_the_reserved_machine():
     """
     job = PAJob(oi=0, alts=((0, 3.0), (1, 9.0)), apt=6.0, rem_apt=6.0,
                 ready_at=0.0, due=INF)
-    view = _view((job, job), (PAMachine(avail_at=0.0, busy_min=0.0),
-                              PAMachine(avail_at=0.0, busy_min=0.0)), now=0.0)
+    view = _view((job, job), (PAMachine(avail_at=0.0, assigned_min=0.0),
+                              PAMachine(avail_at=0.0, assigned_min=0.0)), now=0.0)
 
     _pi, m1 = apply_pa_rule("SPT+EAM", view, ((0, 0), (1, 0)))
     assert m1 == 0, "第一件：两台同样空闲 ⟹ 取机台号最小"
@@ -235,6 +254,14 @@ def test_apply_pa_rule_rejects_empty_pool_and_void_job():
 
 # ══════════════════ 6. 接线层：真跑 MK01 ══════════════════
 
+def _det(rule):
+    """**确定性平局**的规则回调（`tie_rng=None`）——给需要钉死具体行为的测试用。
+
+    ⚠️ 生产路径（`run` / `run_gated`）不给这个，走 AEI2025 的随机平局。
+    """
+    return lambda view, pool, tie_rng: apply_pa_rule(rule, view, pool, None)
+
+
 @pytest.mark.unit
 def test_pa_is_actually_called_once_per_operation():
     """PA 的池 = 「未完工工件的最早待加工工序」⟹ **每道工序恰好派一次**。
@@ -249,15 +276,18 @@ def test_pa_is_actually_called_once_per_operation():
 
 
 @pytest.mark.unit
-def test_offline_run_is_bit_identical_to_pool_head_smpt():
-    """`policy_pa=None`（离线预填计划）与 `SPT+SMPT` 逐位相同。
+def test_offline_run_is_bit_identical_to_deterministic_pool_head_smpt():
+    """`policy_pa=None`（离线预填计划）与**确定性平局**的 `SPT+SMPT` 逐位相同。
 
     为什么该等：`SMPT` 的机台选择只看 `(工件, 工序)`，**与派工顺序无关**；而离线计划就是
     "每道工序取最短候选"——两者是同一个映射。这条同时钉住"离线路径没被步 3 改动"。
+
+    ⚠️ **必须用确定性平局**：随机平局下同一个 `(工件, 工序)` 会被抽到不同的并列机台，
+    与离线计划不再是同一个映射（实测 75.870 vs 57.970）。这不是缺陷，是随机平局的定义。
     """
     off = _world().run(seed_chain=0)
-    on = _world().run(seed_chain=0, policy_pa=pa_rule_policy("SPT+SMPT"))
-    assert off["makespan"] == on["makespan"]
+    on = _world().run(seed_chain=0, policy_pa=_det("SPT+SMPT"))
+    assert off["makespan"] == on["makespan"] == 75.870
     assert off["task_flow"] == on["task_flow"]
     assert off["pa_assigns"] == 0                        # 离线路径：PA 一次都不该被调用
 
@@ -270,23 +300,97 @@ def test_all_twelve_rules_run_and_are_distinguishable():
         m = _world().run(seed_chain=0, policy_pa=pa_rule_policy(name))
         assert m["jobs_done"] == 10 and not m["horizon_hit"], f"{name} 没跑完"
         makespans[name] = m["makespan"]
-    # SMPT 一列与"每道工序取最短候选"同解 ⟹ 四条 SMPT 规则给出同一个值
-    smpt = {makespans[n] for n in PA_RULE_NAMES if n.endswith("+SMPT")}
-    assert len(smpt) == 1, f"SMPT 列应与工件规则无关，实得 {smpt}"
-    # MINU / EAM 与顺序有关 ⟹ 工件规则**会**改变结果（= 派工顺序真的起作用了）
-    for mach in ("MINU", "EAM"):
-        vals = {makespans[n] for n in PA_RULE_NAMES if n.endswith("+" + mach)}
-        assert len(vals) > 1, f"{mach} 列对工件规则不敏感——顺序没有起作用"
     assert len(set(makespans.values())) >= 6, f"12 条规则的差异太少：{makespans}"
+    # EAM / MINU 与派工顺序有关 ⟹ 工件规则**会**改变结果（= 顺序真的起作用了）。
+    # ⚠️ SMPT 列在**确定性平局**下才与工件规则无关；随机平局下抽签次序本身依赖派工
+    # 次序，故不再断言（见 `test_offline_run_is_bit_identical_to_...` 的注释）。
+    for mach in ("MINU", "EAM"):
+        with_tie = {makespans[n] for n in PA_RULE_NAMES if n.endswith("+" + mach)}
+        det = {_world().run(seed_chain=0, policy_pa=_det(n))["makespan"]
+               for n in PA_RULE_NAMES if n.endswith("+" + mach)}
+        assert len(with_tie) > 1, f"{mach} 列（随机平局）对工件规则不敏感"
+        assert len(det) > 1, f"{mach} 列（确定性平局）对工件规则不敏感"
+
+
+@pytest.mark.unit
+def test_deterministic_smpt_column_equals_the_offline_plan():
+    """**确定性平局**下 `SMPT` 一列四条同值，且 = 离线计划。
+
+    这条是"`SMPT` 与派工顺序无关"的形式化——随机平局下它不成立，故单独钉住。
+    """
+    vals = {_world().run(seed_chain=0, policy_pa=_det(n))["makespan"]
+            for n in PA_RULE_NAMES if n.endswith("+SMPT")}
+    assert vals == {75.870}, f"SMPT 列应与工件规则无关，实得 {vals}"
+
+
+@pytest.mark.unit
+def test_tie_stream_is_independent_of_the_failure_stream():
+    """⚠️ **回归守卫（本步的教训）**：PA 的平局流**不得**复用机台故障那条共享 `rng`。
+
+    复用会把故障抽样整体移位："只改了平局"变成"连扰动流都换了"，消融不再干净。
+    判据：同一 `seed_chain` 下，`tie_rng` 关（确定性）与开（随机）两条运行的
+    **故障事件数**应落在同一量级——更直接地，此处核对两条运行的 `fail_events` 相同，
+    因为平局流是独立的、不会错开故障抽签。
+    """
+    a = _world().run(seed_chain=0, policy_pa=_det("EDD+EAM"))
+    b = _world().run(seed_chain=0, policy_pa=pa_rule_policy("EDD+EAM"))
+    assert a["fail_events"] == b["fail_events"], (
+        "平局随机源动了故障流——检查 `PA_TIE_SEED` 是否与 `default_rng(seed_chain)` 分开")
+
+
+@pytest.mark.unit
+def test_pa_ledger_makes_inflight_reservations_visible():
+    """⚠️ **本步修的那个洞**：账本要看得见"已预留、尚未入目标机台缓冲"的件。
+
+    判据两条：
+    1. 该情形在本仓**真的存在**（否则这个洞只是理论上的）；
+    2. 账本项**确实进入了视图**（`avail_at` 取 `max(账本, 物理)`）。
+    """
+    from plcsp_v2.env.rule_views import build_pa_view
+
+    # (2) 视图层：账本 > 物理清空时刻 ⟹ `avail_at` 取账本
+    w = _world()
+    snap = w.snapshot()
+    m = w.inst.n_machines
+    led = [0.0] * m
+    led[0] = snap.now + 999.0
+    v = build_pa_view(snap, w.inst, {j: [None] * len(ops) for j, ops in enumerate(w.inst.jobs)},
+                      led, [0.0] * m)
+    phys0 = (snap.now + snap.machines[0].remaining_min + snap.machines[0].backlog_min)
+    assert v.machines[0].avail_at == pytest.approx(snap.now + 999.0)
+    assert v.machines[0].avail_at > phys0
+    assert v.machines[1].avail_at < snap.now + 999.0     # 别的机台不受影响
+
+    # (1) 真实运行里确实有"在途预留"
+    stat = {"calls": 0, "inflight": 0}
+    orig = SimWorld._pa_dispatch
+
+    def probe(self, plans, policy_pa, stats):
+        snap = self.snapshot()
+        stat["calls"] += 1
+        riding = sum(1 for j in range(self.inst.n_jobs)
+                     if int(snap.jobs[j].on_agv) >= 0)
+        if riding:
+            stat["inflight"] += 1
+        return orig(self, plans, policy_pa, stats)
+
+    SimWorld._pa_dispatch = probe
+    try:
+        _world().run(seed_chain=0, policy_pa=pa_rule_policy("SPT+EAM"))
+    finally:
+        SimWorld._pa_dispatch = orig
+    assert stat["calls"] == 55
+    assert stat["inflight"] > 0, (
+        "本仓不存在在途预留 ⟹ 账本口径的动机不成立；若流的形状变了，应更新 §71.1 的记录")
 
 
 @pytest.mark.unit
 def test_policy_pa_contract_is_validated():
     """池下标越界 / 机台非候选 ⟹ **显式报错**（同 `policy_s` / `policy_l` 的处置）。"""
     with pytest.raises(ValueError, match="不存在的池下标"):
-        _world().run(seed_chain=0, policy_pa=lambda view, pool: (999, 0))
+        _world().run(seed_chain=0, policy_pa=lambda view, pool, tie_rng: (999, 0))
     with pytest.raises(ValueError, match="非候选机台"):
-        _world().run(seed_chain=0, policy_pa=lambda view, pool: (0, 999))
+        _world().run(seed_chain=0, policy_pa=lambda view, pool, tie_rng: (0, 999))
 
 
 @pytest.mark.unit

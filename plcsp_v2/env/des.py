@@ -32,7 +32,7 @@ from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
 from .due_dates import due_dates_for
 from .layout import Layout, MachinePad
 from .instances import Instance
-from .rule_views import build_pa_view          # 步 3：PA 规则求值的只读视图（纯数据）
+from .rule_views import advance_avail, build_pa_view   # 步 3：PA 规则求值的只读视图（纯数据）
 from .snapshot import ChargerState    # ⑪ C 头：`snapshot()` 逐桩报占用（顶部导入，不每帧重导）
 from .transport import MATRIX, UNMAPPED_RAISE, TransportCaliber
 
@@ -43,6 +43,14 @@ if TYPE_CHECKING:                       # 仅为标注；运行期在 `snapshot(
 # 此前无单位换算，运输时间 = 距离（米）÷ 速度，导致 TDT/TPT ≈ 4–6 倍（物理上不成立，
 # 见 progress-log 与 spec §3.4）。此常量把 [m] / [m/s] 转成分钟。
 SECONDS_PER_MIN = 60.0
+
+PA_TIE_SEED = 2000
+"""PA 规则**平局**随机源的子种子（步 3）——`default_rng([seed_chain, PA_TIE_SEED])`。
+
+⚠️ **必须与既有流分开**：机台故障消费共享 `rng`（`default_rng(seed_chain)`），车队消费
+`[seed_chain, 1000+a]`。PA 若借共享那条，会把故障抽样**整体移位**——"只改了平局"就变成
+"连扰动流都换了"。独立子流使"平局开/关"成为一次**干净的消融**。
+"""
 
 
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
@@ -1112,6 +1120,8 @@ class SimWorld:
         # 步 3：本局 stats 的活引用（由 `_build_entities` 挂上）。此处先置空 dict，
         # 使 `snapshot()` 在任何路径上都有可读对象（缺键走 `.get` 兜底）。
         self._live_stats: dict = {}
+        # 步 3：PA 平局随机源（每局在 `run`/`run_gated` 里重播，见 `PA_TIE_SEED`）。
+        self._pa_tie_rng: np.random.Generator | None = None
         self._cold_start()                  # t=0 快照骨架（P2 Task 1，run() 会整套换掉）
 
     def _fleet(self) -> list:
@@ -1450,7 +1460,9 @@ class SimWorld:
         ⚠️ **`policy_pa`（生产派工头，PA；步 3）**：`None`（默认）= 不启用——`plans` 走
           离线预填，**逐位等于 step 2 之前的行为**。非空 = `_pa_dispatch` 在「未完工工件的
           最早待加工工序」池里挑一件**并定机台**写进 `plans`（预留表），transporter 只读。
-          契约：`policy_pa(view, pool) -> (池下标, 机台号)`，`view` = `env/rule_views.PAView`。
+          契约：`policy_pa(view, pool, tie_rng) -> (池下标, 机台号)`，
+          `view` = `env/rule_views.PAView`，`tie_rng` = **环境给的平局随机源**
+          （独立子流 `[seed_chain, PA_TIE_SEED]`，照 AEI2025 的随机平局）。
           固定规则用 `hrl.rules.pa_rule_policy(...)` 造。
 
         返回 metrics：makespan / energy / fail_events / tardy / moves / deliveries / seq_*。
@@ -1458,6 +1470,9 @@ class SimWorld:
         seq_decide = (None if seq_rank is None
                       else self._make_seq_decide(check_seq_rank(self.inst, seq_rank)))
         rng = np.random.default_rng(seed_chain)
+        # 步 3：PA 平局随机源——**独立子流**，每局重播（见 `PA_TIE_SEED` 的注释；
+        # 每次派工重建会让 55 次派工抽到同一串数，那是错的）。
+        self._pa_tie_rng = np.random.default_rng([seed_chain, PA_TIE_SEED])
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
                  "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv,
@@ -1651,7 +1666,8 @@ class SimWorld:
         ⚠️ **`policy_pa`（生产派工头，PA）**：`None`（默认）= 不启用（离线预填计划）；
         非空 = **策略/规则驱动**：`_pa_dispatch` 在「未完工工件的最早待加工工序」池里挑
         **一件并定机台**，写进 `plans`（预留），transporter 只读。契约见 `_pa_dispatch`：
-        `policy_pa(view, pool) -> (池下标, 机台号)`，`view` = `env/rule_views.PAView`。
+        `policy_pa(view, pool, tie_rng) -> (池下标, 机台号)`，`view` = `env/rule_views.PAView`，
+        `tie_rng` = 平局随机源（独立子流）。
         ⚠️ 与 `online_s=True` **互斥**（显式报错）：两者都定机台，会互相覆盖同一格预留。
 
         ⚠️ 多个回调都只拿**原始快照**（`env/` 不构造特征、不得依赖 `nn/`）——快照→特征在
@@ -1689,6 +1705,9 @@ class SimWorld:
             charge_fn = self._make_charge_fn(policy_c)
         # ⚠️ v2：⑩ 去后 `policy_b` / `batch_fn` 已删（2026-10-08）
         rng = np.random.default_rng(seed_chain)
+        # 步 3：PA 平局随机源——**独立子流**，每局重播（见 `PA_TIE_SEED` 的注释；
+        # 每次派工重建会让 55 次派工抽到同一串数，那是错的）。
+        self._pa_tie_rng = np.random.default_rng([seed_chain, PA_TIE_SEED])
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
                  "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv,
@@ -1913,8 +1932,9 @@ class SimWorld:
 
         ══ 契约（步 3 升级）══
 
-        `policy_pa(view, pool) -> (池下标, 机台号)`——`view` 是 `env/rule_views.PAView`
-        （纯数据，装好规则的自变量；`view.snap` 留给步 4 的编码器）。
+        `policy_pa(view, pool, tie_rng) -> (池下标, 机台号)`——`view` 是
+        `env/rule_views.PAView`（纯数据，装好规则的自变量；`view.snap` 留给步 4 的编码器）；
+        `tie_rng` 是**环境的平局随机源**（见下）。
         机台**由 PA 定**（复合规则的机台那一半）；transporter 只读预留。
         ⚠️ 返回**两个**值而不是一个：复合规则是"先工件、后机台"，机台必须与工件的选择
         **同一刻**定下来（同一个 `view`），分两次回调会看到两个不同的状态。
@@ -1922,12 +1942,33 @@ class SimWorld:
         `None` = **不启用 PA**（离线路径：`plans` 已预填）⟹ 本函数是空操作（池为空）。
         非 None 时**池必被排空**，故 `plans` 里不会留 `None` 给 `_pick_machine`。
 
-        ⚠️ **批内投影**：同批里状态不变，若规则只看静态快照，`EAM`/`MINU` 会给整批挑
-        同一台机台。故每次派工后用 `PAView.reserved` 把这笔预留记进视图再继续
-        （见 `env/rule_views.py` 的模块 docstring）。
+        ══ 平局：`tie_rng` 是**独立子流** ══
+
+        AEI2025 的复合规则"若多个工件/机器满足条件，则**随机选一个**"，故本函数把一条
+        **独立的**随机源交给策略：`default_rng([seed_chain, PA_TIE_SEED])`。
+        ⚠️ **不得改回共享 `rng`** —— 那条流被机台故障消费，插一个消费者会把故障抽样
+        **整体移位**（"只改了平局"变成"连扰动流都换了"，消融不再干净）。
+        车队早已是各自独立的流（`[seed_chain, 1000+a]`），PA 只是照同一形状再加一条。
+        ⚠️ 随机源**每局重播**（在 `run` / `run_gated` 里建），不是每次派工重建——
+        每次重建会让 55 次派工抽到同一串数。
+
+        ══ 跨批账本（`stats["pa_mct"]` / `stats["pa_assigned_min"]`）══
+
+        机台的两个规则自变量（`EAM` 的 `MCT_k`、`MINU` 的分子）按 **AEI2025 的 λ 口径**
+        逐次推进并**跨派工批次存活**：
+        `mct[k] ← max(mct[k], 物理清空时刻, now) + pt`、`assigned_min[k] += pt`。
+        ⚠️ 为什么必须跨批：实测 MK01 有 **18/55 = 33%** 的派工时刻存在"已预留、尚未入目标
+        机台缓冲"的件；只读物理量的口径在那些时刻**看不见它们**（§71.1 的量法）。
+
+        ══ 批内投影 ══
+
+        同批里物理状态不变，故 `view.reserved()` 每次派工后把这笔预留记进视图再继续
+        （见 `env/rule_views.py`）。**批内投影与跨批账本共用 `advance_avail` 同一式。**
         """
-        view = build_pa_view(self.snapshot(), self.inst, plans,
-                             self._live_stats.get("proc_min") or [])
+        led_mct = self._live_stats.setdefault("pa_mct", [0.0] * self.inst.n_machines)
+        led_assigned = self._live_stats.setdefault("pa_assigned_min",
+                                                   [0.0] * self.inst.n_machines)
+        view = build_pa_view(self.snapshot(), self.inst, plans, led_mct, led_assigned)
         while True:
             pool = tuple((j, v.oi) for j, v in enumerate(view.jobs)
                          if v.oi < len(self.inst.jobs[j]) and plans[j][v.oi] is None)
@@ -1938,7 +1979,7 @@ class SimWorld:
                 # ⚠️ 平局取 `alts` 里第一个（不加机台号做次序键）——改了就与步 2 的黄金值分家。
                 pi, m = 0, min(view.jobs[pool[0][0]].alts, key=lambda mt: mt[1])[0]
             else:
-                pi, m = policy_pa(view, pool)
+                pi, m = policy_pa(view, pool, self._pa_tie_rng)
                 pi = int(pi)
                 if not (0 <= pi < len(pool)):
                     raise ValueError(f"policy_pa 选了不存在的池下标 {pi}；池={pool}")
@@ -1951,6 +1992,9 @@ class SimWorld:
             j, oi = pool[pi]
             plans[j][oi] = m
             proc = next(t for mm, t in view.jobs[j].alts if mm == m)
+            # 跨批账本推进（AEI2025 的 MCT_k / Σλ·pt）——与批内投影**同一式**
+            led_mct[m] = advance_avail(view.machines[m].avail_at, view.now, float(proc))
+            led_assigned[m] += float(proc)
             view = view.reserved(m, float(proc))
             stats["pa_assigns"] = stats.get("pa_assigns", 0) + 1
 

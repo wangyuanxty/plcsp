@@ -58,19 +58,32 @@ class PAMachine(NamedTuple):
     """一台机台的**规则自变量**。"""
 
     avail_at: float
-    """预计空闲时刻 = `now + 在制标称剩余 + 输入缓冲积压`（`EAM` 的自变量）。
+    """预计空闲时刻（`EAM` 的自变量）——**≡ AEI2025 的 `MCT_k(t)`**。
 
-    ⚠️ **与 AEI2025 的 `MCT_k(t)` 口径不同**：他们的 `MCT` 是"已派工序的最晚完工时刻"
-    （**计划**口径）。我们这里取**物理**口径（当前队列清空的时刻），因为我们的 PA 是
-    **提前预留**——照他们的计划口径算，在途预留会在"派工"与"入缓冲"之间被**重复计**。
-    另：本口径**不含**从当前所在地到该机台的**运输时长**（PA 派工时无从知道），
-    故 `EAM` 略微偏好远机台。"""
-    busy_min: float
-    """已记在它头上的加工工时 [min]（`MINU` 的分子）。
+    口径照抄他们：`MCT_k(t) = max_{已派给 k 的工序} ct`，即"**已派工序的最晚完工时刻**"。
+    我们的实现 = `max(物理清空时刻, 账本 mct_k)`：
 
-    口径 = 该机**累计切削时长**（`stats["proc_min"]`，物理量）+ **本批已派**的投影。
-    ⚠️ **与 AEI2025 的 `MU_k` 口径不同**：他们分子是"已派工序的加工时长之和"（计划口径），
-    我们取物理口径，理由同 `avail_at`。**分母见 `hrl.rules.MINU_TIME_FLOOR`。**"""
+    - **账本项**（主项）：PA 每次派工推进 `mct_k ← max(mct_k, 当时的 avail, now) + pt`，
+      **跨派工批次存活**（存 `stats["pa_mct"]`）⟹ **在途预留看得见**；
+    - **物理项**（下界）：`now + 在制标称剩余 + 输入缓冲积压`。账本是**计划**，会与
+      实况漂（故障、保养、运输延误）⟹ 取 `max` 让实况只能把它推后、不能提前。
+
+    ⚠️ **不含**从工件当前所在地到该机台的运输时长（派工时无从知道），故 `EAM` 略偏好远机台。"""
+    assigned_min: float
+    """已派给它的加工工时之和 [min]（`MINU` 的分子）——**≡ AEI2025 的 `Σ λ_ijk·pt_ijk`**。
+
+    ⚠️ 是**计划**口径（派了就计），不是"已切削工时"：后者看不见在途预留。
+    **分母见 `hrl.rules.minu_denominator`。**"""
+
+
+def advance_avail(avail: float, now: float, proc: float) -> float:
+    """把一笔 `proc` 分钟的活记进空闲时刻为 `avail` 的机台 → **新的**空闲时刻。
+
+    式：`max(avail, now) + proc`。
+    ⚠️ **批内投影与跨批账本共用这一处**（`PAView.reserved` 与 `_pa_dispatch` 的账本推进），
+    两处各写一遍必然会漂——而漂了不会报错，只会让 `EAM` 悄悄用两套口径。
+    """
+    return max(avail, now) + proc
 
 
 @dataclass(frozen=True)
@@ -89,23 +102,26 @@ class PAView:
     def reserved(self, machine: int, proc: float) -> PAView:
         """本次派工的**投影**：返回一份把 `(机台 machine, 时长 proc)` 记进去的新视图。
 
-        派工后机台的最早空闲推后：`avail = max(旧 avail, now) + proc`；
-        已记工时加上 `proc`。
-        ⚠️ **按"即刻到达"投影**（不含运输时长）——与 `PAMachine.avail_at` 同一处口径。
+        ⚠️ 只管**本批**（同一 `_pa_dispatch` 调用内的先后两笔）。
+        跨批的那部分由 `stats["pa_mct"]` / `stats["pa_assigned_min"]` 账本承担——
+        本视图下次被 `build_pa_view` 建出时就从账本读。**两者共用 `advance_avail`**。
         """
         ms = list(self.machines)
         old = ms[machine]
-        ms[machine] = PAMachine(avail_at=max(old.avail_at, self.now) + proc,
-                                busy_min=old.busy_min + proc)
+        ms[machine] = PAMachine(avail_at=advance_avail(old.avail_at, self.now, proc),
+                                assigned_min=old.assigned_min + proc)
         return replace(self, machines=tuple(ms))
 
 
-def build_pa_view(snap: Snapshot, inst: Instance, plans, mach_busy_min) -> PAView:
-    """活快照 + 实例 + 计划表 + 逐机切削工时 → `PAView`（**纯函数**）。
+def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min) -> PAView:
+    """活快照 + 实例 + 计划表 + **PA 账本** → `PAView`（**纯函数**）。
 
     `plans[j][oi]` = PA 已写下的机台预留（`None` = 尚未派）；本函数**只读**它。
-    ⚠️ 逐机台的"已记工时"**从 `stats["proc_min"]` 取**（由 `SimWorld` 传入），
-    **不**从 `plans` 反推：`plans` 只留痕"派给谁"，不留痕"做完没有"。
+    `pa_mct` / `pa_assigned_min` = 跨批账本（`stats` 里的两个逐机台列表，见 `PAMachine`）。
+
+    ⚠️ **账本必须跨批存活**——这正是本口径相对"只读物理量"的全部好处：
+    实测 MK01 有 **18/55 = 33%** 的派工时刻存在"已预留、尚未入目标机台缓冲"的件，
+    只看物理量的口径在那些时刻是**瞎的**（见 `docs/progress-log.md` §71）。
     """
     jobs: list[PAJob] = []
     for j, ops in enumerate(inst.jobs):
@@ -125,8 +141,11 @@ def build_pa_view(snap: Snapshot, inst: Instance, plans, mach_busy_min) -> PAVie
         jobs.append(PAJob(oi=oi, alts=alts, apt=float(apts[0]), rem_apt=float(sum(apts)),
                           ready_at=ready, due=(js.due if js.due > 0.0 else INF)))
     machines = tuple(
-        PAMachine(avail_at=snap.now + float(m.remaining_min) + float(m.backlog_min),
-                  busy_min=float(mach_busy_min[i]) if i < len(mach_busy_min) else 0.0)
+        PAMachine(
+            # AEI2025 的 `MCT_k`：账本（计划）与物理清空时刻取 max。
+            avail_at=max(pa_mct[i] if i < len(pa_mct) else 0.0,
+                         snap.now + float(m.remaining_min) + float(m.backlog_min)),
+            assigned_min=float(pa_assigned_min[i]) if i < len(pa_assigned_min) else 0.0)
         for i, m in enumerate(snap.machines))
     return PAView(now=float(snap.now), jobs=tuple(jobs), machines=machines, snap=snap)
 
