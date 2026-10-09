@@ -41,6 +41,7 @@ if __name__ == "__main__":          # ← 缺了这行，Windows 上必炸
 from __future__ import annotations
 
 import multiprocessing as mp
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from typing import NamedTuple
 
@@ -68,6 +69,22 @@ def _get_net(spec: Spec, with_value: bool):
         net = HierarchicalPolicy(n_chargers=key[0], with_value=key[1])
         _W[key] = net
     return net
+
+
+def _shutdown(ex: ProcessPoolExecutor) -> None:
+    """关池 —— ⚠️ **失败只报不抛**。
+
+    为什么：实测（§110）一次长跑在 `shutdown` 里挂掉，**把刚跑完的一整轮（200 步）拖没了**
+    ——死因在栈里，但结果是丢的。关池是**收尾**动作，不该有权否决已经算出来的结果。
+
+    ⚠️ **仍然大声报**（打到 stderr，带异常类型与消息）—— 不静默。调用方若想升级成致命，
+    自己接 `OSError`/`BrokenProcessPool`。
+    """
+    try:
+        ex.shutdown(wait=True, cancel_futures=True)
+    except Exception as ex_:
+        print(f"⚠️ 关池失败（已忽略，不影响已算出的结果）："
+              f"{type(ex_ ).__name__}: {ex_}", file=sys.stderr)
 
 
 class Chain(NamedTuple):
@@ -163,7 +180,7 @@ class ChainPool:
         return [Chain(float(R), f, dec) for R, f, dec in out]
 
     def close(self) -> None:
-        self.ex.shutdown(wait=True, cancel_futures=True)
+        _shutdown(self.ex)
 
     def __enter__(self) -> "ChainPool":
         return self
@@ -221,7 +238,7 @@ class SegmentPool:
         return out
 
     def close(self) -> None:
-        self.ex.shutdown(wait=True, cancel_futures=True)
+        _shutdown(self.ex)
 
     def __enter__(self) -> "SegmentPool":
         return self

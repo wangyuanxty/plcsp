@@ -87,24 +87,25 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             if eval_every and step % eval_every == 0:
                 rec({"kind": "eval", "arm": arm, "seed": seed, "step": step,
                      **evaluate(net, spec, n=eval_n, seed=0, dt_events=dt_events)})
+
+        # ⚠️ **结果先落盘、再关池**（§110）：实测一次长跑在 `shutdown` 里挂掉，
+        # 把刚跑完的 200 步整轮拖没了。收尾动作不该有权否决已经算出来的结果。
+        dspec, _ = build(seed, disturb=True)
+        rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
+             "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
+             "disturbed": evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events),
+             "agv_mtbf": dspec.cfg.agv_mtbf})
+        if save_dir:
+            p = Path(save_dir) / f"{arm}_s{seed}.pt"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+                        "arm": arm, "seed": seed, "steps": steps, "n": n,
+                        "dt_events": dt_events, "n_chargers": len(spec.layout.chargers),
+                        "with_value": False, "tau": spec.cfg.tau}, p)
+            rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
     finally:
         if pool is not None:
             pool.close()
-
-    dspec, _ = build(seed, disturb=True)
-    rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
-         "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
-         "disturbed": evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events),
-         "agv_mtbf": dspec.cfg.agv_mtbf})
-
-    if save_dir:
-        p = Path(save_dir) / f"{arm}_s{seed}.pt"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
-                    "arm": arm, "seed": seed, "steps": steps, "n": n,
-                    "dt_events": dt_events, "n_chargers": len(spec.layout.chargers),
-                    "with_value": False, "tau": spec.cfg.tau}, p)
-        rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
 
 
 def main(argv: list[str] | None = None) -> int:
