@@ -84,6 +84,11 @@ class PolicyOut(NamedTuple):
     la: torch.Tensor | None         # (B, 3)；**`la_ctx` 未给时为 `None`**（见 `forward`）
     ra_charge: torch.Tensor         # (B, 1 + n_chargers) —— 0 = 不去充
     ra_maint: torch.Tensor          # (B, 2) —— 0 = 生产、1 = 保养
+    value: torch.Tensor | None = None
+    """(B, 1) —— **critic 的 `V(s)`**。仅在 `HierarchicalPolicy(with_value=True)` 时非空。
+
+    ⚠️ **两层路径不建这个头**（默认 `with_value=False` ⟹ 连模块都不创建 ⟹
+    `net.parameters()` 一位不变）。它只服务 **Q1 的臂 A**（设计 §12.2）。"""
 
 
 class _MaskedScoreHead(nn.Module):
@@ -144,7 +149,7 @@ class HierarchicalPolicy(nn.Module):
 
     def __init__(self, n_chargers: int, d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 4, feat_dim: int = F_MAX, n_bins: int = G_BINS,
-                 la_ctx_dim: int = LA_CTX_DIM):
+                 la_ctx_dim: int = LA_CTX_DIM, with_value: bool = False):
         super().__init__()
         self.enc = LayoutEncoder(d_model=d_model, n_heads=n_heads, n_layers=n_layers,
                                  feat_dim=feat_dim)
@@ -154,6 +159,14 @@ class HierarchicalPolicy(nn.Module):
         self.la = _MaskedScoreHead(d_model, N_LA_RULES, ctx_dim=la_ctx_dim)
         self.ra_charge = _MaskedScoreHead(d_model, 1 + int(n_chargers))
         self.ra_maint = _MaskedScoreHead(d_model, 2)
+        # **critic 的 `V(s)`**（只服务 Q1 的臂 A，设计 §12.2）。
+        # ⚠️ **默认不建**：`with_value=False` 时本属性是 `None` ⟹ 不产生任何参数 ⟹
+        # 两层路径的 `net.parameters()` 与建之前**逐位相同**（门禁里的既有读数不受影响）。
+        # 输入拼了 `g`：下层动作**条件在 `g` 上** ⟹ `g` 是状态的一部分，
+        # 不让 critic 看见它就得不出准确的 `V`。
+        self.value_head = (nn.Sequential(nn.Linear(d_model + G_DIM, d_model), nn.GELU(),
+                                         nn.Linear(d_model, 1))
+                           if with_value else None)
 
     # ── 掩码：`seg = (n_m, n_jobs, n_agv, n_ch, 1)` → 各 agent 读哪一段 ──
     @staticmethod
@@ -203,6 +216,8 @@ class HierarchicalPolicy(nn.Module):
             la=(None if la_ctx is None else self.la(z, mk["LA"], g, la_ctx)),
             ra_charge=self.ra_charge(z, mk["RA_charge"], g),
             ra_maint=self.ra_maint(z, mk["RA_maint"], g),
+            value=(None if self.value_head is None
+                   else self.value_head(torch.cat([pooled, g], dim=-1))),
         )
 
     # ── 偏置矩阵（报告里要逐列读"目标 j 抬高了哪些动作"）──

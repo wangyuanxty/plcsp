@@ -134,20 +134,25 @@ def logp_terms(head: HierarchicalPolicy, decisions: list[Decision],
     return torch.stack(out).sum()
 
 
-def logp_terms_batched(head: HierarchicalPolicy, decisions: list[Decision],
-                       kinds: tuple[str, ...]) -> torch.Tensor:
-    """`logp_terms` 的**批量**版：所有选中的决策**一次**前向。
+def batched_forward(head: HierarchicalPolicy, decisions: list[Decision],
+                    kinds: tuple[str, ...]):
+    """挑出 `kinds` 里的决策，**一次**前向 → `(PolicyOut, sel)`；空则 `(None, [])`。
 
-    ⚠️ **为什么能批**：`seg`（各段行数）由**实例 + 布局**决定，**在一次运行里恒定** ⟹
+    ⚠️ **为什么能批**：`seg`（各段行数）由**实例 + 布局**决定，**一条链里恒定** ⟹
     每条决策的 token 张量都是 `(N, F_MAX)`、**N 相同** ⟹ 可叠成 `(B, N, F_MAX)` 一次前向。
     这是 v1 `_encoder_forward_batched` 的同一招（本机实测批前向吞吐 ≈3.4×）。
 
-    ⚠️ **LA 的上下文**：这里给**每一条**都填 `la_ctx`（没有的填 0），于是 LA 头对每条都算。
-    对 PA/C/M 那几条算出来的 LA 分布**不用**（只取自己那个头的那一行）——**多算一点，换一次前向。**
+    ⚠️ **`seg` 恒定这件事由 `state_emb.build_tok` 保证**：`job_features` 恒输出 `ctx.n_jobs`
+    行，作业完工只改内容（`finished` 维）、**不改行数**。**将来若引入会变长的段，这里必须
+    当场报错**，不能静默按第一条的 `seg` 去算别人的 token。
+
+    ⚠️ **LA 的上下文**：给**每一条**都填 `la_ctx`（没有的填 0），LA 头于是对每条都算。
+    对 PA/C/M 那几条算出来的 LA 分布**不用**（只取自己那个头的那一行）——
+    **多算一点，换一次前向。**
     """
     sel = [d for d in decisions if d.kind in kinds]
     if not sel:
-        return torch.zeros((), requires_grad=True)
+        return None, []
     seg = sel[0].seg
     if any(d.seg != seg for d in sel):
         raise ValueError("同一批里的 `seg` 不一致 —— 批量前向的前提是段结构恒定")
@@ -156,8 +161,18 @@ def logp_terms_batched(head: HierarchicalPolicy, decisions: list[Decision],
     lc = torch.as_tensor(np.stack([
         d.la_ctx if d.la_ctx is not None else np.zeros(LA_CTX_DIM, dtype=np.float32)
         for d in sel]))
-    o = head(tok, seg, gb, la_ctx=lc, hard=True)
-    terms = []
+    return head(tok, seg, gb, la_ctx=lc, hard=True), sel
+
+
+def _logp_rows(o, sel: list[Decision]) -> list[torch.Tensor]:
+    """一次前向的输出 `o` → 按 `sel` 顺序逐条取 logp（**带梯度**）。
+
+    ⚠️ **顶层是 3 个**独立**的分档，不是一个 64 路的类别**（§10④"每维 4 档"）。
+    `action` 存的是压平下标 `b0*16 + b1*4 + b2` ⟹ 这里要**解回三档**再逐维取 logp。
+    （展平后当 64 路取 logp 会与 3 路各自的 logp **不是同一个数**，
+     `g_logits.view(-1)` 更只有 12 项 ⟹ 越界。实测踩过。）
+    """
+    terms: list[torch.Tensor] = []
     for i, d in enumerate(sel):
         if d.kind == "MA":
             b0, rem = divmod(int(d.action), G_BINS ** 2)
@@ -169,7 +184,45 @@ def logp_terms_batched(head: HierarchicalPolicy, decisions: list[Decision],
         if row is None:
             raise ValueError(f"决策 {d.kind} 重算时该头为 None")
         terms.append(torch.log_softmax(row[i], dim=-1)[d.action])
-    return torch.stack(terms).sum()
+    return terms
+
+
+def batched_terms(head: HierarchicalPolicy, decisions: list[Decision],
+                  kinds: tuple[str, ...], *, want_value: bool = False):
+    """**一次**前向 → `(逐决策 logp 向量 (n,), 逐决策 V 向量 (n,) 或 None)`。
+
+    `want_value=True` 时两个向量**同序**（都按 `batched_forward` 选出的 `sel`），
+    故 `−Σ_t Â_t·logp_t`（`Â = R − V`）可以直接逐元素算——**不必再前向一次**。
+
+    ⚠️ `want_value=True` 而 `head.value_head is None` 时**显式报错**，不静默返回 0
+    （静默的 0 会让"critic 没接上"变成一条无声的坏基线）。
+    """
+    o, sel = batched_forward(head, decisions, kinds)
+    if not sel:
+        return torch.zeros(0), None
+    lp = torch.stack(_logp_rows(o, sel))
+    if not want_value:
+        return lp, None
+    if o.value is None:
+        raise ValueError("这个 net 没建 critic 头 —— 构造时须给 "
+                         "`HierarchicalPolicy(with_value=True)`")
+    return lp, o.value[:, 0]
+
+
+def logp_terms_batched(head: HierarchicalPolicy, decisions: list[Decision],
+                       kinds: tuple[str, ...]) -> torch.Tensor:
+    """`logp_terms` 的**批量**版：所有选中的决策**一次**前向（见 `batched_forward`）。"""
+    lp, _ = batched_terms(head, decisions, kinds)
+    if lp.numel() == 0:
+        return torch.zeros((), requires_grad=True)
+    return lp.sum()
+
+
+def value_terms(head: HierarchicalPolicy, decisions: list[Decision],
+                kinds: tuple[str, ...]) -> torch.Tensor:
+    """逐决策的 `V(s)` —— **与 logp 共用同一次前向**（见 `batched_terms`）。只服务 Q1 的臂 A。"""
+    _, v = batched_terms(head, decisions, kinds, want_value=True)
+    return torch.zeros(0) if v is None else v
 
 
 def ma_logp_at(head: HierarchicalPolicy, d: Decision) -> torch.Tensor:
