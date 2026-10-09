@@ -37,7 +37,7 @@ from ..env.des import SimConfig, SimWorld, StepCounters
 from ..env.instances import Instance
 from ..env.layout import Layout
 from ..nn.features import NormContext
-from .agents import G_BINS, G_DIM, HierarchicalPolicy
+from .agents import G_BINS, G_DIM, LA_CTX_DIM, HierarchicalPolicy
 from .replay import run_branch, segment_return
 from .rollout import Decision, NetPolicy
 
@@ -127,6 +127,44 @@ def logp_terms(head: HierarchicalPolicy, decisions: list[Decision],
     if not out:
         return torch.zeros((), requires_grad=True)
     return torch.stack(out).sum()
+
+
+def logp_terms_batched(head: HierarchicalPolicy, decisions: list[Decision],
+                       kinds: tuple[str, ...]) -> torch.Tensor:
+    """`logp_terms` 的**批量**版：所有选中的决策**一次**前向。
+
+    ⚠️ **为什么能批**：`seg`（各段行数）由**实例 + 布局**决定，**在一次运行里恒定** ⟹
+    每条决策的 token 张量都是 `(N, F_MAX)`、**N 相同** ⟹ 可叠成 `(B, N, F_MAX)` 一次前向。
+    这是 v1 `_encoder_forward_batched` 的同一招（本机实测批前向吞吐 ≈3.4×）。
+
+    ⚠️ **LA 的上下文**：这里给**每一条**都填 `la_ctx`（没有的填 0），于是 LA 头对每条都算。
+    对 PA/C/M 那几条算出来的 LA 分布**不用**（只取自己那个头的那一行）——**多算一点，换一次前向。**
+    """
+    sel = [d for d in decisions if d.kind in kinds]
+    if not sel:
+        return torch.zeros((), requires_grad=True)
+    seg = sel[0].seg
+    if any(d.seg != seg for d in sel):
+        raise ValueError("同一批里的 `seg` 不一致 —— 批量前向的前提是段结构恒定")
+    tok = torch.as_tensor(np.stack([d.tok for d in sel]))
+    gb = torch.as_tensor([list(d.g_bins) for d in sel])
+    lc = torch.as_tensor(np.stack([
+        d.la_ctx if d.la_ctx is not None else np.zeros(LA_CTX_DIM, dtype=np.float32)
+        for d in sel]))
+    o = head(tok, seg, gb, la_ctx=lc, hard=True)
+    terms = []
+    for i, d in enumerate(sel):
+        if d.kind == "MA":
+            b0, rem = divmod(int(d.action), G_BINS ** 2)
+            b1, b2 = divmod(rem, G_BINS)
+            terms.append(sum(torch.log_softmax(o.g_logits[i, j], dim=-1)[b]
+                             for j, b in enumerate((b0, b1, b2))))
+            continue
+        row = {"PA": o.pa, "LA": o.la, "C": o.ra_charge, "M": o.ra_maint}[d.kind]
+        if row is None:
+            raise ValueError(f"决策 {d.kind} 重算时该头为 None")
+        terms.append(torch.log_softmax(row[i], dim=-1)[d.action])
+    return torch.stack(terms).sum()
 
 
 def ma_logp_at(head: HierarchicalPolicy, d: Decision) -> torch.Tensor:
@@ -219,7 +257,7 @@ def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
                          "energy": sg.energy_kwh, "twt": sg.twt})
         # ⚠️ **每条分支用自己的决策链**：目标相同、只有执行在变 ⟹ 组内只变执行（§4.3）。
         for a, br in zip(adv, runs):
-            loss = loss - float(a) * logp_terms(net, br.decisions, LOWER_KINDS)
+            loss = loss - float(a) * logp_terms_batched(net, br.decisions, LOWER_KINDS)
     return {"loss": loss, "segments": rows, "n_top": n_top, "kind": "B"}
 
 
