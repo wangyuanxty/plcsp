@@ -38,11 +38,13 @@ def _mk(name: str = "mk01"):
 def _drive(name="mk01", *, greedy=True, seed=0, dt_events=20, g_bins=None):
     inst, lay, g, dm, cfg, ctx, net = _mk(name)
     w = SimWorld(inst, lay, dm, cfg, graph=g)
-    p = NetPolicy(net, inst, lay, ctx, g_bins=g_bins, greedy=greedy, seed=seed)
+    # ⚠️ `g_bins` 给定时用 **`freeze_g`**（顶层**照常触发**、但不改 `g`）——
+    # 不是"把 `policy_ma` 传 None"：那样顶层一次都不发生，`stop_after_ma` 也就永远不触发。
+    p = NetPolicy(net, inst, lay, ctx, g_bins=g_bins, greedy=greedy, seed=seed,
+                  dt_events=dt_events, freeze_g=g_bins is not None)
     m = w.run_gated(seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
                     policy_c=p.policy_c, policy_m=p.policy_m,
-                    policy_ma=None if g_bins is not None else p.policy_ma,
-                    dt_events=dt_events)
+                    policy_ma=p.policy_ma, dt_events=dt_events)
     return m, p
 
 
@@ -128,8 +130,8 @@ def test_recorded_decisions_reproduce_their_own_logits():
 def test_fixed_g_conditions_the_lower_heads_and_skips_ma():
     """给定 `g_bins` ⟹ **条件在固定目标上**（阶段 B / 执行）：MA 不再被触发。"""
     m, p = _drive(g_bins=(3, 0, 3))
-    assert p.ma_reasons == [] and m["ma_decisions"] == 0
-    assert p.g_bins == (3, 0, 3)
+    assert m["ma_decisions"] > 0, "顶层**照常触发**（冻结的是 `g`，不是触发）"
+    assert p.g_bins == (3, 0, 3), "冻结 ⟹ `g` 全程不变"
     assert all(d.g_bins == (3, 0, 3) for d in p.rec.decisions if d.kind != "MA")
     assert not any(d.kind == "MA" for d in p.rec.decisions)
 
@@ -144,3 +146,59 @@ def test_recorder_is_optional_and_counts_by_kind():
     w.run_gated(seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
                 policy_c=p.policy_c, policy_m=p.policy_m, dt_events=0)
     assert p.rec is None, "record=False 时不该留决策链（省内存）"
+
+
+# ══════════════════ 步 5b 的机制层：重放前缀 ══════════════════
+
+@pytest.mark.unit
+def test_top_level_points_record_cumulative_counters():
+    """顶层每触发一次就记一条**累计读数**（§10③ 的段回报靠它取增量）。"""
+    m, p = _drive(greedy=True, dt_events=20)
+    assert len(p.ma_counters) == len(p.ma_reasons) == m["ma_decisions"]
+    assert p.ma_reasons[0] == "initial", "第一个顶层点必须在 t=0（否则开局那 ΔT 没目标管）"
+    c0, c1 = p.ma_counters[0], p.ma_counters[-1]
+    assert c0.now == 0.0 and c0.done_ops == 0 and c0.done_jobs == 0
+    assert c1.done_ops > c0.done_ops, "累计读数必须单调"
+    assert all(b.done_ops >= a.done_ops for a, b in zip(p.ma_counters, p.ma_counters[1:]))
+
+
+@pytest.mark.unit
+def test_replaying_the_prefix_lands_on_the_same_state():
+    """⚠️ **本步的核心性质**：从 t=0 **照已记录的动作回放**，必然回到同一个 `Z_t`。
+
+    这是"用重放代替分叉"（§13 #1）能成立的**唯一理由**。判据用**累计读数逐位相同** ——
+    它把"机台队列 · 工件位置 · 车辆状态 · 计划表"等一切压缩成一个可比的数。
+
+    ⚠️ 必须 `greedy=True`：**采样**下分支自己的随机流与 base 不同，动作会分岔，
+    那测的就不是"回放"而是"另一条链"。
+    """
+    from plcsp_v2.hrl.replay import run_branch
+
+    m, p = _drive(greedy=True, dt_events=20)
+    ma_idx = [i for i, d in enumerate(p.rec.decisions) if d.kind == "MA"]
+    assert len(ma_idx) >= 2, "本实例至少要两个顶层点才测得到"
+    # 前缀 = base 从 0 到**第 2 个顶层点之前**的全部决策（含第 1 个 MA 决策）
+    prefix = [d.action for d in p.rec.decisions[:ma_idx[1]]]
+    g_at_z1 = p.rec.decisions[ma_idx[1]].g_bins
+
+    inst, lay, g, dm, cfg, ctx, net = _mk()
+    torch.manual_seed(0)
+    net2 = HierarchicalPolicy(n_chargers=len(lay.chargers)).eval()
+    net2.load_state_dict(net.state_dict())
+    inner = NetPolicy(net2, inst, lay, ctx, g_bins=g_at_z1, greedy=True, seed=0,
+                      dt_events=20, freeze_g=True)
+    metrics, at_z1 = run_branch(_world(inst, lay, g, dm, cfg), prefix, inner,
+                                switch_after_ma=1, stop_after_ma=2)
+
+    base_at_z1 = p.ma_counters[1]
+    assert metrics["ma_decisions"] == 2
+    # ⚠️ 比的是**累计读数**（两处同口径），不是 `metrics["energy"]`（那个按 makespan 算）
+    assert at_z1.now == pytest.approx(base_at_z1.now)
+    assert at_z1.done_ops == base_at_z1.done_ops
+    assert at_z1.done_jobs == base_at_z1.done_jobs
+    assert at_z1.energy_kwh == pytest.approx(base_at_z1.energy_kwh)
+    assert at_z1.twt == pytest.approx(base_at_z1.twt)
+
+
+def _world(inst, lay, g, dm, cfg):
+    return SimWorld(inst, lay, dm, cfg, graph=g)

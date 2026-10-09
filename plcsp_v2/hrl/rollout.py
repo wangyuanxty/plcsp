@@ -78,9 +78,18 @@ class NetPolicy:
 
     def __init__(self, net: HierarchicalPolicy, inst, layout, ctx: NormContext,
                  *, g_bins: tuple[int, int, int] | None = None, greedy: bool = False,
-                 seed: int = 0, record: bool = True):
+                 seed: int = 0, record: bool = True, dt_events: int = 20,
+                 freeze_g: bool = False):
         self.net, self.inst, self.layout, self.ctx = net, inst, layout, ctx
         self.greedy = bool(greedy)
+        # 顶层的定时器步长（§10②）。**存在策略对象上**：`run_gated` 与
+        # `hrl.replay.run_branch` 都从它取，避免"两处各写一个 ΔT"。
+        self.dt_events = int(dt_events)
+        # ⚠️ **`freeze_g`**：顶层**照常被触发**（`ma_decisions` 照增、`stop_after_ma` 照能用，
+        # 因为停表靠的就是这个计数），**但不重新采 `g`** —— `g` 冻结在构造时给的值上。
+        # 为什么需要它：设计 §4.3 的"条件在**固定的** `g\*`"要的是"顶层不再决策"，
+        # 而停表/分段要的是"顶层**照常发生**"。**两件事分开** ⟹ 这个开关。
+        self.freeze_g = bool(freeze_g)
         self.rec = Recorder() if record else None
         self.gen = torch.Generator().manual_seed(int(seed))
         # 当前生效的目标：给定时 = **条件在固定 `g`**（阶段 B / 执行）；`None` = 由 MA 现采
@@ -88,6 +97,8 @@ class NetPolicy:
                                                     else (int(g_bins[0]), int(g_bins[1]),
                                                           int(g_bins[2])))
         self.ma_reasons: list[str] = []
+        # 每个顶层点的**累计读数**（与 `ma_reasons` 同长、同序）——段回报取增量用
+        self.ma_counters: list = []
 
     # ── 内部：一次前向（no_grad，只为采样）──
     def _forward(self, snap: Snapshot, la_ctx: np.ndarray | None = None):
@@ -114,9 +125,17 @@ class NetPolicy:
         return a
 
     # ── 顶层（MA）：采 `g` ──
-    def policy_ma(self, snap: Snapshot, reason: str) -> tuple[int, int, int]:
-        """采一组 `g`（3 维各 4 档）并**就地生效**（下层下一次决策就用它）。"""
+    def policy_ma(self, snap: Snapshot, reason: str,
+                  counters=None) -> tuple[int, int, int]:
+        """采一组 `g`（3 维各 4 档）并**就地生效**（下层下一次决策就用它）。
+
+        `counters`（`env.des.StepCounters`）= 该顶层点的**累计读数**；本方法把它连同
+        `g` 一起记下 —— 段回报靠"两条累计读数相减"（见 `hrl/replay.py`）。
+        """
         self.ma_reasons.append(str(reason))
+        self.ma_counters.append(counters)
+        if self.freeze_g and self.g_bins is not None:
+            return self.g_bins                      # 冻结：顶层照常触发，但不改 `g`
         out, tok, seg = self._forward(snap)
         gl = out.g_logits[0]                      # (3, 4)
         bins, logps = [], []

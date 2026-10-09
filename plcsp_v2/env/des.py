@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple
 import numpy as np
 import simpy
 from ..energy import (AGV_EMPTY_KW, AGV_IDLE_KW, AGV_LOADED_KW,
@@ -58,6 +58,21 @@ PA_TIE_SEED = 2000
 DISTURBANCE = -1
 """事件流的**扰动哨兵**（`frm_idx` 位）——不是工序完工，而是"开一个决策点"。
 原文的决策点定义：*"the time when an operation is assigned **or an AGV breakdown occurs**"*。"""
+
+class StepCounters(NamedTuple):
+    """**顶层决策点上的累计读数**（设计 §10③ 的段回报要的就是它的**增量**）。
+
+    ⚠️ **只在顶层点算**（每局 ~3–4 次）⟹ 能耗那一步的开销可忽略。
+    ⚠️ `makespan_so_far` 取 `env.now`——**不是真 makespan**（中途无定义，§10③ 明确不用它）；
+    它只作诊断，段回报里不出现。
+    """
+
+    now: float
+    done_ops: int
+    done_jobs: int
+    energy_kwh: float
+    twt: float
+
 
 DISTURBANCE_MACHINE = -2
 """**机障 ③** 的扰动哨兵。设计 §10⑤：顶层 MA 的触发 = **定时器 + 机障 ③ + AGV 故障 ⑨** ——
@@ -1354,6 +1369,20 @@ class SimWorld:
         """
         return self.agvs[0].leg_min(src, dst)
 
+    def _step_counters(self, stats: dict) -> "StepCounters":
+        """顶层决策点上的**累计读数**（段回报取增量用）。见 `StepCounters`。
+
+        ⚠️ `_tardy` 只把 `plans` 当**作业号的来源**用（`for j in plans` / `dict.fromkeys`），
+        故这里不必拿真的计划表 —— 用全体作业号即可。**别改成传 `None`**（会 TypeError）。
+        """
+        now = float(self.env.now)
+        er = self._energy_report(stats, max(now, 1e-9))
+        due = self._due_map()
+        twt = self._tardy(dict.fromkeys(range(self.inst.n_jobs)), self.completes, due)[1]
+        return StepCounters(now=now, done_ops=int(stats.get("ops_done", 0)),
+                            done_jobs=len(self.completes),
+                            energy_kwh=float(er.get("total_kwh", 0.0)), twt=float(twt))
+
     def _node_of(self, endpoint: int) -> int:
         """端点号 → 通道节点（机台 `0..m-1`、装卸站 = `m`）。"""
         e = int(endpoint)
@@ -1814,7 +1843,8 @@ class SimWorld:
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
                   policy_m=None, policy_c=None, policy_pa=None,
-                  policy_ma=None, dt_events: int = 0) -> dict:
+                  policy_ma=None, dt_events: int = 0,
+                  stop_after_ma: int = 0) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1971,11 +2001,13 @@ class SimWorld:
         jkeys = list(plans.keys())
         for j in jkeys:                         # 全量注入（同 run()：投放走装卸站 → 正常派车路径）
             env.process(self._release(env, events_q, (lu_idx, j, -1, OpLite(0.0), False)))
+        stop_ev = env.event()                   # 跑到第 k 个顶层点就停（§4.2 的"跑 ΔT"）
         env.process(self._transporter(env, events_q, tasks_in, plans, entities, stats, lu_idx,
                                       bound=True, policy_l=policy_l,
                                       policy_s=policy_s, online_s=online_s,
                                       policy_pa=policy_pa,
-                                      policy_ma=policy_ma, dt_events=dt_events))
+                                      policy_ma=policy_ma, dt_events=dt_events,
+                                      stop_after_ma=stop_after_ma, stop_event=stop_ev))
         # horizon 的工时上界：**按最短候选**估（在线时 `plans` 是决策日志、读不到时长；
         # 离线且用默认贪婪计划时该式 = 各工序所选时长之和，与旧式逐位相同）。
         # 实际选择可能更长，靠下面的 6× 余量兜底——掐表时 horizon_hit 如实置位。
@@ -1983,7 +2015,7 @@ class SimWorld:
         horizon = float(total_work * 6 + 500)   # 同 run()：门控掐表护栏（原 3× 截断 9/10 假死）
         # 停表条件同 run()：`done | timeout(horizon)`（末件到站即停，护栏只兜真死锁）。
         # ⚠️ 两处调用点的停表形状**必须一致**——只改一处 = 另一条路径的计数继续按护栏虚增。
-        env.run(until=done | env.timeout(horizon))
+        env.run(until=done | env.timeout(horizon) | stop_ev)
         stats["horizon_hit"] = len(completes) < inst.n_jobs   # 同 run()（原：run_gated 漏设旗标）
         due = self._due(plans)
         makespan = (max(completes.values()) if completes else env.now)
@@ -2221,7 +2253,8 @@ class SimWorld:
     def _transporter(self, env, events_q, tasks_in, plans, entities, stats, lu_idx: int,
                      bound: bool = False, agv_phi: list[int] | None = None,
                      policy_l=None, policy_s=None, online_s: bool = False,
-                     policy_pa=None, policy_ma=None, dt_events: int = 0):
+                     policy_pa=None, policy_ma=None, dt_events: int = 0,
+                     stop_after_ma: int = 0, stop_event=None):
         """机台完成事件 → 生成搬运任务；`task_i` = 本函数生成序。
 
         **三类事件**（端点号：机台 `0..m-1`、装卸站 = `lu_idx` = `m`）：
@@ -2296,14 +2329,27 @@ class SimWorld:
             # `dt_events = 0` ⟹ 定时器关（只有扰动触发）。
             if policy_ma is not None:
                 od = int(stats.get("ops_done", 0))
+                # ⚠️ **第一次也触发**（`ma_decisions == 0`）：设计 §4.2 说"顶层**每 ΔT** 输出 g"
+                # ⟹ 第一段（t=0 起）也得有个 `g` 管着，否则开局那 ΔT 个完工事件没有目标。
+                first = int(stats.get("ma_decisions", 0)) == 0
                 timer_due = (dt_events > 0 and od > 0 and od % dt_events == 0
                              and od != last_ma_ops)
-                if frm_idx < 0 or timer_due:
+                if frm_idx < 0 or timer_due or first:
                     if timer_due:
                         last_ma_ops = od
                     stats["ma_decisions"] = stats.get("ma_decisions", 0) + 1
                     policy_ma(self.snapshot(),
-                              "disturbance" if frm_idx < 0 else "timer")
+                              "initial" if first else
+                              ("disturbance" if frm_idx < 0 else "timer"),
+                              self._step_counters(stats))
+            # ── **停表**：跑到第 `stop_after_ma` 个顶层点就停（§4.2 的"跑 ΔT"靠它）──
+            # ⚠️ 停表**不保留状态**（SimPy 帧不可复制，§13 #1 属实）⟹ 分叉靠**重放前缀**：
+            # 从 t=0 用**已记录的动作**重跑到这里、再让新目标接下去。停表只用来**读读数增量**。
+            if stop_event is not None and stop_after_ma > 0 \
+                    and int(stats.get("ma_decisions", 0)) >= stop_after_ma \
+                    and not stop_event.triggered:
+                stop_event.succeed()
+                return
             if policy_pa is not None:
                 # ── 决策点：**恰派一件**（原文："the decision point t is defined as the time
                 #    when an operation is assigned"）──
