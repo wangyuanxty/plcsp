@@ -148,15 +148,32 @@ def main(argv: list[str] | None = None) -> int:
             arr = np.array(pts)
             rho = {f"{OBJ[i]}-{OBJ[j]}": round(_spearman(arr[:, i], arr[:, j]), 3)
                    for i in range(3) for j in range(i + 1, 3)}
+            # ⚠️ **先判"退化"再报前沿**：所有点相同时 `pareto_front` 会返回**全部**点
+            # （没有谁被谁支配），报成"64/64 非支配"是**误导** —— 那不是一条前沿，
+            # 是一个点。**实测踩过**：`g` 无影响时 64 个档逐位相同。
+            spread = float((arr.max(axis=0) - arr.min(axis=0)).max())
+            degenerate = spread <= 1e-9
             rec({"kind": "pareto", "ckpt": Path(path).name, "arm": ck["arm"],
                  "train_seed": ck["seed"], "n_eval": a.n_eval, "n_g": len(combos),
+                 "degenerate": degenerate, "max_spread": spread,
                  "points": meta, "front_idx": front, "spearman": rho})
-            print(f"\n  ⟹ **非支配点 {len(front)}/{len(pts)}**："
-                  f"{[meta[i]['g'] for i in front]}")
-            print(f"  ⟹ 三目标两两 Spearman ρ：{rho}")
-            print("     ⚠️ v1 的 `energy` 与 `makespan` ρ=0.978（近秩等价，前沿退化成两点）。"
-                  "**这里若也接近 1，就是同一件事重演，如实写。**\n")
-            rows.append({"ckpt": Path(path).name, "n_front": len(front), "rho": rho})
+            if degenerate:
+                print(f"\n  ⟹ ⚠️⚠️ **退化成一点**：{len(pts)} 个 `g` 档给出**逐位相同**的三目标"
+                      f"（极差 {spread:.3e}）。\n"
+                      "     **这不是「前沿只有一个点」，是「`g` 对动作完全没影响」。**\n"
+                      "     设计 §95：`B` 零初始化，`g` 影响动作是**学出来的**。\n"
+                      "     若训练跑完了还是这样，去看 `B` 的量级（`d6_bmat`）——"
+                      "**多半是它太小**（见 progress-log §124）。\n"
+                      "     ⚠️ 此处的 ρ=1.0 是**退化造成的**，**不是** v1 那条"
+                      "「能耗与 makespan 近秩等价」（§52.9.3）——别混为一谈。\n")
+            else:
+                print(f"\n  ⟹ **非支配点 {len(front)}/{len(pts)}**："
+                      f"{[meta[i]['g'] for i in front]}")
+                print(f"  ⟹ 三目标两两 Spearman ρ：{rho}")
+                print("     ⚠️ v1 的 `energy` 与 `makespan` ρ=0.978（近秩等价，前沿退化成两点）。"
+                      "**这里若也接近 1，就是同一件事重演，如实写。**\n")
+            rows.append({"ckpt": Path(path).name, "n_front": len(front),
+                         "degenerate": degenerate, "rho": rho})
 
     print(f"写出：{out}", file=sys.stderr)
     return 0
