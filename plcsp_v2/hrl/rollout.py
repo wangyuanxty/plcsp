@@ -15,7 +15,7 @@
 | **MA** | 定时器（每 `dt_events` 个完工）+ 扰动（③ 机障 / ⑨ AGV 故障） | 3 维各 4 档 | `(B,3,4)` |
 | **PA** | 一道工序被分配的时刻（= transporter 的每个事件；**每次恰派一件**） | 12 条复合规则选 1 | `(B,12)` |
 | **LA** | **两个点**（见下） | 3 条派车规则选 1 | `(B,3)` |
-| **C / M** | RA 的两个头（AGV 待命 / 机台完工且下一件未上机） | `1+n_桩` / 2 | —— |
+| **C / M** | ~~RA 的两个头~~ ⟹ **⑪ 去后只剩 M**（机台完工且下一件未上机） | `1+n_桩` / 2 | —— |
 
 ⚠️ **LA 有**两个**触发点**（2026-10-09 核清；此前本表只写了一个，且"与 PA 同一决策点"与实测不符）：
 
@@ -59,7 +59,7 @@ class Decision(NamedTuple):
     换成另一个状态（决策与 logp 不再对应）。与 v1 同名同义，**只是不要 `cand_feat`**（见模块 docstring）。
     """
 
-    kind: str                       # "MA" | "PA" | "LA" | "C" | "M"
+    kind: str                       # "MA" | "PA" | "LA" | "M"（⑪ 去后 "C" 不再出现）
     tok: np.ndarray                 # 当时的 token 特征 (N, F_MAX)（**恒为 numpy / 主机内存**）
     seg: tuple[int, ...]            # 当时的段长
     g_bins: tuple[int, int, int]    # 当时生效的 `g`（MA 自己那条存它采到的档）
@@ -211,12 +211,8 @@ class NetPolicy:
                          float(np.clip((view.ready_at - view.now) / m, -2.0, 2.0)),
                          float(np.clip(view.oi / 8.0, -1.0, 4.0))], dtype=np.float32)
 
-    # ── RA 的两个头 ──
-    def policy_c(self, snap: Snapshot, aid: int, cands):
-        del aid
-        out, tok, seg = self._forward(snap)
-        return self._pick(out.ra_charge, "C", tok, seg)      # 与 `charge_cands` 同序
-
+    # ── RA 的头（**⑪ 去后只剩保养一个**）──
+    # ⚠️ **2026-10-10：⑪ 去后 `policy_c`（充电头）已删** —— 车队无电量、无充电桩。
     def policy_m(self, snap: Snapshot, mach: int, cands):
         del mach
         out, tok, seg = self._forward(snap)

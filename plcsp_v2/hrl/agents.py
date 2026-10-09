@@ -82,8 +82,8 @@ class PolicyOut(NamedTuple):
     g: torch.Tensor                 # (B, 3) —— 连续目标向量（`g_to_vec(g_bins)`）
     pa: torch.Tensor                # (B, 12) —— PA 的 12 条复合规则
     la: torch.Tensor | None         # (B, 3)；**`la_ctx` 未给时为 `None`**（见 `forward`）
-    ra_charge: torch.Tensor         # (B, 1 + n_chargers) —— 0 = 不去充
     ra_maint: torch.Tensor          # (B, 2) —— 0 = 生产、1 = 保养
+    # ⚠️ **2026-10-10：⑪ 去后 `ra_charge` 头（`(B, 1+n_chargers)`）已删**（无充电桩）。
     value: torch.Tensor | None = None
     """(B, 1) —— **critic 的 `V(s)`**。仅在 `HierarchicalPolicy(with_value=True)` 时非空。
 
@@ -142,12 +142,13 @@ class MAHead(nn.Module):
 
 
 class HierarchicalPolicy(nn.Module):
-    """编码器 + 四个 agent 的头（**一个 encode、四次读**）。
+    """编码器 + 三个 agent 的头（**一个 encode、多次读**）。
 
-    `n_chargers` 决定充电头的宽度（`1 + n_chargers`）——它随布局变，故**构造时必须给**。
+    ⚠️ **2026-10-10：构造签名去掉 `n_chargers`** —— 充电头删了，本网络**不再随布局变宽度**
+    （唯一的变宽头就是它）。**故 `HierarchicalPolicy()` 无必需参数。**
     """
 
-    def __init__(self, n_chargers: int, d_model: int = 128, n_heads: int = 4,
+    def __init__(self, d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 4, feat_dim: int = F_MAX, n_bins: int = G_BINS,
                  la_ctx_dim: int = LA_CTX_DIM, with_value: bool = False):
         super().__init__()
@@ -157,7 +158,6 @@ class HierarchicalPolicy(nn.Module):
         self.ma = MAHead(d_model, n_bins)
         self.pa = _MaskedScoreHead(d_model, N_PA_RULES)
         self.la = _MaskedScoreHead(d_model, N_LA_RULES, ctx_dim=la_ctx_dim)
-        self.ra_charge = _MaskedScoreHead(d_model, 1 + int(n_chargers))
         self.ra_maint = _MaskedScoreHead(d_model, 2)
         # **critic 的 `V(s)`**（只服务 Q1 的臂 A，设计 §12.2）。
         # ⚠️ **默认不建**：`with_value=False` 时本属性是 `None` ⟹ 不产生任何参数 ⟹
@@ -168,21 +168,23 @@ class HierarchicalPolicy(nn.Module):
                                          nn.Linear(d_model, 1))
                            if with_value else None)
 
-    # ── 掩码：`seg = (n_m, n_jobs, n_agv, n_ch, 1)` → 各 agent 读哪一段 ──
+    # ── 掩码：`seg = (n_m, n_jobs, n_agv, 1)` → 各 agent 读哪一段 ──
     @staticmethod
     def masks(seg: tuple[int, ...]) -> dict[str, tuple[int, int]]:
-        """逐 agent 的 token 行区间（半开）。**唯一的掩码定义处**——别处不得再算一遍。"""
-        n_m, n_jobs, n_agv, n_ch = (int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
+        """逐 agent 的 token 行区间（半开）。**唯一的掩码定义处**——别处不得再算一遍。
+
+        ⚠️ **2026-10-10：⑪ 去后 `seg` 退回四元**（C 段没了）⟹ `"C"` 与 `"RA_charge"`
+        两个区间一并删。`RA_maint` 照旧读 M 段。
+        """
+        n_m, n_jobs, n_agv = (int(seg[0]), int(seg[1]), int(seg[2]))
         v_lo = n_m + n_jobs
         c_lo = v_lo + n_agv
         return {
             "M": (0, n_m),
             "B": (n_m, v_lo),
             "V": (v_lo, c_lo),
-            "C": (c_lo, c_lo + n_ch),
             "PA": (0, v_lo),                                      # M ∪ B
             "LA": (v_lo, c_lo),                                   # V（+ 任务上下文，见 `ctx_dim`）
-            "RA_charge": (v_lo, c_lo + n_ch),                     # **V ∪ C**（2026-10-09 补 C）
             "RA_maint": (0, n_m),                                 # M
         }
 
@@ -214,7 +216,6 @@ class HierarchicalPolicy(nn.Module):
             g_logits=g_logits, g_bins=g_bins, g=g,
             pa=self.pa(z, mk["PA"], g),
             la=(None if la_ctx is None else self.la(z, mk["LA"], g, la_ctx)),
-            ra_charge=self.ra_charge(z, mk["RA_charge"], g),
             ra_maint=self.ra_maint(z, mk["RA_maint"], g),
             value=(None if self.value_head is None
                    else self.value_head(torch.cat([pooled, g], dim=-1))),
@@ -222,8 +223,11 @@ class HierarchicalPolicy(nn.Module):
 
     # ── 偏置矩阵（报告里要逐列读"目标 j 抬高了哪些动作"）──
     def b_matrices(self) -> dict[str, torch.Tensor]:
-        """四个 `B` 矩阵的**当前值**（只读副本）。报表用：`B_PA[i, j]` = 目标 j 对规则 i 的偏置。"""
+        """**三个** `B` 矩阵的当前值（只读副本）。
+
+        ⚠️ **2026-10-10：⑪ 去后由四个变三个** —— `RA_charge` 的 `B` 随充电头一并删。
+        报表用：`B_PA[i, j]` = 目标 j 对规则 i 的偏置。
+        """
         return {"PA": self.pa.b.detach().clone(),
                 "LA": self.la.b.detach().clone(),
-                "RA_charge": self.ra_charge.b.detach().clone(),
                 "RA_maint": self.ra_maint.b.detach().clone()}

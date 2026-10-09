@@ -45,6 +45,7 @@ import numpy as np
 import torch
 
 from .env import layout as layout_mod
+from .env.constraints import ConstraintConfig
 from .env.corridors import build_corridor_graph, dock_distance_matrix
 from .env.des import SimConfig, reference_makespan, scaled_agv_mtbf
 from .env.instances import load_mk
@@ -66,8 +67,9 @@ TARGET_FAILURES = 4.0
 
 def build(seed: int, *, tau: float | None = None, disturb: bool = False,
           n_agv: int = 3, with_value: bool = False, device: str = "cpu",
-          instance: str = "mk01", soc0: float = 1.0, pm_interval: float | None = None,
-          target_failures: float | None = None, agv_n_failures: int = 0):
+          instance: str = "mk01", pm_interval: float | None = None,
+          target_failures: float | None = None, agv_n_failures: int = 0,
+          finite_buffer: bool = False):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
@@ -76,13 +78,12 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     `disturb=True`：⑨ 按 `TARGET_FAILURES` 激活（只用于**最终评测**，不用于训练）。
     `device`：`"cpu"`（默认）/ `"cuda"`。⚠️ **两臂必须同设备**。
 
-    ══ 三条"让约束真的触发"的开关（见 progress-log §110–§112）══
-    - `soc0`：**初始荷电率**（`AgvSpec.soc0`）。满电出发时 ⑪ 在短实例上永不触发；
-      **MK01 需要 ≤ 0.25**。默认 1.0（逐位不变）。
+    ══ 两条"让约束真的触发"的开关（见 progress-log §110–§112）══
     - `pm_interval`：⑫ 保养间隔（主轴分钟）。默认 120；**MK01 一局只有 ~76 min ⟹ 永不触发**，
       **dev 档用 30**。
     - `target_failures`：⑨ 按**每局期望故障次数**反推 `agv_mtbf`（`scaled_agv_mtbf`）。
       **对位论文 Shi 2025 就是按次数注入（每实例 1–8 次），不设 MTBF** ⟹ 比固定 480 min 有依据。
+    ⚠️ **2026-10-10：⑪ 充电机制删除 ⟹ `soc0` 开关一并删**（车队无电量）。
     """
     torch.manual_seed(seed)
     inst = load_mk(instance)
@@ -107,16 +108,17 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     if over:
         cfg = dataclasses.replace(cfg, **over)
     lay = layout_mod.sample_layout(inst.n_machines, seed=seed, n_agv=cfg.n_agv)
-    if soc0 != 1.0:
-        lay = dataclasses.replace(lay, agvs=[dataclasses.replace(a, soc0=soc0)
-                                             for a in lay.agvs])
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
-    ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
+    # ② 有限缓冲：**约束对象要同时给仿真与特征层**（两份不同源 = 假信号）。
+    # `None` = 全默认档（② 关、其余开）⟹ 与改动前逐位相同。
+    cons = ConstraintConfig(finite_buffer=True) if finite_buffer else None
+    ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg, constraints=cons)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
-    net = HierarchicalPolicy(n_chargers=len(lay.chargers), with_value=with_value)
+    # ⚠️ **2026-10-10：⑪ 去后构造网络不再要 `n_chargers`**（充电头是唯一随布局变宽的头）。
+    net = HierarchicalPolicy(with_value=with_value)
     # ⚠️ **设备跟随策略**（`rollout.net_device`）：搬一次，之后 rollout/重算自己按参数所在设备走。
-    return Spec(inst, lay, g, dm, cfg, ctx, w), net.to(device)
+    return Spec(inst, lay, g, dm, cfg, ctx, w, cons), net.to(device)
 
 
 def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
@@ -137,16 +139,22 @@ def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
             "R": float(np.mean([x.R for x in runs]))}
 
 
-CONSTRAINT_KEYS = ("fail_events", "tardy_twt", "agv_fail_events", "charge_events", "pm_events")
-"""五条约束的触发计数（③机障 · ⑧拖期 · ⑨AGV故障 · ⑪充电 · ⑫保养）。"""
+CONSTRAINT_KEYS = ("fail_events", "tardy_twt", "agv_fail_events",
+                   "buffer_block_min", "pm_events")
+"""**五条约束**的触发计数（③机障 · ⑧拖期 · ⑨AGV故障 · ②有限缓冲 · ⑫保养）。
+
+⚠️ **2026-10-10：⑪ 充电删除 ⟹ `charge_events` 移出本表**，`buffer_block_min` 移入 ——
+本表的条目**与 `ConstraintConfig` 的五个开关一一对应**，不是历史编号的搬运。
+"""
 
 
 def constraint_counts(spec: Spec) -> dict:
     """**规则档**（不给任何策略）跑一局，回报五条约束各自的触发计数。
 
-    ⚠️ **必须用规则档**（§115.3）：策略档下 `charge_events` / `pm_events` 数的是
-    **"策略多爱用这个动作"**（随机初始化的网会乱充、乱保养，实测某布局 67 次），
+    ⚠️ **必须用规则档**（§115.3）：策略档下 `pm_events` 数的是
+    **"策略多爱用这个动作"**（随机初始化的网会乱保养，实测某布局 67 次），
     与**"约束是否 binding"是两回事**。规则档才是"约束按设计触发"的口径。
+    （⑪ 充电曾是本条最刺眼的例子；它已整条删除。）
 
     ⚠️ 它**另外跑一局仿真**（不带策略 ⟹ 很便宜，§99 实测 ~0.02–2 s）。
     为什么值得：**"跑通了但约束一次都没触发"是看不出来的** —— 那正是这几轮反复踩的坑
@@ -223,14 +231,13 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
     if save_dir:
         # ⚠️ **必须存盘**：不然训好的策略丢了 ⟹ 后面要"读出 `B` 矩阵"（v2 实验计划 D6）、
         # 要"同策略在扰动环境里重评"（H 敏感性）全都做不了。§103.5 就是这么发现缺口的。
-        # 连同**重建网络要的全部元信息**一起存（`n_chargers` / `with_value` / 配置），
+        # 连同**重建网络要的全部元信息**一起存（`with_value` / 配置），
         # 否则拿到 `.pt` 也重建不出同构的网。
         p = Path(save_dir) / f"{arm}_s{seed}.pt"
         p.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
                     "arm": arm, "seed": seed, "steps": steps, "n": n,
                     "dt_events": dt_events, "device_trained_on": device,
-                    "n_chargers": len(spec.layout.chargers),
                     "with_value": arm in ("A", "A2"),
                     "tau": spec.cfg.tau}, p)
         rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
@@ -257,10 +264,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None,
                     help="交期 τ；None = 查逐实例标定表（10/10 可用）")
-    ap.add_argument("--soc0", type=float, default=1.0,
-                    help="AGV 初始荷电率（1.0 = 满电，逐位不变）。MK01 要 ⑪ 触发需 ≤ 0.25")
     ap.add_argument("--pm-interval", type=float, default=None,
                     help="⑫ 保养间隔（主轴分钟）。默认 120；dev 档用 30（MK01 一局只 76 min）")
+    ap.add_argument("--finite-buffer", action="store_true",
+                    help="② 开有限缓冲（默认关）。⚠️ 开时**改动力学**：投递撞上满缓冲会让步"
+                         "重试，PA 的候选机台也会滤掉已满的（见 progress-log §118）")
     ap.add_argument("--agv-n-failures", type=int, default=0,
                     help="⑨ 按次数注入（0 = 关，用 agv_mtbf 泊松流）。照 Shi 2025 口径")
     ap.add_argument("--target-failures", type=float, default=None,
@@ -310,10 +318,11 @@ def main(argv: list[str] | None = None) -> int:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         device=a.device, workers=a.workers, save_dir=a.save_dir,
-                        env={"instance": a.instance, "tau": a.tau, "soc0": a.soc0,
+                        env={"instance": a.instance, "tau": a.tau,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
-                             "agv_n_failures": a.agv_n_failures})
+                             "agv_n_failures": a.agv_n_failures,
+                             "finite_buffer": a.finite_buffer})
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 

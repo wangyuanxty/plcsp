@@ -57,12 +57,13 @@ VARIANTS = ("free", "fixed_000", "fixed_111", "fixed_333", "b_zero")
 
 
 def zero_b(net: HierarchicalPolicy) -> None:
-    """把四个 `B` 矩阵归零 —— **`g` 与下层动作彻底断开**（设计 §3 的注入项）。
+    """把**三个** `B` 矩阵归零 —— **`g` 与下层动作彻底断开**（设计 §3 的注入项）。
 
+    ⚠️ **2026-10-10：⑪ 去后由四个变三个**（`ra_charge` 的 `B` 随充电头一并删）。
     ⚠️ **原地改**，调用方要自己负责恢复（本脚本用 `deepcopy`）。
     """
     with torch.no_grad():
-        for head in (net.pa, net.la, net.ra_charge, net.ra_maint):
+        for head in (net.pa, net.la, net.ra_maint):
             head.b.zero_()
 
 
@@ -78,7 +79,7 @@ def _run_one_chain(net: HierarchicalPolicy, spec: Spec, *, variant: str, seed: i
                   seed=seed, dt_events=dt_events, freeze_g=freeze)
     p.world = spec.world()                                        # type: ignore[attr-defined]
     m = p.world.run_gated(seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,  # type: ignore[attr-defined]
-                          policy_c=p.policy_c, policy_m=p.policy_m, policy_ma=p.policy_ma,
+                          policy_m=p.policy_m, policy_ma=p.policy_ma,
                           dt_events=dt_events)
     bins = [tuple(int(x) for x in d.g_bins) for d in p.rec.decisions if d.kind == "MA"]
     return objective_vector(m), bins
@@ -123,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     for path in a.ckpt:
         ck = torch.load(path, weights_only=False)
         spec, _ = build(int(ck["seed"]))          # ⚠️ 同 seed ⟹ 同布局/同归一化
-        net = HierarchicalPolicy(n_chargers=ck["n_chargers"], with_value=ck["with_value"])
+        # ⚠️ **2026-10-10：⑪ 去后不再有 `n_chargers`** —— 网络不随布局变宽。
+        net = HierarchicalPolicy(with_value=ck["with_value"])
         net.load_state_dict(ck["state_dict"])
         print(f"\n=== {Path(path).name}（arm={ck['arm']} seed={ck['seed']} "
               f"steps={ck['steps']}）===")

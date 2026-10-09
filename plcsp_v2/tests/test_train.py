@@ -3,6 +3,10 @@
 
 ⚠️ 这一步**慢**（重放前缀 × 组大小）—— 测试用 `dt_events=50` 把顶层点压到 2–3 个，
 **不是**设计值 §10② 的 20。设计值的代价见模块末的实测记录。
+
+⚠️ **2026-10-10：⑪ 充电机制整条删除** ⟹ 本文件里所有
+`HierarchicalPolicy(n_chargers=len(...chargers))` 一律改成 `HierarchicalPolicy()`
+（`Layout.chargers` 与 `n_chargers` 参数都不存在了）。**测试本身一条没删**。
 """
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ def _spec(tau: float = 1.0):
     dm = dock_distance_matrix(g)
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
-    net = HierarchicalPolicy(n_chargers=len(lay.chargers))
+    net = HierarchicalPolicy()
     return Spec(inst, lay, g, dm, cfg, ctx, w), net
 
 
@@ -106,7 +110,7 @@ def test_segment_pool_matches_the_sequential_path():
     """
     spec, net = _spec()
     torch.manual_seed(0)
-    base_net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
+    base_net = HierarchicalPolicy()
     n_seq = copy.deepcopy(base_net)
     seq = train_step(n_seq, spec, None, M=2, G=2, seed=0, dt_events=DT)
     n_par = copy.deepcopy(base_net)
@@ -122,7 +126,7 @@ def test_segment_pool_matches_the_sequential_path():
 def test_segment_pool_refuses_one_worker():
     """⚠️ **先查后跑**：1 个进程没有意义，直接报错。"""
     spec, _ = _spec()
-    net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
+    net = HierarchicalPolicy()
     with pytest.raises(ValueError, match="n_workers"):
         SegmentPool(net, spec, n_workers=1, dt_events=DT)
 

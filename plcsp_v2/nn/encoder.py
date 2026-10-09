@@ -31,14 +31,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .cuda_graph import CudaGraphForward
-from .features import F_B, F_C, F_G, F_M, F_MAX, F_V, SEG_SLICE
+from .features import F_B, F_G, F_M, F_MAX, F_V, SEG_SLICE
 
-_SEG_KEYS = ("M", "B", "V", "C", "G")     # 与 seg 元组的段序一一对应（不可改动）
-_SEG_DIMS = (F_M, F_B, F_V, F_C, F_G)     # 五段实际列数（= `SEG_SLICE` 的宽度）
+_SEG_KEYS = ("M", "B", "V", "G")          # 与 seg 元组的段序一一对应（不可改动）
+_SEG_DIMS = (F_M, F_B, F_V, F_G)          # 四段实际列数（= `SEG_SLICE` 的宽度）
 # ⚠️ **v2：① 拥堵去后 Z 段（区段 token）整段移除**（2026-10-08）。
 # ⚠️ **v2（2026-10-09）加 C 段（桩 token）**：`seg` 由四元变**五元**。
-#    理由：设计 §10 的掩码表要 `RA·充电 → {AGV, 桩}`，而此前桩根本没进 token
-#    序列 ⟹ 充电头看不到桩忙不忙（见 progress-log §84）。
+# ⚠️ **2026-10-10（v2）：⑪ 充电机制删 ⟹ C 段整段移除**，`seg` 由五元**退回四元**。
+#    它的唯一消费者是充电头；机制没了，桩不再进 token 序列。
 
 
 class AttnLayer(nn.Module):
@@ -83,7 +83,7 @@ class LayoutEncoder(nn.Module):
     前向数值一致（仅矩阵乘分块的末位漂移，≤1e-5）。
     """
 
-    N_SEG_TYPES = 5                                # M / B / V / C / G（C 段 2026-10-09 加）
+    N_SEG_TYPES = 4                                # M / B / V / G（C 段 2026-10-10 删）
 
     # ⚠️ **层数 8 → 4**（2026-10-09 执行）：**v1 的 spec** `2026-10-02-plcsp-rebuild-design.md`
     # §6.3 早已裁定 4 层，代码默认一直是 8 —— **"已裁定，未实施"挂了很久**
@@ -120,7 +120,7 @@ class LayoutEncoder(nn.Module):
         返回 (token 嵌入 (B, N, d), 全局上下文 (B, d)=按 token 均值池化)。
         `seg` 用来生成每个 token 的**类型 id**（决定加哪个 `type_emb`）、
         核对补零列为 0，并核对总长。
-        ⚠️ **段序与类型 id 由 `_SEG_KEYS` 定死**：0=M / 1=B / 2=V / **3=C** / 4=G。
+        ⚠️ **段序与类型 id 由 `_SEG_KEYS` 定死**：0=M / 1=B / 2=V / 3=G。
         改段序就是改 ckpt 兼容，必须动 `_SEG_KEYS`/`_SEG_DIMS`/`N_SEG_TYPES` 三处。
         ⚠️ **`bias`（② 几何/度量偏置，2026-10-05）**：`(N,N)` 或 `(B,N,N)` 的可加偏置，
         逐层加在注意力分数上（见 `AttnLayer._attn`）。`None`（默认）⟹ 与今日**逐位相同**；
@@ -192,7 +192,7 @@ class LayoutEncoder(nn.Module):
                 parts.append(self.proj[i](tok_feat[:, r:r + n, :_SEG_DIMS[i]]))
             r += n
         x = torch.cat(parts, dim=1)
-        x = x + self.type_emb[tid]                  # v2：只有四类，无 Z 分支
+        x = x + self.type_emb[tid]                  # v2：四类 M/B/V/G，无 Z 分支
         for layer in self.layers:
             x = layer(x, bias)
         x = self.ln(x)

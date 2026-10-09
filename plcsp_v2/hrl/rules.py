@@ -172,12 +172,18 @@ def apply_pa_rule(rule: int | str, view: PAView, pool: Sequence[tuple[int, int]]
     jr = PA_JOB_RULES[idx // len(PA_MACHINE_RULES)]
     mr = PA_MACHINE_RULES[idx % len(PA_MACHINE_RULES)]
     if not pool:
-        raise ValueError("apply_pa_rule 收到空池——池非空才有决策点（调用方应先判空）")
+        raise ValueError(
+            "apply_pa_rule 收到空池——池非空才有决策点。"
+            "⚠️ ② 有限缓冲下**池可能为空**（所有未完工作业的候选机台都满了）⟹ "
+            "调用方须先判空再调本函数（`des._pa_dispatch` 的 `and v.alts` 就是那道过滤）。")
     scores = [pa_job_score(jr, view, j) for j, _oi in pool]
     pi = _break_tie(_argmin_all(scores), tie_rng, lambda k: k)
     alts = view.jobs[pool[pi][0]].alts
     if not alts:
-        raise ValueError(f"池里的作业 {pool[pi][0]} 无候选机台（已完工？）——池不该含它")
+        raise ValueError(
+            f"池里的作业 {pool[pi][0]} 无候选机台——两种来由：**全部工序已分配**，"
+            "或**候选机台的输入缓冲全满**（② 开启）。两种都意味着本作业不该出现在池里"
+            "（`_pa_dispatch` 的 `and v.alts` 应已滤掉它）。")
     mscores = [pa_machine_score(mr, view, mt) for mt in alts]
     mi = _break_tie(_argmin_all(mscores), tie_rng, lambda k: alts[k][0])
     return int(pi), int(alts[mi][0])

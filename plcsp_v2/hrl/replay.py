@@ -69,9 +69,8 @@ class ScriptedPolicy:
     def policy_l(self, view: LAView, cand_v):
         return int(la_rule_policy(self._next())(view, cand_v))
 
-    def policy_c(self, snap: Snapshot, aid: int, cands):
-        return self._next()
-
+    # ⚠️ **2026-10-10：⑪ 去后 `policy_c` 已删** —— 链上不再有这种决策点，
+    # 脚本游标里也就不再为它留一格（留一格会让**游标错位**：`_next()` 多消费一次）。
     def policy_m(self, snap: Snapshot, mach: int, cands):
         return self._next()
 
@@ -104,10 +103,7 @@ class BranchPolicy:
         return (self.inner.policy_l(view, cand_v) if self._live()
                 else self.script.policy_l(view, cand_v))
 
-    def policy_c(self, snap, aid, cands):
-        return (self.inner.policy_c(snap, aid, cands) if self._live()
-                else self.script.policy_c(snap, aid, cands))
-
+    # ⚠️ **2026-10-10：⑪ 去后 `policy_c` 已删**（同 `ScriptedPolicy`）。
     def policy_m(self, snap, mach, cands):
         return (self.inner.policy_m(snap, mach, cands) if self._live()
                 else self.script.policy_m(snap, mach, cands))
@@ -147,7 +143,7 @@ def run_branch(world: SimWorld, prefix_actions: Sequence[int], net: NetPolicy,
                  graph=world.g, constraints=world.constraints)
     pol = BranchPolicy(ScriptedPolicy(prefix_actions), switch_after_ma, net)
     m = w.run_gated(seed_chain=0, policy_pa=pol.policy_pa, policy_l=pol.policy_l,
-                    policy_c=pol.policy_c, policy_m=pol.policy_m,
+                    policy_m=pol.policy_m,
                     policy_ma=pol.policy_ma, dt_events=net.dt_events,
                     stop_after_ma=stop_after_ma)
     if not net.ma_counters:

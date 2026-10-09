@@ -61,6 +61,14 @@ class GridSpec:
         return (c * (self.cell_w + self.aisle_w), r * (self.cell_h + self.aisle_w))
 
 
+MACHINE_CAP_SEED = 4000
+"""② 有限缓冲容量的**独立子流**：`default_rng([layout_seed, MACHINE_CAP_SEED])`。
+
+⚠️ **不得并进主 `rng`**：主流的取数次序一变，**后面所有抽样（`AgvSpec.battery_kwh` 等）整体移位**
+⟹ 既有布局全变、读数全废。**实测踩过**（同 `des.PA_TIE_SEED` 那条纪律）。
+"""
+
+
 @dataclass
 class MachinePad:
     id: int
@@ -70,13 +78,11 @@ class MachinePad:
     h: float
     dock_node: int            # 该机台装卸点所在的通道节点
     fail_rate: float = 0.001  # ⚠️ assumed（无文献出处），见 spec §9
-    # ⚠️ **v2：② 有限缓冲已删**（2026-10-08）—— `in_cap`/`out_cap` 一并去掉
-
-
-@dataclass
-class ChargerPad:
-    id: int
-    node: int
+    # ② **有限缓冲**（2026-10-10 加回；v2 在 2026-10-08 删过）。**⚠️ `assumed`**（v1 的取值）。
+    # ⚠️ **默认关**（`ConstraintConfig.finite_buffer=False`）⟹ 两个队列仍无界 ⟹ **逐位不变**。
+    # 开时：`cap = in_cap/out_cap` ⟹ 投递满则让步重试（见 `AgvSim` 的那两处循环）。
+    in_cap: int = 2
+    out_cap: int = 2
 
 
 @dataclass
@@ -103,38 +109,20 @@ class LuPad:
 
 @dataclass(frozen=True)
 class AgvSpec:
-    """单台 AGV 的规格。**参数 assumed**，见 spec §9。
+    """单台 AGV 的规格。
 
-    ⚠️ **v2：⑩ 异构车队与拼批已删**（2026-10-08）—— `speed_factor`（速度倍率）与
-    `capacity`（拼车件数上限）两个字段一并去掉。车队现在**同构、单车单载**：
-    绝对车速取 `SimConfig.agv_speed_mps`，载量恒 1。
+    ⚠️ **2026-10-10（⑪ 充电整条删除）后，这里只剩 `id`** —— 原 `battery_kwh` / `soc0`
+    随充电机制一并删；`speed_factor` / `capacity` 早在 **v2（⑩ 去后）** 就删了。
+    **车队现在完全同构**：绝对车速取 `SimConfig.agv_speed_mps`，载量恒 1。
     """
+
     id: int
-    battery_kwh: float        # 电池容量 [kWh]（⑪ 充电用，保留）
-    soc0: float = 1.0
-    """**初始荷电率**（0–1）：`battery(0) = soc0 × battery_kwh`。
-
-    ⚠️ **`assumed`，且默认 1.0 = 满电出发 ⟹ 与既有读数逐位不变。**
-
-    **为什么需要它**：满电出发时，⑪ 只在"单局用电 ≥ 容量 × (1 − `battery_low`) = 80%"
-    的实例上才咬人 —— 实测 MK01–MK07 一局只耗容量的 **14%**（§111），
-    所以 ⑪ 在那些实例上**永远不触发**。
-    起始不满电把"需要的用电量"从 80% 降到 `(soc0 − battery_low)`，**不动容量、不动阈值、不动功率**。
-
-    **真实场景支撑**：班次开始时 AGV **未必满电**（上一班用剩的）—— 这是常见且合理的假设。
-
-    ⚠️ **影响范围有限**：只影响**第一次充电之前**。充一次后电量到 `battery_high × cap`，
-    之后与 `soc0=1.0` 的轨迹一致。
-    ⚠️ **`soc0 < battery_low` 是无意义的**：那等于"开机就在阈值下"，会在 t≈0 就充电，
-    不是"约束咬人"。构造时会显式报错。
-    """
 
 
 @dataclass
 class Layout:
     grid: GridSpec
     machines: list[MachinePad]
-    chargers: list[ChargerPad]
     lu: LuPad
     layout_seed: int
     agvs: list[AgvSpec] = None      # 车队规格（默认 None → 由 sample_layout 填）
@@ -157,7 +145,7 @@ def grid_shape(n_machines: int) -> tuple[int, int]:
 
 def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
                   cell_h: float = 2.4, aisle_w: float = 1.5,
-                  n_chargers: int = 2, n_agv: int = 3) -> Layout:
+                  n_agv: int = 3) -> Layout:
     """采样一个网格布局 + 车队规格。同 (n_machines, seed, 尺寸, 车队参数) → 同结果（确定性）。
 
     机台按格子顺序（逐行）占用前 n_machines 个格子；dock 落在该格左上角节点。
@@ -171,6 +159,8 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
     spec = GridSpec(n_rows=n_rows, n_cols=n_cols, cell_w=cell_w, cell_h=cell_h, aisle_w=aisle_w)
 
     machines: list[MachinePad] = []
+    # ② 的容量抽样走**独立子流**（见下方 `MachinePad` 的注释）：不动主 `rng` 的取数次序。
+    cap_rng = np.random.default_rng([seed, MACHINE_CAP_SEED])
     for i in range(n_machines):
         r, c = divmod(i, n_cols)
         node = spec.node_id(r, c)
@@ -178,31 +168,26 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
         machines.append(MachinePad(
             id=i, x=x, y=y, w=cell_w, h=cell_h, dock_node=node,
             fail_rate=float(rng.uniform(0.0, 0.003)),      # assumed，见 spec §9
+            # ② 有限缓冲（2026-10-10 加回）：照 v1 的采样口径 `integers(1, 4)` ⟹ 1–3。
+            # ⚠️ **必须走独立子流**：主 `rng` 后面还要抽 `AgvSpec.battery_kwh`，
+            # 在这里多抽两次会把它**整体移位** ⟹ 既有布局全变（实测踩过：
+            # AGV0 电池 3.2133 → 3.7148）。同 `PA_TIE_SEED` 那条纪律。
+            in_cap=int(cap_rng.integers(1, 4)),            # ② assumed
+            out_cap=int(cap_rng.integers(1, 4)),           # ② assumed
         ))
 
-    used = {m.dock_node for m in machines}
-    free = [n for n in range(spec.n_nodes) if n not in used]
-    if len(free) < n_chargers:
-        raise ValueError(f"自由节点不足：需 {n_chargers} 个充电桩，仅 {len(free)} 个可用")
-    # 确定性分散：在自由节点里等间隔取
-    if n_chargers > 1:
-        idx = [round(k * (len(free) - 1) / (n_chargers - 1)) for k in range(n_chargers)]
-    else:
-        idx = [0]
-    charger_nodes = [free[i] for i in idx]
-    chargers = [ChargerPad(id=j, node=n) for j, n in enumerate(charger_nodes)]
-
+    # ⚠️ **2026-10-10：充电机制整条删除**（⑪ 去掉，用户裁定）—— `ChargerPad` 与
+    # 桩的选取（原为"自由节点里等间隔取"）一并删。**删它不移位随机流**：
+    # 桩的选取**不耗 `rng`**，而 `AgvSpec` 的抽样本来就在**最后**。
+    #
     # 装卸站（Fig. 2）：单一，在网格**外左侧**、经一条连接段接入左边缘交叉口。
-    # ⚠️ 它**不占自由节点**（是格点外的新节点），故与充电桩的选取互不干扰。
     lu = LuPad(node=spec.lu_node, dock_node=spec.lu_dock_node,
                x=spec.lu_xy[0], y=spec.lu_xy[1], connector_m=spec.lu_connector_m)
 
-    # 车队规格。⚠️ 抽样放在**最后**——机台/充电桩的抽样序列才不会被扰动。
-    # ⚠️ **v2（⑩ 去后）**：只剩电池容量（⑪ 充电要用）；速度与载量不再逐车不同。
-    agvs = [AgvSpec(id=a,
-                    battery_kwh=float(rng.uniform(2.0, 4.0)),       # assumed
-                    soc0=1.0)                        # 满电出发（默认）
-            for a in range(n_agv)]
+    # 车队规格。⚠️ 抽样放在**最后**——机台的抽样序列才不会被扰动。
+    # ⚠️ **2026-10-10（⑪ 去后）**：车队**同构**，规格里已无逐车不同的量；
+    # `AgvSpec` 只剩 `id`。（速度取 `SimConfig.agv_speed_mps`、载量恒 1、**无电池**。）
+    agvs = [AgvSpec(id=a) for a in range(n_agv)]
 
-    return Layout(grid=spec, machines=machines, chargers=chargers,
-                  lu=lu, layout_seed=seed, agvs=agvs)
+    return Layout(grid=spec, machines=machines, lu=lu,
+                  layout_seed=seed, agvs=agvs)

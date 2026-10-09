@@ -103,8 +103,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             p.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
                         "arm": arm, "seed": seed, "steps": steps, "n": n,
-                        "dt_events": dt_events, "n_chargers": len(spec.layout.chargers),
-                        "with_value": False, "tau": spec.cfg.tau}, p)
+                        "dt_events": dt_events, "with_value": False, "tau": spec.cfg.tau}, p)
             rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
     finally:
         if pool is not None:
@@ -126,8 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--save-dir", default="")
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
-    ap.add_argument("--soc0", type=float, default=1.0, help="AGV 初始荷电率（1.0 = 逐位不变）")
     ap.add_argument("--pm-interval", type=float, default=None, help="⑫ 保养间隔（dev 档 30）")
+    ap.add_argument("--finite-buffer", action="store_true",
+                    help="② 开有限缓冲（默认关）。⚠️ 开时改动力学（见 progress-log §118）")
     ap.add_argument("--agv-n-failures", type=int, default=0,
                     help="⑨ 按次数注入（0 = 关，用 agv_mtbf 泊松流）。照 Shi 2025 口径")
     ap.add_argument("--target-failures", type=float, default=None,
@@ -163,10 +163,11 @@ def main(argv: list[str] | None = None) -> int:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         workers=a.workers, save_dir=a.save_dir, lr=a.lr,
-                        env={"instance": a.instance, "tau": a.tau, "soc0": a.soc0,
+                        env={"instance": a.instance, "tau": a.tau,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
-                             "agv_n_failures": a.agv_n_failures})
+                             "agv_n_failures": a.agv_n_failures,
+                             "finite_buffer": a.finite_buffer})
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 

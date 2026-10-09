@@ -38,6 +38,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+from ..env.constraints import ConstraintConfig
 from ..env.des import SimConfig, SimWorld, StepCounters
 from ..env.instances import Instance
 from ..env.layout import Layout
@@ -49,8 +50,9 @@ from .rollout import Decision, NetPolicy, net_device
 EPS = 1e-6
 """组内 z 化的分母下限（设计 §4.1 的 `+ε`）。"""
 
-LOWER_KINDS = ("PA", "LA", "C", "M")
-"""下层四类决策（三个 agent 的四个头）。阶段 B 只更新它们。"""
+LOWER_KINDS = ("PA", "LA", "M")
+# ⚠️ **2026-10-10：⑪ 去后 `"C"` 已删**（充电头不存在 ⟹ 链上不再有这种决策点）。
+"""下层三类决策（两个 agent 的三个头）。阶段 B 只更新它们。"""
 
 
 class Spec(NamedTuple):
@@ -69,9 +71,20 @@ class Spec(NamedTuple):
     "TWT=0 的实例须先调 τ"）。**MK01 的默认参考解就没有拖期** ⟹ 训练前必须给一个
     收紧的 `SimConfig.tau`（交期更紧 ⟹ TWT > 0），否则拿不到权重。
     **这是"先调 τ"那条纪律在训练侧的体现，不静默补一个假权重。**"""
+    constraints: ConstraintConfig | None = None
+    """五条约束的开关（`env.constraints.ConstraintConfig`）。`None` = 全默认（② 关、其余开）。
+
+    ⚠️ **必须与 `ctx.constraints` 是同一份**：仿真按这一份走动力学，特征层按 `ctx.constraints`
+    决定哪些量静默 —— 两份不同源就是**假信号**（见 `nn.features.norm_context` 的 docstring）。
+    `q1_flat.build()` 是唯一同时构造两者的地方，它保证同源。
+
+    ⚠️ **默认 `None` 保持向后兼容**：既有 `Spec(inst, lay, g, dm, cfg, ctx, w)` 的七元构造
+    逐位不变（`world()` 传 `constraints=None` ⟹ `SimWorld` 用默认档）。
+    """
 
     def world(self) -> SimWorld:
-        return SimWorld(self.inst, self.layout, self.dm, self.cfg, graph=self.graph)
+        return SimWorld(self.inst, self.layout, self.dm, self.cfg, graph=self.graph,
+                        constraints=self.constraints)
 
 
 def base_chain(net: HierarchicalPolicy, spec: Spec, *, greedy: bool = False,
@@ -82,7 +95,7 @@ def base_chain(net: HierarchicalPolicy, spec: Spec, *, greedy: bool = False,
     p.world = spec.world()                                 # type: ignore[attr-defined]
     p.metrics = p.world.run_gated(                          # type: ignore[attr-defined]
         seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
-        policy_c=p.policy_c, policy_m=p.policy_m, policy_ma=p.policy_ma,
+        policy_m=p.policy_m, policy_ma=p.policy_ma,
         dt_events=dt_events)
     return p
 
@@ -126,7 +139,7 @@ def logp_terms(head: HierarchicalPolicy, decisions: list[Decision],
                      for i, b in enumerate((b0, b1, b2)))
             out.append(lp)
             continue
-        row = {"PA": o.pa, "LA": o.la, "C": o.ra_charge, "M": o.ra_maint}[d.kind]
+        row = {"PA": o.pa, "LA": o.la, "M": o.ra_maint}[d.kind]
         if row is None:
             raise ValueError(f"决策 {d.kind} 重算时该头为 None（`la_ctx` 没给？）")
         out.append(torch.log_softmax(row[0], dim=-1)[d.action])
@@ -184,7 +197,7 @@ def _logp_rows(o, sel: list[Decision]) -> list[torch.Tensor]:
             terms.append(sum(torch.log_softmax(o.g_logits[i, j], dim=-1)[b]
                              for j, b in enumerate((b0, b1, b2))))
             continue
-        row = {"PA": o.pa, "LA": o.la, "C": o.ra_charge, "M": o.ra_maint}[d.kind]
+        row = {"PA": o.pa, "LA": o.la, "M": o.ra_maint}[d.kind]
         if row is None:
             raise ValueError(f"决策 {d.kind} 重算时该头为 None")
         terms.append(torch.log_softmax(row[i], dim=-1)[d.action])
@@ -441,7 +454,7 @@ def _grad_norm(net: HierarchicalPolicy, phase: str) -> dict:
                 if p.grad is not None:
                     s += float(p.grad.pow(2).sum())
         return float(np.sqrt(s))
-    lower = (net.pa, net.la, net.ra_charge, net.ra_maint)
+    lower = (net.pa, net.la, net.ra_maint)
     upper = (net.ma,)
     return {"upper": norm(upper), "lower": norm(lower),
             "expect": ("lower" if phase == "B" else "upper")}

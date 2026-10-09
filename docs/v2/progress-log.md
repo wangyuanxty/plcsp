@@ -3387,3 +3387,232 @@ if policy_pa is not None:
 **⏸ 影响（未做）**：若做 **LA 规则消融（C 类的一条）**，要说明
 **"关掉 `LATEST_IN_TIME`"只在 55/65 = 85% 的决策点上有差别**；否则会把 15% 的退化
 误读成"这条规则没用"。
+
+---
+
+## §118 约束表定稿：**加回有限缓冲 + 删掉充电**（2026-10-10）
+
+**用户裁定**：「删机制 反正不触发 不要了」+「继续 加缓冲 删充电机制」。
+
+### 118.1 ⚠️ 先说一个诊断上的教训：**62 个失败不是新改出来的**
+
+改完缓冲那一批（清单 1/2/3/5 条）跑门禁，**62 failed**。看着像我把环境改崩了。
+
+**实际根因**：`layout.py` 里充电**已经删了一半**（`Layout.chargers` 没了、
+`AgvSpec` 只剩 `id`），而 `des.py:1422` 还在 `chargers=self.layout.chargers` ⟹
+**`AttributeError: 'Layout' object has no attribute 'chargers'`**。
+
+**⟹ 那是"删充电只删了一半"的既存破损，与缓冲改动无关。**
+教训：**半完成的删除比不删更糟**——它让后续每一次红都指向错的方向。
+
+### 118.2 删充电的三条依据
+
+1. **MK01/MK07/MK10 默认档下 `charge_events` 恒 0** —— 一局只有 76–170 min，
+   满电出发永远到不了低电阈值（`battery_low=0.20`）。
+2. **要它触发得把 `soc0` 压到 ≤0.25** —— 那是**为触发而调参**，不是实例自带的约束。
+   对位论文 Shi et al. 2025 的假设 4 本身就把 *AGV charging* 列为 **ignored**。
+3. **⭐⭐ 能量目标不受影响** —— 这是本轮最重要的一条核查。
+
+### 118.3 ⭐⭐ 能量目标不读电池（删得干净的前提）
+
+`energy.py` 按**三态时间**计，与电池**无关**：
+
+| 对象 | 三态 | 来源 |
+|---|---|---|
+| 机床 | `proc` / `idle` / `setup` [min] | `SimTrack` 的逐机台计时 |
+| AGV | `idle` / `empty` / `loaded` [min] | `SimTrack` 的逐车计时 |
+| 车间固定 | 按 makespan | `SHOP_FIXED_KW` |
+
+`battery_min_kwh` 只是**诊断量**（最低电量），**不是能量目标**。
+
+**⟹ 删充电不动能量目标、不动 `reward.py`、不动三目标的任何一个。**
+**这条先查了才敢删** —— 反过来说，若能量是按电池积分算的，这个删除会静默改掉一整个目标。
+
+### 118.4 删除的完整影响面（跨 20 个文件的机械删除）
+
+| 层 | 删了什么 |
+|---|---|
+| `env/layout.py` | `ChargerPad` 整类；桩的选取；`AgvSpec.battery_kwh` / `soc0` |
+| `env/des.py` | `charge_cands` / `CHARGE_CAND_SKIP`；`SimConfig.battery_low/high`、`charge_kw`；`_maybe_charge` / `_charge_at` / `_depleted` / `_recover_from_depletion` / `_drain` / `_drain_idle` / `_make_charge_fn`；`run_gated` 的 `policy_c` 与 `charging` 守卫；`_build_entities` 的 `charger_res` / `charge` |
+| `env/snapshot.py` | `ChargerState` 整类；`Snapshot.chargers`；`VehicleState.battery_frac` |
+| `env/constraints.py` | `charging` 开关；`ABLATION_GROUPS` 里的引用 |
+| `nn/features.py` | `F_C`；`FEATURE_NAMES["C"]`；`FEATURE_NAMES["V"]` 的末位 `battery`（**F_V 8→7**） |
+| `nn/state_emb.py` | `charger_features` 整函数；`vehicle_features` 末位 |
+| `nn/encoder.py` | `_SEG_KEYS` 五元→**四元**、`_SEG_DIMS`、`N_SEG_TYPES` 5→4 |
+| `hrl/agents.py` | `ra_charge` 头；`PolicyOut.ra_charge`；`masks()` 的 `"C"`/`"RA_charge"`；`b_matrices()` 四→**三**；**构造签名的 `n_chargers`** |
+| `hrl/rollout.py` | `NetPolicy.policy_c`；`Decision.kind` 的 `"C"` |
+| `hrl/train.py` | `LOWER_KINDS` 的 `"C"`；`lower` 头元组 |
+| `hrl/flat.py` | `ALL_KINDS` 的 `"C"`；`grad_norm` 的头元组 |
+| `hrl/pool.py` | 子进程网络缓存键 `(n_chargers, with_value)` → **`with_value`** |
+| 跑数器 ×3 | `q1_flat` / `d5_nested` 的 `soc0` 与 `--soc0`；存盘的 `n_chargers` 字段 |
+
+**⚠️ 一个附带的好结果**：`n_chargers` 是**唯一随布局变宽的头**。删掉它之后
+**`HierarchicalPolicy()` 无必需参数** ⟹ 网络的形状不再依赖布局 ⟹ 消掉了一整类
+"同一份 ckpt 在不同布局上重建失败"的隐患。
+
+### 118.5 ⭐ `F_MAX` **不变**（= 8）—— 删段不等于改张量宽度
+
+`F_MAX = max(F_M, F_B, F_V, F_G) = max(7, 8, 7, 3) = 8`。
+
+**V 段变窄（8→7）与 C 段整段删除都不动统一宽度** —— 因为最宽的是 **B 段（8）**。
+⟹ **补零列数变了（V 段多一列补零），但张量的 `(N, 8)` 形状与 `feat_dim` 一个字没改。**
+
+### 118.6 缓冲那 5 条：一条字段同时解决三件事
+
+清单第 1、2、5 条要的是同一份信息（"这台机的输入缓冲满没满"）：
+- 第 1 条（视图层）：把满机台从 `alts` 滤掉；
+- 第 2 条（池层）：把 `alts` 全空的作业从池里滤掉；
+- 第 5 条（特征层）：`in_queue` 的分母从 `n_jobs` 换成 `in_cap`。
+
+**⟹ 加 `MachineState.in_cap: int | None`（`None` = 无界）一个字段，三处共用。**
+
+⚠️ **`None` 不是哨兵**：② 关闭时缓冲**真的无界**，"满"这个概念不存在。
+用 `0` 表示无界会让**每台机恒判为满**（静默错误）。
+
+⚠️ **第 3 条**：`apply_pa_rule` 里那句"无候选机台（**已完工？**）"**同时过期** ——
+`alts` 为空现在有**两种**来由（全工序已分配 / 候选机台全满），文案已改准。
+
+⚠️ **第 4 条**（投递时满则等）早在上一轮就做了（AGV 侧让步重试 + `buffer_block_min`）。
+
+### 118.7 ⚠️ 池**第一次可能为空** —— 这是新增的语义，不是 bug
+
+`_pa_dispatch` 的池加了 `and v.alts` 之后，**② 开启时池可能为空**（所有未完工作业的
+候选机台都满了）⟹ 返回 `None` ⟹ **本轮不派工、等下一个事件**。
+
+**这不是死锁**：机台完工事件会腾出缓冲位、池随即非空。
+真出现"所有机台都在等"的环（需要 `out_cap` 也 binding），由 `horizon` 如实截断 ——
+与 `_recover_from_depletion` 同一条纪律：**不静默放行，也不死循环**。
+
+⚠️ **`out_cap` 实测从不 binding**（三个实例在默认与极端容量档下 `out_block_min` 一律 0.0）
+⟹ **`out_queue` 维仍用 `n_jobs` 归一，无证据不改**（见 `machine_features` 的注释）。
+
+### 118.8 ⭐⭐ 删充电**逐位不改动力学** —— 实测（不是论证）
+
+只论证"充电从不触发所以删了不变"是不够的（本轮的教训就是**少论证、多实测**）。
+做法：`git worktree add --detach <系统临时目录> HEAD` 开一份**旧代码**，跑同一探针
+（MK01 · `seed=0` · 规则档 · `run_gated(seed_chain=0)`），与改后的工作区逐位对比。
+
+| | HEAD（有充电） | NEW（充电已删） |
+|---|---|---|
+| `makespan` | `75.87` | **`75.87`** |
+| 三目标 `(Cmax, E, TWT)` | `(75.87, 4.95559, 35.63)` | **`(75.87, 4.95559, 35.63)`** |
+| 前 3 台机 `fail_rate` | `0.00191089 / 0.00080936 / 0.00012292` | **完全相同** |
+| `charge_events` | **0** | （键已删） |
+
+**⟹ 两条结论同时成立**：
+1. **删充电在默认档下逐位不改动力学** —— 这是"删得干净"的实测凭据；
+2. **机台抽样流未移位** —— `fail_rate` 逐位相同，证明 `MACHINE_CAP_SEED` 那条**独立子流**
+   的修法是对的（见 §118.9 第 4 条）。
+
+### 118.9 门禁状态
+
+- `ruff check plcsp_v2/` **干净** ✓
+- 源码自洽性冒烟 ✓：约束五项 `['finite_buffer','machine_failure','due_dates','agv_failure','maintenance']`；
+  `_SEG_KEYS = ('M','B','V','G')`；`_SEG_DIMS = (7,8,7,3)`；`F_MAX = 8`；
+  `HierarchicalPolicy()` 可直接构造；`b_matrices()` = `['PA','LA','RA_maint']`。
+- `plcsp_v2/tests/`：**修复中**（充电机制的测试要删、用到 `n_chargers` / 五元 `seg` /
+  `F_C` 的测试要改）。**未绿之前本行不得当成门禁通过。**
+
+### 118.10 端到端冒烟（改后）
+
+```
+规则档: {'fail_events': 2.0, 'tardy_twt': 35.63, 'agv_fail_events': 0.0,
+         'buffer_block_min': 0.0, 'pm_events': 0.0}
+网络链 kinds: {'MA': 2, 'PA': 55, 'LA': 65, 'M': 55}     ← C 已消失（原 68）
+分支段 168 个决策                                          ← replay.BranchPolicy 通
+```
+
+⚠️ **本轮冒烟抓到一个 ruff 抓不到的真 bug**：`des.snapshot()` 里我写了 `self.con.finite_buffer`，
+而 `snapshot()` 是 **`SimWorld`** 的方法、它的字段叫 `self.constraints`
+（`self.con` 是 `AgvSim` / `MachineSim` 的字段名）。
+**规则档不调 `snapshot()` ⟹ 规则档冒烟是绿的**，只有**带策略**的那条路才炸。
+**教训：改了"同时被两条路走"的函数，两条路都要跑一遍。**
+
+**同批还漏了 3 处 `policy_c` 残留**（`hrl/train.py` 的 `base_chain`、`hrl/replay.py` 的
+`ScriptedPolicy` / `BranchPolicy`、`d1_goal.py`）——**全是属性访问，ruff 查不出**，
+只有实跑一条链才暴露。**⟹ "ruff 干净"绝不等于"能跑"。**
+
+### 118.11 ② 有限缓冲：**默认档就 binding**（重测，删充电后）
+
+`q1_flat.build(0, finite_buffer=...)` · 规则档 · `run_gated(seed_chain=0)` · MK01：
+
+| `finite_buffer` | `makespan` | `buffer_block_min` |
+|---|---|---|
+| **关**（默认） | `75.87` | `0.0` |
+| **开** | `73.01` | **`58.0`** |
+
+**⟹ ② 是本轮五条约束里唯一"默认档就起作用"的那条**：不需要调任何参数。
+对比之下 ⑨ 要按次数注入、⑫ 要短 `pm_interval`、⑧ 要收紧 τ、③ 是泊松随机
+（MK01 实测 2 次）。**⑪ 充电则是连调参都只能勉强触发 —— 那是删它的直接理由。**
+
+⚠️ **与旧读数的差异**：删充电前记的是 `74.1 vs 75.9`（§118.9 第 2 条），
+现在是 `73.01 vs 75.87`。**旧数是在"充电还在"的代码上跑的** ⟹ 本轮数为准。
+（`75.87` 与 HEAD 逐位相同 ⭐ 见 §118.8；`73.01` 是新增的读数，无旧值可比。）
+
+⚠️ **`ctx.constraints is spec.constraints` 为真** —— 特征层与仿真**同源**（§118.11 的
+`Spec.constraints` 就是为了保证这条）。两份不同源会让"哪些量静默"与"哪些量真的不存在"错开。
+
+### 118.12 开放线索
+
+1. **`--finite-buffer` CLI 开关未加** —— 两个跑数器目前都只能靠 `ConstraintConfig` 直接传。
+2. **缓冲的"关 vs 开"读数已有（§117 前那轮）**：MK01 74.1 vs 75.9、MK07 231.7 vs 229.4、
+   MK10 393.3 vs 367.7；AGV 侧阻塞 79.0 / 574.0 / 790.7 min；机台侧恒 0。
+   **但那些数是在"充电还在"的代码上跑的** ⟹ **删充电后须重测**（本次未重测）。
+3. **`test_two_tier_report.py` 按 dataclass 字段逐个查** —— 约束从 6 条变 5 条后
+   该测试的期望值要同步（若它硬编码了条数）。
+
+### 118.13 ⚠️ 行尾事故：一次 3276 行的**幻影 diff**
+
+改完跑 `git diff --stat` 准备提交，看到 **4034 插入 / 3889 删除**。规模明显不对。
+
+**根因**：本仓的文本文件**行尾不统一**，而且**是逐文件的**：
+
+| 文件 | HEAD 的行尾 |
+|---|---|
+| `docs/v2/progress-log.md` | **混合**：3276 行裸 LF + 113 行 CRLF |
+| `plcsp_v2/env/constraints.py` | 全 CRLF |
+
+编辑工具重写文件时把它**整篇统一成一种**行尾 ⟹ 那 3276 行每一行都"变了"。
+
+**检测手法**（记下来，下次直接用）：
+
+```bash
+git diff --shortstat                        # 4034 / 3889   ← 看着吓人
+git diff --ignore-cr-at-eol --shortstat     #  701 /  556   ← 真实改动
+```
+
+两个数**差得远** = 有行尾 churn。逐文件定位：
+
+```bash
+git diff --numstat | while read a d f; do
+  a2=$(git diff --ignore-cr-at-eol --numstat -- "$f" | cut -f1)
+  [ "$a" != "$a2" ] && echo "$f $a vs $a2"
+done
+```
+
+**修法**：**从 HEAD 的字节出发，只把新增的行拼回去**（保留 HEAD 每一行原本的行尾）。
+不能简单地"整篇转成 CRLF"——那只是把 churn 换个方向。
+
+修完：`702 / 554`，与忽略 CR 后**逐数相同** ✓
+
+### 118.14 ⚠️ 而我在修的过程中**又犯了一个错**，值得单独记
+
+那个重建脚本写成：
+
+```python
+out = HEAD[:p] + added + HEAD[p:]
+Path(name).write_bytes(out)      # ← 先写
+assert chk == w                  # ← 后验，而且 p/s 是启发式猜的
+```
+
+**`constraints.py` 的改动不是纯新增**（我重写了模块 docstring），前缀/后缀启发式定位错了
+⟹ 拼出一个**头部是新的、尾部是旧的**的文件：`ABLATION_GROUPS` 里还留着 `"charging"`，
+而 `charging` 字段已经删了 ⟹ **一 import 就 `ValueError`**。
+
+**断言抓住了它，但文件已经写出去了。**
+
+**⟹ 教训（比行尾那条更重要）**：
+1. **校验必须在写盘之前** —— 先算出结果、验完、再写。
+2. **启发式定位不能碰"改 + 增"混合的编辑** —— 纯新增才能用前缀/后缀。
+3. 修法是 `git checkout HEAD -- <file>` 还原后**整篇重写**（内容我完全知道），
+   并断言 `bare_LF == 0`。

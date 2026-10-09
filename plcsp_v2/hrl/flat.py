@@ -51,8 +51,10 @@ from .train import EPS, Spec, base_chain, batched_terms, group_advantage
 if TYPE_CHECKING:
     from .pool import ChainPool
 
-ALL_KINDS: tuple[str, ...] = ("MA", "PA", "LA", "C", "M")
-"""一条链上的**全部**决策种类 —— 扁平链不分层 ⟹ 一个组覆盖它们全部。"""
+ALL_KINDS: tuple[str, ...] = ("MA", "PA", "LA", "M")
+"""一条链上的**全部**决策种类 —— 扁平链不分层 ⟹ 一个组覆盖它们全部。
+
+⚠️ **2026-10-10：⑪ 去后 `"C"`（充电）已删** —— 链上不再有这种决策点。"""
 
 ARMS: tuple[str, ...] = ("A", "A2", "B")
 """`A` = critic 原始优势 · `A2` = **critic + 优势归一化**（标准 PPO 口径）· `B` = 组内 z 化。"""
@@ -100,7 +102,8 @@ def grad_norm(net: HierarchicalPolicy) -> dict:
                 if p.grad is not None:
                     s += float(p.grad.pow(2).sum())
         return float(np.sqrt(s))
-    heads = (net.ma, net.pa, net.la, net.ra_charge, net.ra_maint)
+    # ⚠️ **2026-10-10：⑪ 去后 `net.ra_charge` 已从本表删**（头不存在了）。
+    heads = (net.ma, net.pa, net.la, net.ra_maint)
     crit = () if net.value_head is None else (net.value_head,)
     return {"heads": acc(heads), "critic": acc(crit), "encoder": acc((net.enc,))}
 

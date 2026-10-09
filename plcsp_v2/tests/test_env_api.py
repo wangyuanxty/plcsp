@@ -21,13 +21,13 @@ from plcsp_v2 import energy
 from plcsp_v2.env import corridors, due_dates, layout as layout_mod, mkt, reward
 from plcsp_v2.env.constraints import ConstraintConfig
 from plcsp_v2.env.des import (MachineSim, LuStation, OpLite, SimConfig, SimTrack,
-                              SimWorld, charge_cands, check_seq_rank,
+                              SimWorld, check_seq_rank,
                               compute_due_dates, machine_fail_rate,
                               reference_makespan, reference_run, rollout,
                               weighted_tardiness)
 from plcsp_v2.env.instances import Instance, gen_random, load_mk, parse_fjs_text
 from plcsp_v2.env.rule_views import advance_avail
-from plcsp_v2.env.snapshot import (ChargerState, JobState, MachineState,
+from plcsp_v2.env.snapshot import (JobState, MachineState,
                                    QueuedTask, Snapshot, VehicleState)
 from plcsp_v2.env.transport import TransportCaliber
 from plcsp_v2.hrl.cdr import cdr_policies
@@ -76,9 +76,11 @@ def test_grid_shape_and_layout_pads(n_machines: int):
     mp = lay.machines[0]
     assert isinstance(mp, layout_mod.MachinePad)
     assert mp.dock_node >= 0 and mp.fail_rate >= 0.0
-    assert isinstance(lay.chargers[0], layout_mod.ChargerPad)
+    # ⚠️ **2026-10-10：⑪ 充电机制整条删除** ⟹ 原 `isinstance(lay.chargers[0], ChargerPad)`
+    # 已按事实删除（`Layout.chargers` / `layout_mod.ChargerPad` 不存在了）。
     assert isinstance(lay.lu, layout_mod.LuPad)
-    assert all(isinstance(a, layout_mod.AgvSpec) and a.battery_kwh > 0 for a in lay.agvs)
+    # ⚠️ 原末位 `a.battery_kwh > 0` 同批删除：`AgvSpec` 只剩 `id`（车队同构、无电池）。
+    assert all(isinstance(a, layout_mod.AgvSpec) for a in lay.agvs)
 
 
 # ══════════════════ env/instances.py ══════════════════
@@ -151,15 +153,17 @@ def test_snapshot_dataclasses_are_frozen_and_carry_documented_fields():
                       remaining_min=2.0, pm_used_min=0.0, fail_rate=0.01)
     js = JobState(done_ops=1, total_ops=3, remaining_min=4.0, finished=False, due=10.0,
                   at_machine=0, in_transit=False, on_agv=-1)
-    vs = VehicleState(status=2, node=5, queued=1, battery_frac=0.9)
-    cs = ChargerState(occupied=1, waiting=0, capacity=1)
+    vs = VehicleState(status=2, node=5, queued=1)
     qt = QueuedTask(veh=0, job=1, frm=2, to=3, oi=1)
+    # ⚠️ **2026-10-10：⑪ 充电机制整条删除** —— 原 `ChargerState`（充电桩占用）类与
+    # `Snapshot.chargers` 字段、`VehicleState.battery_frac` 字段一并删；
+    # 上面 `vs` 的 `battery_frac=0.9` 与原来的 `cs = ChargerState(...)` 同批删除。
     snap = Snapshot(now=1.0, machines=(ms,), jobs=(js,), vehicles=(vs,), n_done=0,
-                    in_flight=2, chargers=(cs,), queued_tasks=(qt,))
+                    in_flight=2, queued_tasks=(qt,))
     assert snap.machines[0].fail_rate == 0.01 and snap.jobs[0].due == 10.0
     assert snap.vehicles[0].busy_min == 0.0          # 新字段的默认（手搓夹具兼容）
     assert snap.in_flight == 2 and snap.queued_tasks[0].veh == 0
-    for obj in (ms, js, vs, cs, qt, snap):
+    for obj in (ms, js, vs, qt, snap):
         assert dataclasses.is_dataclass(obj)
 
 
@@ -179,9 +183,14 @@ def test_live_snapshot_matches_world_state():
 def test_constraint_config_defaults_and_with_off():
     c = ConstraintConfig()
     assert c.machine_failure and c.due_dates and c.agv_failure
-    assert c.charging and c.maintenance
-    off = c.with_off("machine_failure", "charging")
-    assert not off.machine_failure and not off.charging and off.due_dates
+    assert c.maintenance
+    # ⚠️ **2026-10-10：⑪ 充电开关 `charging` 已删**（机制整条移除）—— 原断言
+    # `c.charging` 与 `with_off(..., "charging")` 同批删除。v2 现为**五条**约束：
+    # ② finite_buffer / ③ machine_failure / ⑧ due_dates / ⑨ agv_failure / ⑫ maintenance。
+    # ⚠️ `finite_buffer` **默认 False**（机制开关默认关 ⟹ 既有读数逐位不变）。
+    assert c.finite_buffer is False
+    off = c.with_off("machine_failure", "due_dates")
+    assert not off.machine_failure and not off.due_dates and off.agv_failure
     assert c.machine_failure, "with_off 必须返回**新对象**，原对象不动"
     with pytest.raises(ValueError):
         c.with_off("nope")
@@ -273,8 +282,8 @@ def test_rollout_and_reference_agree_on_the_same_dynamics():
 
 @pytest.mark.unit
 def test_pure_helpers():
-    assert charge_cands(3) == (0, 1, 2, 3)
-    assert charge_cands(0) == (0,)
+    # ⚠️ **2026-10-10：⑪ 去后 `charge_cands` 已删** —— 原两条断言
+    # （`charge_cands(3) == (0, 1, 2, 3)` / `charge_cands(0) == (0,)`）随机制删除。
     # λ(a)=base*β*(a/η)^(β−1)：β>1 时 λ(0)=0（纯耗损模型，docstring 明写）
     assert machine_fail_rate(0.01, 0.0, 2.0, 200.0) == pytest.approx(0.0)
     assert machine_fail_rate(0.01, 200.0, 2.0, 200.0) == pytest.approx(0.02)

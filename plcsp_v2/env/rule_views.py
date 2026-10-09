@@ -24,9 +24,23 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from .instances import Instance
-from .snapshot import Snapshot
+from .snapshot import MachineState, Snapshot
 
 INF = float("inf")
+
+
+def machine_has_room(ms: MachineState) -> bool:
+    """该机台的**输入缓冲**还能不能再收一件（② 有限缓冲）。
+
+    `ms.in_cap is None`（② 关闭）⟹ **恒 True** —— 缓冲真的无界，"满"不存在。
+    ⚠️ **不得写成 `in_q_len < in_cap`**：`None < int` 是 TypeError，而把 `None` 当 0
+    会让每台机恒判为满（静默错误）。
+
+    这是"**候选机台**"的判据（清单第 1 条）：满了的机台**不进 `alts`** ⟹ 12 条 PA 规则
+    都看不到它 ⟹ 不可能被派到一台收不下的机台。规则**定义**不变，变的是候选集。
+    """
+    return ms.in_cap is None or int(ms.in_q_len) < int(ms.in_cap)
+
 
 
 class PAJob(NamedTuple):
@@ -53,7 +67,15 @@ class PAJob(NamedTuple):
     """**已完成**工序数（= `job_progress`）。规则求值一般不用它；留着供诊断与
     `ready_at` 的口径判断（见下）。"""
     alts: tuple[tuple[int, float], ...]
-    """本工序（`oi`）的候选 `(机台, 加工时长)`。不再进池者 = 空元组。"""
+    """本工序（`oi`）的**候选机台** `(机台, 加工时长)` —— ⚠️ **已按 ② 滤掉输入缓冲已满的机台**
+    （`machine_has_room`）。**空元组有两种来由，调用方须都当作"本工件此刻派不出去"**：
+
+    1. 该作业**全部工序都已分配**（`oi >= len(alts)`，不再进池）；
+    2. 本工序的候选机台**输入缓冲全满**（② 开启时才会出现）。
+
+    ⚠️ 第 2 种是 **2026-10-10 新引入的**（清单第 1 条）—— 此前 `alts` 恒等于实例给的
+    候选集，空元组**只**有第 1 种来由。故 `hrl.rules.apply_pa_rule` 里那句
+    "已完工？"的报错文案同时过期（见 `_pa_dispatch` 的池过滤）。"""
     apt: float
     """本工序的**平均**加工时长 `APT_ij = (Σ_k pt_ijk)/|候选|`（AEI2025 的 `APT_ij`）。
 
@@ -143,7 +165,12 @@ def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min
             jobs.append(PAJob(oi=oi, done_oi=done, alts=(), apt=0.0, rem_apt=0.0,
                               ready_at=snap.now, due=due))
             continue
-        alts = tuple((int(m), float(t)) for m, t in ops[oi])
+        # ② 有限缓冲（清单第 1 条）：**输入缓冲已满的机台不进候选**。
+        # ⚠️ 越界下标**放行**（沿用本函数既有的 `0 <= k < len(snap.machines)` 守卫风格）——
+        # 它本来就是坏数据，本改动不该顺手改掉它的失败方式；`in_cap` 那道判断才是新增语义。
+        alts = tuple((int(m), float(t)) for m, t in ops[oi]
+                     if not (0 <= int(m) < len(snap.machines))
+                     or machine_has_room(snap.machines[int(m)]))
         # APT：逐道工序在**各自候选机台**上的平均时长（AEI2025 的 APT_ij）
         apts = [sum(t for _m, t in ops[o]) / len(ops[o]) for o in range(oi, len(ops))]
         ready = snap.now

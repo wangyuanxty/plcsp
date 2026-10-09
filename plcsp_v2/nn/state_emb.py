@@ -13,7 +13,7 @@ from ..env.layout import Layout
 from ..env.snapshot import Snapshot
 # `norm_context` 用冗余别名转出（explicit re-export）——`NormContext` 的构造入口在
 # `features.py`（与字段定义同处一地），此处只为保持 `state_emb.norm_context` 这个既有入口可用。
-from .features import (F_B, F_C, F_M, F_MAX, F_V, SEG_SLICE,
+from .features import (F_B, F_M, F_MAX, F_V, SEG_SLICE,
                        NormContext, norm_context as norm_context)
 
 
@@ -100,9 +100,19 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
     for i, m in enumerate(snap.machines):
         out[i] = (
             m.backlog_min / ctx.total_work_min,                     # 0 backlog
-            # ⚠️ **v2（② 去后）**：无容量可除 ⟹ 改用实例静态量 `n_jobs` 归一。
-            # 队列长度 <= 作业总数（每作业对某台机最多贡献 1 件），故比值在 [0,1]。
-            _safe(m.in_q_len / max(ctx.n_jobs, 1), 0.0, 1.0),        # 1 in_queue
+            # ① 输入缓冲（② 有限缓冲）：
+            # ⚠️ **② 开启时**（`m.in_cap is not None`）分母取**该机自己的容量** ——
+            # `in_q_len / in_cap` 直接就是"**满没满**"（1.0 = 满，机台不可再收）。
+            # 这是 ② 加回后本维**该有的语义**：`build_pa_view` 正是按同一个判据把满机台
+            # 从候选里滤掉，特征若还用旧分母，策略就看不见"这台满了"。
+            # ⚠️ **② 关闭时**（`in_cap is None`）回到实例静态量 `n_jobs` ——
+            # 缓冲真的无界，没有"满"可言；队列长度 <= 作业总数（每作业对某台机最多贡献 1 件），
+            # 故比值仍在 [0,1]。**默认档逐位不变**。
+            _safe(m.in_q_len / (m.in_cap if m.in_cap is not None
+                                else max(ctx.n_jobs, 1)), 0.0, 1.0),      # 1 in_queue
+            # ⚠️ **输出缓冲**仍用 `n_jobs`：`out_cap` **实测从不 binding** ——
+            # 三个实例（mk01/mk07/mk10）在默认容量档与极端容量档（全设 1）下
+            # `out_block_min` **一律 0.0**（机台从不因卸货处满而停）。**无证据不改。**
             _safe(m.out_q_len / max(ctx.n_jobs, 1), 0.0, 1.0),       # 2 out_queue
             1.0 if m.busy else 0.0,                                 # 3 busy
             m.remaining_min / max(ctx.total_work_min, 1e-9),        # 4 remaining_frac
@@ -145,11 +155,13 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(n_agv, 9)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。
+    """(n_agv, 7)。顺序 = FEATURE_NAMES["V"]，**不得改序**（有测试按名核对）。
 
     ⚠️ **v2：⑩ 去后由 11 维降到 9 维**（2026-10-08）—— 去掉 `capacity` 与 `speed_factor`。
 
     ⚠️ **v2：① 去后 `zone_wait` 维已删**（2026-10-08）。
+    ⚠️ **2026-10-10：⑪ 去后末位 `battery` 维已删**（9 → **7** 维）—— 车队无电量。
+    **末位删除** ⟹ 前 7 列下标不变。
     """
     out = np.zeros((ctx.n_agv, F_V), dtype=np.float32)
     for a, v in enumerate(snap.vehicles):
@@ -168,36 +180,16 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
         out[a] = (*st,
                   x,                                                 # 4 node_x
                   y,                                                 # 5 node_y
-                  _safe(v.queued / max(ctx.max_queued, 1), 0.0, 1.0),   # 6 queued
-                  _safe(v.battery_frac, 0.0, 1.0))                   # 7 battery
+                  _safe(v.queued / max(ctx.max_queued, 1), 0.0, 1.0))   # 6 queued
                   # ⚠️ **v2**：原 8 `capacity` / 9 `speed_factor`（⑩ 去）与
-                  # 原 `zone_wait`（① 去）三维已删（2026-10-08）
+                  # 原 `zone_wait`（① 去）三维已删（2026-10-08）；
+                  # 原 7 `battery`（⑪ 去）已删（2026-10-10）。
     return out
 
 
-def charger_features(snap: Snapshot, layout: Layout, ctx: NormContext) -> np.ndarray:
-    """(n_chargers, 4)。顺序 = FEATURE_NAMES["C"]，**不得改序**（有测试按名核对）。
-
-    ⚠️ 桩的位置取自 `layout`（快照里没有桩的节点号）——**只读**，不改变任何仿真状态。
-
-    ⚠️ **行数按 `layout.chargers` 定**（不是按 `snap.chargers`）：`_cold_start` 与手搓夹具的
-    快照**不带桩表**（`charger_res=()`），若按快照出行数，`seg` 的 C 段会**时有时无**
-    ⟹ 同一个网络在不同时点收到不同的段结构。**行数必须由布局定死。**
-    桩表缺失时该行**恒 0**——与本仓"缺表 = 该维无信息"的既有约定一致（**不是哨兵**）。
-    """
-    out = np.zeros((len(layout.chargers), F_C), dtype=np.float32)
-    for i, mp in enumerate(layout.chargers):
-        nx, ny = ctx.node_xy[int(mp.node)]
-        row = (
-            _safe(snap.chargers[i].occupied / max(snap.chargers[i].capacity, 1), 0.0, 1.0)
-            if i < len(snap.chargers) else 0.0,                      # 0 occupied_frac
-            _safe(snap.chargers[i].waiting / max(ctx.n_agv, 1), 0.0, 1.0)
-            if i < len(snap.chargers) else 0.0,                      # 1 waiting_frac
-            nx / ctx.bbox_diag,                                      # 2 node_x
-            ny / ctx.bbox_diag,                                      # 3 node_y
-        )
-        out[i] = row
-    return out
+# ⚠️ **2026-10-10：⑪ 去后 `charger_features` 已删**（桩 token 整段移除）。
+# 原实现返回 `(n_chargers, 4)` = `occupied_frac / waiting_frac / node_x / node_y`，
+# 是充电头"选哪根桩"的候选特征。无充电桩 ⟹ 无此段。
 
 
 def global_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
@@ -222,12 +214,13 @@ def build_tok(snap: Snapshot, inst: Instance, layout: Layout,
     ⚠️ `seg` 由**各段实际行数**推出，**不硬编码实例规模**（Review Focus #2）。
 
     ⚠️ **v2：① 拥堵去后 Z 段（区段 token）已删**（2026-10-08）。
-⚠️ **v2（2026-10-09）新增 C 段（桩 token）** ⟹ `seg` 由四元变**五元**。
+    ⚠️ **v2（2026-10-09）新增 C 段（桩 token）** ⟹ `seg` 由四元变**五元**。
+    ⚠️ **2026-10-10：⑪ 去后 C 段已删** ⟹ `seg` 退**回四元** `(n_m, n_jobs, n_agv, 1)`。
     """
     parts = [("M", machine_features(snap, ctx)), ("B", job_features(snap, ctx)),
-             ("V", vehicle_features(snap, ctx)), ("C", charger_features(snap, layout, ctx)),
+             ("V", vehicle_features(snap, ctx)),
              ("G", global_features(snap, ctx))]
-    seg = tuple(p.shape[0] for _k, p in parts)          # (n_m, n_jobs, n_agv, n_ch, 1)
+    seg = tuple(p.shape[0] for _k, p in parts)          # (n_m, n_jobs, n_agv, 1)
     tok = np.zeros((sum(seg), F_MAX), dtype=np.float32)
     r = 0
     for key, p in parts:

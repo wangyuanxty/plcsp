@@ -28,6 +28,19 @@ class MachineState:
     remaining_min: float
     pm_used_min: float      # 距上次保养已累计的主轴工时（⑫）
     fail_rate: float        # ③
+    in_cap: int | None = None
+    """**输入缓冲容量**（② 有限缓冲）；`None` = **无界**（② 关闭，默认）。
+
+    ⚠️ 为什么放进快照而不是由特征层从 `NormContext` 取：**两个消费者要同一个真相**——
+    1. `nn/state_emb.machine_features` 的 `in_queue` 维要用它做分母（`in_q_len / in_cap`），
+       否则该维报的是"队列长度占作业数"，**看不出满没满**；
+    2. `env/rule_views.build_pa_view` 要用它**把已满的机台从 `alts` 里滤掉**（清单第 1 条）。
+    快照本就是"特征层的唯一原料"，两处各算一遍必然漂。
+
+    ⚠️ **`None` 不是哨兵，是"无容量约束"的真值** —— ② 关闭时缓冲真的无界，
+    `in_q_len < in_cap` 这个判断**不存在**（不是"容量为 0"）。用 0 表示无界会让每台机
+    恒判为满，是静默错误。
+    """
     # ⚠️ **v2：⑤ 换型的 `prev_job` 已删**（2026-10-08）—— 换型约束去掉后，机台不再需要
     # 记上一件加工的是谁。特征层相应少一维（`nn/state_emb.machine_features`）。
 
@@ -63,7 +76,7 @@ class VehicleState:
     status: int             # 0 空闲 / 1 空载行驶 / 2 负载行驶 / 3 故障停机
     node: int               # 当前所在通道节点
     queued: int             # 本车待办任务数
-    battery_frac: float     # [0,1]
+    # ⚠️ **2026-10-10：⑪ 去后 `battery_frac` 已删**（车队无电量，`AgvSpec` 只剩 `id`）。
     # ⚠️ **v2：⑩ 去后，`capacity`（载量）与 `speed_factor`（速度倍率）已删**
     # （2026-10-08）—— 车队同构、单车单载，这两个量对每台车都相同，无信息。
     # ⚠️ **v2：① 拥堵去后 `zone_wait` 已删**（2026-10-08）—— 无区段，不存在等待
@@ -75,19 +88,8 @@ class VehicleState:
     缺省不是哨兵，是"这辆车确实一分钟都没跑过"的真值。"""
 
 
-@dataclass(frozen=True)
-class ChargerState:
-    """充电桩的**当时**占用（⑪ C 头的候选特征原料）。
-
-    ⚠️ 与 `MachineState` 的缓冲不同，这里是 SimPy `Resource` 的**活计数**（不是队列长度）：
-    `occupied` = 正在充电的车数（`Resource.count`），`waiting` = 已在排队等桩的车数
-    （`len(Resource.queue)`），`capacity` = 车位容量（当前恒 1：一桩同时只服务一车）。
-    C 头据此避开忙桩——候选特征没有它，"选哪根桩"就只剩距离一个维度。
-    """
-
-    occupied: int           # 正在使用该桩的车数
-    waiting: int            # 排队等待该桩的车数
-    capacity: int           # 车位容量
+# ⚠️ **2026-10-10：⑪ 去后 `ChargerState`（充电桩占用）整类删除** —— 无充电桩。
+# 原类报 `occupied` / `waiting` / `capacity` 三个量，是 C 头"选哪根桩"的候选特征原料。
 
 
 @dataclass(frozen=True)
@@ -122,10 +124,8 @@ class Snapshot:
     in_flight: int
     # ⚠️ **v2：① 拥堵去后，`zone_holder` 与 `zone_wait`（逐区段）两个字段已删**
     # （2026-10-08）—— 无区段机制，R 头（路线决策）也不在 v2 里。
-    # ⑪ C 头的候选特征原料：逐个充电桩的占用/排队，下标 = `layout.chargers` 的顺序。
-    # 默认空元组 = 该快照不带桩表（`_cold_start` 或测试手搓）⟹ 占用维恒 0，
-    # **不是哨兵**（缺表 = 该维无信息）。
-    chargers: tuple[ChargerState, ...] = ()
+    # ⚠️ **2026-10-10：⑪ 去后字段序改为 `... in_flight, queued_tasks`** ——
+    # 原 `chargers: tuple[ChargerState, ...] = ()` 在此位置，随机制一并删。
     # ⑩ 拼批头的原料：**队列内容**（逐件任务身份，队列序），两种队列形状都进这一张表
     # （`bound` = 每车一 Store，逐车的表；FIFO = 单个共享 Store，`veh = -1`）。
     # 空元组 = 队列为空（**不是哨兵**：没有待取任务就是没有）。

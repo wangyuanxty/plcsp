@@ -57,16 +57,20 @@ _W: dict = {}
 
 
 def _get_net(spec: Spec, with_value: bool):
-    """子进程里的网络缓存 —— 按 `(n_chargers, with_value)` 键。
+    """子进程里的网络缓存 —— 按 `with_value` 键。
+
+    ⚠️ **2026-10-10：键由 `(n_chargers, with_value)` 简化为 `with_value`** ——
+    充电头删了之后，本网络**不再随布局变宽度**（`HierarchicalPolicy()` 无必需参数），
+    故同一个进程里的网络结构只由 `with_value` 决定。`spec` 参数保留（调用点按位传参）。
 
     ⚠️ **缓存结构、不缓存权重**：参数每步都在变（父进程 `optim.step()`），
     故每次任务都 `load_state_dict`（≈5 ms，相对一条 0.15–0.6 s 的链/段可忽略）。
     """
-    key = (len(spec.layout.chargers), bool(with_value))
+    key = bool(with_value)
     net = _W.get(key)
     if net is None:
         torch.set_num_threads(1)          # ⚠️ 每进程 1 线程（见模块 docstring）
-        net = HierarchicalPolicy(n_chargers=key[0], with_value=key[1])
+        net = HierarchicalPolicy(with_value=key)
         _W[key] = net
     return net
 

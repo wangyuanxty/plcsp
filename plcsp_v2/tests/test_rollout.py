@@ -31,7 +31,9 @@ def _mk(name: str = "mk01"):
     lay = layout_mod.sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
     g = build_corridor_graph(lay)
     ctx = norm_context(inst, lay, reference_makespan(inst), cfg)
-    net = HierarchicalPolicy(n_chargers=len(lay.chargers)).eval()
+    # ⚠️ **2026-10-10：⑪ 去后 `n_chargers=len(lay.chargers)` 已删** —— `Layout.chargers`
+    # 与那个构造参数都不存在了；网络不再随布局变宽。
+    net = HierarchicalPolicy().eval()
     return inst, lay, g, dock_distance_matrix(g), cfg, ctx, net
 
 
@@ -42,8 +44,9 @@ def _drive(name="mk01", *, greedy=True, seed=0, dt_events=20, g_bins=None):
     # 不是"把 `policy_ma` 传 None"：那样顶层一次都不发生，`stop_after_ma` 也就永远不触发。
     p = NetPolicy(net, inst, lay, ctx, g_bins=g_bins, greedy=greedy, seed=seed,
                   dt_events=dt_events, freeze_g=g_bins is not None)
+    # ⚠️ **2026-10-10：⑪ 去后 `policy_c=` 已删**（`NetPolicy.policy_c` 随充电机制删除）。
     m = w.run_gated(seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
-                    policy_c=p.policy_c, policy_m=p.policy_m,
+                    policy_m=p.policy_m,
                     policy_ma=p.policy_ma, dt_events=dt_events)
     return m, p
 
@@ -64,7 +67,8 @@ def test_network_drives_a_full_episode_and_the_chain_matches_the_sim_events():
     assert kinds["PA"] == m["ops_done"] == 55, kinds
     assert kinds["LA"] == m["pa_assigns"] + 10, ("派工点 55 + 回站 10", kinds)
     assert kinds["M"] == m["ops_done"], kinds
-    assert kinds["C"] > 0 and kinds["MA"] >= 1, kinds
+    # ⚠️ **原 `kinds["C"] > 0` 已按事实删除**：⑪ 去后 `Decision.kind` 不再出现 `"C"`。
+    assert kinds["MA"] >= 1, kinds
     assert len(p.rec) == sum(kinds.values())
 
 
@@ -114,7 +118,8 @@ def test_recorded_decisions_reproduce_their_own_logits():
         lc = None if d.la_ctx is None else torch.as_tensor(d.la_ctx)[None]
         with torch.no_grad():
             out = net(t, d.seg, gb, la_ctx=lc, hard=True)
-        head = {"PA": out.pa, "LA": out.la, "C": out.ra_charge, "M": out.ra_maint}[d.kind]
+        # ⚠️ **2026-10-10：⑪ 去后 `"C": out.ra_charge` 已删**（充电头不存在）。
+        head = {"PA": out.pa, "LA": out.la, "M": out.ra_maint}[d.kind]
         assert head is not None, d.kind
         row = head[0]
         prob = torch.softmax(row, dim=-1)
@@ -143,8 +148,9 @@ def test_recorder_is_optional_and_counts_by_kind():
     assert len(r) == 0 and r.kinds() == {}
     w = SimWorld(inst, lay, dm, cfg, graph=g)
     p = NetPolicy(net, inst, lay, ctx, greedy=True, seed=0, record=False)
+    # ⚠️ **2026-10-10：⑪ 去后 `policy_c=p.policy_c` 已删**。
     w.run_gated(seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
-                policy_c=p.policy_c, policy_m=p.policy_m, dt_events=0)
+                policy_m=p.policy_m, dt_events=0)
     assert p.rec is None, "record=False 时不该留决策链（省内存）"
 
 
@@ -183,7 +189,8 @@ def test_replaying_the_prefix_lands_on_the_same_state():
 
     inst, lay, g, dm, cfg, ctx, net = _mk()
     torch.manual_seed(0)
-    net2 = HierarchicalPolicy(n_chargers=len(lay.chargers)).eval()
+    # ⚠️ **2026-10-10：⑪ 去后 `n_chargers=len(lay.chargers)` 已删**。
+    net2 = HierarchicalPolicy().eval()
     net2.load_state_dict(net.state_dict())
     inner = NetPolicy(net2, inst, lay, ctx, g_bins=g_at_z1, greedy=True, seed=0,
                       dt_events=20, freeze_g=True)
