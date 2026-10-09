@@ -137,6 +137,25 @@ def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
             "R": float(np.mean([x.R for x in runs]))}
 
 
+CONSTRAINT_KEYS = ("fail_events", "tardy_twt", "agv_fail_events", "charge_events", "pm_events")
+"""五条约束的触发计数（③机障 · ⑧拖期 · ⑨AGV故障 · ⑪充电 · ⑫保养）。"""
+
+
+def constraint_counts(spec: Spec) -> dict:
+    """**规则档**（不给任何策略）跑一局，回报五条约束各自的触发计数。
+
+    ⚠️ **必须用规则档**（§115.3）：策略档下 `charge_events` / `pm_events` 数的是
+    **"策略多爱用这个动作"**（随机初始化的网会乱充、乱保养，实测某布局 67 次），
+    与**"约束是否 binding"是两回事**。规则档才是"约束按设计触发"的口径。
+
+    ⚠️ 它**另外跑一局仿真**（不带策略 ⟹ 很便宜，§99 实测 ~0.02–2 s）。
+    为什么值得：**"跑通了但约束一次都没触发"是看不出来的** —— 那正是这几轮反复踩的坑
+    （§110：MK01 上 ⑨⑪⑫ 全不触发，而所有测试都是绿的）。
+    """
+    m = spec.world().run_gated(seed_chain=0)
+    return {k: float(m.get(k, 0)) for k in CONSTRAINT_KEYS}
+
+
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             eval_every: int, eval_n: int, rec, device: str = "cpu",
             workers: int = 0, save_dir: str = "", env: dict | None = None) -> None:
@@ -197,7 +216,9 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
     dist = evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events)
     rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
          "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
-         "disturbed": dist, "agv_mtbf": dspec.cfg.agv_mtbf})
+         "disturbed": dist, "agv_mtbf": dspec.cfg.agv_mtbf,
+         # ⚠️ **规则档**下的五条约束触发数（§115.3）—— 让"跑通了但约束没触发"当场可见
+         "constraints": constraint_counts(spec)})
 
     if save_dir:
         # ⚠️ **必须存盘**：不然训好的策略丢了 ⟹ 后面要"读出 `B` 矩阵"（v2 实验计划 D6）、
@@ -240,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="AGV 初始荷电率（1.0 = 满电，逐位不变）。MK01 要 ⑪ 触发需 ≤ 0.25")
     ap.add_argument("--pm-interval", type=float, default=None,
                     help="⑫ 保养间隔（主轴分钟）。默认 120；dev 档用 30（MK01 一局只 76 min）")
+    ap.add_argument("--agv-n-failures", type=int, default=0,
+                    help="⑨ 按次数注入（0 = 关，用 agv_mtbf 泊松流）。照 Shi 2025 口径")
     ap.add_argument("--target-failures", type=float, default=None,
                     help="⑨ 按「每局期望故障次数」反推 agv_mtbf（对位论文 Shi 2025 同口径）")
     ap.add_argument("--out", default=DEFAULT_OUT)
@@ -289,7 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                         device=a.device, workers=a.workers, save_dir=a.save_dir,
                         env={"instance": a.instance, "tau": a.tau, "soc0": a.soc0,
                              "pm_interval": a.pm_interval,
-                             "target_failures": a.target_failures})
+                             "target_failures": a.target_failures,
+                             "agv_n_failures": a.agv_n_failures})
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 

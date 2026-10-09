@@ -39,7 +39,7 @@ import torch
 from .hrl.flat import flat_step
 from .hrl.pool import ChainPool, SegmentPool
 from .hrl.train import train_step
-from .q1_flat import DEFAULT_OUT, build, evaluate
+from .q1_flat import DEFAULT_OUT, build, constraint_counts, evaluate
 
 ARMS = ("flat", "two")
 """`flat` = 扁平链（一个组 · 同步）· `two` = 两层（按层切组 · 交替）。"""
@@ -95,7 +95,9 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
         rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
              "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
              "disturbed": evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events),
-             "agv_mtbf": dspec.cfg.agv_mtbf})
+             "agv_mtbf": dspec.cfg.agv_mtbf,
+             # ⚠️ **规则档**下的五条约束触发数（§115.3）—— 让"跑通了但约束没触发"当场可见
+             "constraints": constraint_counts(spec)})
         if save_dir:
             p = Path(save_dir) / f"{arm}_s{seed}.pt"
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
     ap.add_argument("--soc0", type=float, default=1.0, help="AGV 初始荷电率（1.0 = 逐位不变）")
     ap.add_argument("--pm-interval", type=float, default=None, help="⑫ 保养间隔（dev 档 30）")
+    ap.add_argument("--agv-n-failures", type=int, default=0,
+                    help="⑨ 按次数注入（0 = 关，用 agv_mtbf 泊松流）。照 Shi 2025 口径")
     ap.add_argument("--target-failures", type=float, default=None,
                     help="⑨ 按每局期望故障次数反推 agv_mtbf")
     ap.add_argument("--out", default=DEFAULT_OUT)
@@ -161,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
                         workers=a.workers, save_dir=a.save_dir, lr=a.lr,
                         env={"instance": a.instance, "tau": a.tau, "soc0": a.soc0,
                              "pm_interval": a.pm_interval,
-                             "target_failures": a.target_failures})
+                             "target_failures": a.target_failures,
+                             "agv_n_failures": a.agv_n_failures})
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 
