@@ -45,12 +45,26 @@ class Decision(NamedTuple):
     """
 
     kind: str                       # "MA" | "PA" | "LA" | "C" | "M"
-    tok: np.ndarray                 # 当时的 token 特征 (N, F_MAX)
+    tok: np.ndarray                 # 当时的 token 特征 (N, F_MAX)（**恒为 numpy / 主机内存**）
     seg: tuple[int, ...]            # 当时的段长
     g_bins: tuple[int, int, int]    # 当时生效的 `g`（MA 自己那条存它采到的档）
     action: int                     # 所取的动作。MA = 三维档压平（b0*16+b1*4+b2）；其余 = 规则/动作码下标
     logp: float                     # 采样时的 logp（MA = 三维之和）
     la_ctx: np.ndarray | None = None  # 仅 LA：逐决策任务上下文 (LA_CTX_DIM,)
+
+
+def net_device(net) -> torch.device:
+    """`net` 的参数在哪个设备上 —— **设备跟随策略**（v1 `policy.device` 的同一口径）。
+
+    ⚠️ **2026-10-09 补**：v2 此前**完全没有设备支持**（`hrl/` 里 0 处 `cuda`/`device`）
+    ⟹ 模型恒跑在 CPU，且**编码器里那条 CUDA 图快路永远触发不了**
+    （`LayoutEncoder._graph_ok` 的头一条就是 `tok_feat.is_cuda`）。
+    **v1 有这套东西（`policy.device` · `forward_enc` 搬运 · `worker_device`），v2 重写时丢了。**
+    实测代价：单次前向 CPU 6.5 ms vs 图上 0.383 ms —— 见 progress-log §99。
+
+    调用方只需 `net.to(device)`，**不需要往每个函数传设备**。
+    """
+    return next(net.parameters()).device
 
 
 class Recorder:
@@ -91,7 +105,11 @@ class NetPolicy:
         # 而停表/分段要的是"顶层**照常发生**"。**两件事分开** ⟹ 这个开关。
         self.freeze_g = bool(freeze_g)
         self.rec = Recorder() if record else None
-        self.gen = torch.Generator().manual_seed(int(seed))
+        # ⚠️ **采样器必须与 logits 同设备**（`torch.multinomial` 要求 generator 与输入一致）。
+        # CPU 档 `torch.Generator(device='cpu')` 与旧写法 `torch.Generator()` **逐位相同**
+        # ⟹ 默认档一位不变（v1 `group_rel.py:735` 同口径）。
+        self.device = net_device(net)
+        self.gen = torch.Generator(device=self.device).manual_seed(int(seed))
         # 当前生效的目标：给定时 = **条件在固定 `g`**（阶段 B / 执行）；`None` = 由 MA 现采
         self.g_bins: tuple[int, int, int] | None = (None if g_bins is None
                                                     else (int(g_bins[0]), int(g_bins[1]),
@@ -103,9 +121,12 @@ class NetPolicy:
     # ── 内部：一次前向（no_grad，只为采样）──
     def _forward(self, snap: Snapshot, la_ctx: np.ndarray | None = None):
         tok, seg = build_tok(snap, self.inst, self.layout, self.ctx)
-        t = torch.as_tensor(tok).unsqueeze(0)
-        gb = None if self.g_bins is None else torch.as_tensor([list(self.g_bins)])
-        lc = None if la_ctx is None else torch.as_tensor(la_ctx, dtype=torch.float32)[None]
+        # ⚠️ **搬到 `policy.device`**（设备跟随策略，见 `net_device`）。CPU 档是恒等操作。
+        t = torch.as_tensor(tok).unsqueeze(0).to(self.device)
+        gb = (None if self.g_bins is None
+              else torch.as_tensor([list(self.g_bins)], device=self.device))
+        lc = (None if la_ctx is None
+              else torch.as_tensor(la_ctx, dtype=torch.float32)[None].to(self.device))
         with torch.no_grad():
             return self.net(t, seg, gb, la_ctx=lc, hard=self.greedy), tok, seg
 

@@ -64,10 +64,11 @@ TARGET_FAILURES = 4.0
 
 
 def build(seed: int, *, tau: float = 1.0, disturb: bool = False,
-          n_agv: int = 3, with_value: bool = False):
+          n_agv: int = 3, with_value: bool = False, device: str = "cpu"):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `disturb=True`：⑨ 按 `TARGET_FAILURES` 激活（只用于**最终评测**，不用于训练）。
+    `device`：`"cpu"`（默认）/ `"cuda"`。⚠️ **两臂必须同设备**，否则比出来的差没有意义。
     """
     torch.manual_seed(seed)
     inst = load_mk("mk01")
@@ -82,7 +83,8 @@ def build(seed: int, *, tau: float = 1.0, disturb: bool = False,
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
     net = HierarchicalPolicy(n_chargers=len(lay.chargers), with_value=with_value)
-    return Spec(inst, lay, g, dm, cfg, ctx, w), net
+    # ⚠️ **设备跟随策略**（`rollout.net_device`）：搬一次，之后 rollout/重算自己按参数所在设备走。
+    return Spec(inst, lay, g, dm, cfg, ctx, w), net.to(device)
 
 
 def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
@@ -104,12 +106,13 @@ def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
 
 
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
-            eval_every: int, eval_n: int, rec) -> None:
+            eval_every: int, eval_n: int, rec, device: str = "cpu") -> None:
     """一条 `(臂, 种子)` 的完整训练 + 评测。`rec` = 写一行的回调。"""
-    spec, net = build(seed, with_value=(arm == "A"))
+    spec, net = build(seed, with_value=(arm == "A"), device=device)
     optim = torch.optim.Adam(net.parameters(), lr=1e-4)
     rec({"kind": "start", "arm": arm, "seed": seed, "steps": steps, "n": n,
-         "dt_events": dt_events, "n_params": sum(p.numel() for p in net.parameters())})
+         "dt_events": dt_events, "device": device,
+         "n_params": sum(p.numel() for p in net.parameters())})
     base = evaluate(net, spec, n=eval_n, seed=0, dt_events=dt_events)
     rec({"kind": "eval", "arm": arm, "seed": seed, "step": 0, **base})
 
@@ -156,8 +159,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dt-events", type=int, default=20, help="顶层定时器步长（§10②）")
     ap.add_argument("--eval-every", type=int, default=25, help="0 = 不中途评测")
     ap.add_argument("--eval-n", type=int, default=3, help="评测链数（greedy）")
+    ap.add_argument("--device", default="cpu", help="cpu / cuda（⚠️ 必须用 GPU 版解释器才认 cuda）")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="torch 线程数；0 = 不动（默认值）。⚠️ 实测见 §99：默认 24 线程反而慢 2.1×")
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
+
+    if a.threads:
+        # ⚠️ **只在跑数器里设**，不进库：改线程数会改浮点归约的结合次序 ⟹ 末位可能不同，
+        # 而门禁与既有读数依赖 CPU 默认档**逐位不变**。实测（§99）：24 线程 5.72 s，
+        # 8 线程 2.70 s —— 小张量被线程调度拖垮，不是算力不够。
+        torch.set_num_threads(a.threads)
+
+    if a.device.startswith("cuda") and not torch.cuda.is_available():
+        # ⚠️ **快速失败**：CPU-only 的 torch 上写 `--device cuda` 静默退回 CPU
+        # ⟹ 你以为在用 GPU，实际跑了 10 小时 CPU。（本仓禁用静默降级。）
+        print(f"✗ 这个解释器没有 CUDA（torch {torch.__version__}）。"
+              "GPU 请用 D:/anaconda/envs/py312/python.exe", file=sys.stderr)
+        return 2
 
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -170,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         for seed in a.seeds:
             for arm in a.arms:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
-                        eval_every=a.eval_every, eval_n=a.eval_n, rec=rec)
+                        eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
+                        device=a.device)
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 

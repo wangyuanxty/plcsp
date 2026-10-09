@@ -44,7 +44,7 @@ from ..env.layout import Layout
 from ..nn.features import NormContext
 from .agents import G_BINS, G_DIM, LA_CTX_DIM, HierarchicalPolicy
 from .replay import run_branch, segment_return
-from .rollout import Decision, NetPolicy
+from .rollout import Decision, NetPolicy, net_device
 
 EPS = 1e-6
 """组内 z 化的分母下限（设计 §4.1 的 `+ε`）。"""
@@ -106,13 +106,14 @@ def logp_terms(head: HierarchicalPolicy, decisions: list[Decision],
     ⚠️ 用的是**记录下来的** `(tok, seg, g_bins, la_ctx)`——当时的状态。
     用最新快照重算等于把策略输入换成另一个状态（决策与 logp 不再对应）。
     """
+    dev = net_device(head)
     out: list[torch.Tensor] = []
     for d in decisions:
         if d.kind not in kinds:
             continue
-        t = torch.as_tensor(d.tok).unsqueeze(0)
-        gb = torch.as_tensor([list(d.g_bins)])
-        lc = None if d.la_ctx is None else torch.as_tensor(d.la_ctx)[None]
+        t = torch.as_tensor(d.tok).unsqueeze(0).to(dev)
+        gb = torch.as_tensor([list(d.g_bins)], device=dev)
+        lc = None if d.la_ctx is None else torch.as_tensor(d.la_ctx)[None].to(dev)
         o = head(t, d.seg, gb, la_ctx=lc, hard=True)
         if d.kind == "MA":
             # ⚠️ **顶层是 3 个**独立**的分档，不是一个 64 路的类别**（§10④"每维 4 档"）。
@@ -156,11 +157,14 @@ def batched_forward(head: HierarchicalPolicy, decisions: list[Decision],
     seg = sel[0].seg
     if any(d.seg != seg for d in sel):
         raise ValueError("同一批里的 `seg` 不一致 —— 批量前向的前提是段结构恒定")
-    tok = torch.as_tensor(np.stack([d.tok for d in sel]))
-    gb = torch.as_tensor([list(d.g_bins) for d in sel])
+    # ⚠️ **设备跟随策略**（见 `rollout.net_device`）：搬到 `head` 参数所在的设备。
+    # `tok` 存在 `Decision` 里时恒为 **numpy（主机内存）** —— 所以每次重算都要搬一次。
+    dev = net_device(head)
+    tok = torch.as_tensor(np.stack([d.tok for d in sel])).to(dev)
+    gb = torch.as_tensor([list(d.g_bins) for d in sel], device=dev)
     lc = torch.as_tensor(np.stack([
         d.la_ctx if d.la_ctx is not None else np.zeros(LA_CTX_DIM, dtype=np.float32)
-        for d in sel]))
+        for d in sel])).to(dev)
     return head(tok, seg, gb, la_ctx=lc, hard=True), sel
 
 
@@ -235,8 +239,9 @@ def ma_logp_at(head: HierarchicalPolicy, d: Decision) -> torch.Tensor:
     （标准 GRPO 里每个成员有**自己的一整条轨迹**，所以不撞这个问题；我们这里是"同一状态、多动作"，
     正是把它当**单步 contextual bandit** 来更新。）
     """
-    t = torch.as_tensor(d.tok).unsqueeze(0)
-    gb = torch.as_tensor([list(d.g_bins)])
+    dev = net_device(head)
+    t = torch.as_tensor(d.tok).unsqueeze(0).to(dev)
+    gb = torch.as_tensor([list(d.g_bins)], device=dev)
     o = head(t, d.seg, gb, la_ctx=None, hard=True)
     lps = []
     for flat in range(G_BINS ** G_DIM):
