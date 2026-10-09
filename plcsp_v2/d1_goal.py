@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -51,7 +52,8 @@ from .env.reward import objective_vector
 from .hrl.agents import HierarchicalPolicy
 from .hrl.rollout import NetPolicy
 from .hrl.train import Spec
-from .q1_flat import build
+from .q1_flat import (build, constraints_from_ckpt, missing_env_warning,
+                      resolve_train_env)
 
 VARIANTS = ("free", "fixed_000", "fixed_111", "fixed_333", "b_zero")
 
@@ -116,6 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-eval", type=int, default=5)
     ap.add_argument("--seed", type=int, default=1, help="评测链的种子基")
     ap.add_argument("--dt-events", type=int, default=20)
+    # ⚠️ **必须还原训练环境**（2026-10-10 加）：ckpt 里现在存了 `env`，但**此前存的没有**。
+    # 不还原 ⟹ 在另一个环境里评测 ⟹ 读数偏 37%（实测 63.98 vs 87.63）。
+    # 见 `q1_flat.resolve_train_env`。
+    ap.add_argument("--pm-interval", type=float, default=None,
+                    help="训练时用的 ⑫ 保养间隔（旧 ckpt 没有 `env` 字段时必须显式给）")
+    ap.add_argument("--agv-n-failures", type=int, default=0,
+                    help="训练时用的 ⑨ 按次数注入")
     ap.add_argument("--out", default="")
     a = ap.parse_args(argv)
     torch.set_num_threads(1)
@@ -123,7 +132,13 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     for path in a.ckpt:
         ck = torch.load(path, weights_only=False)
-        spec, _ = build(int(ck["seed"]))          # ⚠️ 同 seed ⟹ 同布局/同归一化
+        cons = constraints_from_ckpt(ck)
+        env = resolve_train_env(ck, pm_interval=a.pm_interval,
+                                agv_n_failures=a.agv_n_failures)
+        warn = missing_env_warning(ck, env)
+        if warn:
+            print(warn, file=sys.stderr)
+        spec, _ = build(int(ck["seed"]), constraints=cons, **env)  # ⚠️ 同 seed ⟹ 同布局
         # ⚠️ **2026-10-10：⑪ 去后不再有 `n_chargers`** —— 网络不随布局变宽。
         net = HierarchicalPolicy(with_value=ck["with_value"])
         net.load_state_dict(ck["state_dict"])

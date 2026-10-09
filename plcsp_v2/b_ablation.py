@@ -120,6 +120,8 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
                         "arm": arm, "seed": seed, "steps": steps, "n": n,
                         "dt_events": dt_events, "with_value": False,
                         "constraints": {k: bool(v) for k, v in cons.__dict__.items()},
+                        # ⚠️ **必须存环境**（2026-10-10 加）—— 见 `q1_flat.resolve_train_env`
+                        "env": dict(env),
                         "tau": spec.cfg.tau}, p)
             rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
     finally:

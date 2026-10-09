@@ -35,28 +35,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .env.constraints import ConstraintConfig
 from .env.reward import objective_vector
 from .hrl.agents import G_BINS, G_DIM, HierarchicalPolicy
 from .hrl.rollout import NetPolicy
-from .q1_flat import build
+from .q1_flat import (build, constraints_from_ckpt, missing_env_warning,
+                      resolve_train_env)
 
 DEFAULT_OUT = os.path.join(tempfile.gettempdir(), "g_pareto.jsonl")
 
 OBJ = ("makespan", "energy", "twt")
 """三目标，**一律越小越好**。"""
 
-
-def _constraints_from_ckpt(ck: dict) -> ConstraintConfig:
-    """从 ckpt 里恢复约束档（`b_ablation` / `c_mechanism` 存了它；`q1_flat` 没存）。
-
-    ⚠️ **必须与训练时同源**：特征层按 `ctx.constraints` 决定哪些量静默，
-    仿真按同一份走动力学。给错档 ⟹ 策略看到的世界与它学过的不是同一个。
-    """
-    saved = ck.get("constraints")
-    if not saved:
-        return ConstraintConfig()          # 默认档（`q1_flat` / `d5_nested` 存的就是它）
-    return ConstraintConfig(**saved)
 
 
 def run_g(net: HierarchicalPolicy, spec, g_bins: tuple[int, int, int], *, n: int,
@@ -113,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dt-events", type=int, default=20)
     ap.add_argument("--only-diag", action="store_true",
                     help="只扫对角 4 档（000/111/222/333）——冒烟用")
+    # ⚠️ **必须还原训练环境**（2026-10-10 加）—— 见 `q1_flat.resolve_train_env`
+    ap.add_argument("--pm-interval", type=float, default=None)
+    ap.add_argument("--agv-n-failures", type=int, default=0)
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
     torch.set_num_threads(1)
@@ -130,8 +122,13 @@ def main(argv: list[str] | None = None) -> int:
 
         for path in a.ckpt:
             ck = torch.load(path, weights_only=False)
-            cons = _constraints_from_ckpt(ck)
-            spec, _ = build(int(ck["seed"]), constraints=cons)
+            cons = constraints_from_ckpt(ck)
+            env = resolve_train_env(ck, pm_interval=a.pm_interval,
+                                    agv_n_failures=a.agv_n_failures)
+            warn = missing_env_warning(ck, env)
+            if warn:
+                print(warn, file=sys.stderr)
+            spec, _ = build(int(ck["seed"]), constraints=cons, **env)
             net = HierarchicalPolicy(with_value=ck["with_value"])
             net.load_state_dict(ck["state_dict"])
             net.eval()

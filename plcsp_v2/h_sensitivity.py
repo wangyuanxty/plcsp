@@ -37,8 +37,8 @@ from pathlib import Path
 import torch
 
 from .hrl.agents import HierarchicalPolicy
-from .q1_flat import build, evaluate
-from .g_pareto import _constraints_from_ckpt
+from .q1_flat import (build, constraints_from_ckpt, evaluate,
+                      missing_env_warning, resolve_train_env)
 
 DEFAULT_OUT = os.path.join(tempfile.gettempdir(), "h_sensitivity.jsonl")
 
@@ -69,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dt-events", type=int, default=20)
     ap.add_argument("--base", type=float, default=30.0,
                     help="`pm_interval` 的基准值（训练用的那个；本跑数器其余格点照 `GRID`）")
+    ap.add_argument("--pm-interval", type=float, default=None,
+                    help="训练时的 ⑫ 保养间隔（旧 ckpt 无 `env` 时必须给）")
+    ap.add_argument("--agv-n-failures", type=int, default=0,
+                    help="训练时的 ⑨ 按次数注入")
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
     torch.set_num_threads(1)
@@ -85,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
         for path in a.ckpt:
             ck = torch.load(path, weights_only=False)
-            cons = _constraints_from_ckpt(ck)
+            cons = constraints_from_ckpt(ck)
             seed = int(ck["seed"])
             net = HierarchicalPolicy(with_value=ck["with_value"])
             net.load_state_dict(ck["state_dict"])
@@ -94,7 +98,14 @@ def main(argv: list[str] | None = None) -> int:
                   f"steps={ck['steps']}）===", flush=True)
 
             # ⚠️ **基准必须在同一套 `build` 参数下取** —— 否则"变化"里混进了别的东西。
-            base_env = {"pm_interval": a.base, "agv_n_failures": 4}
+            # ⚠️ **基准 = 训练时的环境**，必须还原（否则"退化"里混进了"环境换了"）
+            base_env = resolve_train_env(ck, pm_interval=a.pm_interval,
+                                         agv_n_failures=a.agv_n_failures)
+            if a.pm_interval is None and "pm_interval" not in base_env:
+                base_env["pm_interval"] = a.base
+            warn = missing_env_warning(ck, base_env)
+            if warn:
+                print(warn, file=sys.stderr)
             bspec, _ = build(seed, constraints=cons, **base_env)
             b = evaluate(net, bspec, n=a.n_eval, seed=a.seed, dt_events=a.dt_events)
             print(f"  基准（pm_interval={a.base} · agv_n_failures=4）"

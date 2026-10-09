@@ -134,6 +134,71 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     return Spec(inst, lay, g, dm, cfg, ctx, w, cons), net.to(device)
 
 
+def constraints_from_ckpt(ck: dict) -> ConstraintConfig:
+    """从 ckpt 里恢复**约束档**（`b_ablation` / `c_mechanism` 存了它；`q1_flat` 没存）。
+
+    ⚠️ **必须与训练时同源**：特征层按 `ctx.constraints` 决定哪些量静默，
+    仿真按同一份走动力学。给错档 ⟹ 策略看到的世界与它学过的不是同一个。
+
+    ⚠️ **`q1_flat` 存的 ckpt 没有这个字段** ⟹ 回落到默认档。
+    那对 `q1_flat` / `d5_nested` 是**对的**（它们本来就用默认档训），
+    对别的来源则要另想（见 `resolve_train_env` 的同一条纪律）。
+    """
+    saved = ck.get("constraints")
+    if not saved:
+        return ConstraintConfig()
+    return ConstraintConfig(**saved)
+
+
+def resolve_train_env(ck: dict, *, pm_interval: float | None = None,
+                      agv_n_failures: int = 0) -> dict:
+    """把**训练时用的环境参数**还原出来，供"载入 ckpt 再评测"的跑数器用。
+
+    优先级：**命令行显式给的 > ckpt 里存的 > 默认档**。
+
+    ⚠️⚠️ **不还原它，评测就在另一个环境里做** —— 实测（`Full_s0.pt`，同一份策略）：
+
+    | 评测环境 | clean `makespan` |
+    |---|---|
+    | 默认档（`pm_interval=120`、`agv_n_failures=0`） | **63.98** |
+    | 训练档（`pm_interval=30`、`agv_n_failures=4`） | **87.63** |
+
+    **差 37%。** 而后者才是 `d5_nested` 里那个逐位对得上的数。
+    ⟹ **`d1_goal` / `g_pareto` / `h_sensitivity` 若不还原，读到的全是错环境的数。**
+
+    ⚠️ **2026-10-10 之前的 ckpt 没有 `env` 字段**（那三个训练跑数器当时还没存它）
+    —— 故**必须**用命令行显式补；`missing_env_warning` 就是给这种情况的。
+
+    ⚠️ **`h_sensitivity` 是例外**：它的**整个目的**就是"换参数重评" ⟹
+    它要的是**训练档做基准、再逐参数偏离**，故基准必须还原、扫描点则显式覆盖。
+    """
+    env: dict = {}
+    saved = ck.get("env") or {}
+    if saved.get("pm_interval") is not None:
+        env["pm_interval"] = float(saved["pm_interval"])
+    if saved.get("agv_n_failures"):
+        env["agv_n_failures"] = int(saved["agv_n_failures"])
+    if pm_interval is not None:                      # 命令行优先
+        env["pm_interval"] = float(pm_interval)
+    if agv_n_failures:
+        env["agv_n_failures"] = int(agv_n_failures)
+    return env
+
+
+def missing_env_warning(ck: dict, env: dict) -> str | None:
+    """ckpt 与命令行都没说环境时，返回一句**必须打出来的警告**（否则返回 `None`）。
+
+    **不静默**：静默的后果是"读到一张 37% 偏好的表而毫无察觉"。
+    """
+    if env or (ck.get("env") or {}):
+        return None
+    return ("⚠️⚠️ **ckpt 里没有 `env` 字段、命令行也没给 `--pm-interval` / "
+            "`--agv-n-failures`** ⟹ 本次评测跑在**默认档**上。\n"
+            "     若该策略是在别的参数下训的，**这里读到的数不是它的业绩**"
+            "（实测同一份策略：默认档 63.98 vs 训练档 87.63）。\n"
+            "      请补 `--pm-interval 30 --agv-n-failures 4`（或该次训练实际用的值）。")
+
+
 def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
              dt_events: int) -> dict:
     """**greedy** 评测 `n` 条链 → 三目标的均值与标准误（越小越好）。"""
@@ -252,6 +317,9 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
                     "arm": arm, "seed": seed, "steps": steps, "n": n,
                     "dt_events": dt_events, "device_trained_on": device,
                     "with_value": arm in ("A", "A2"),
+                    # ⚠️ **必须存环境**（2026-10-10 加）：不存的话"载入 ckpt 再评测"的
+                    # 跑数器只能猜环境，而猜错会让读数偏 37%（见 `resolve_train_env`）。
+                    "env": dict(env),
                     "tau": spec.cfg.tau}, p)
         rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
 
