@@ -45,15 +45,40 @@ ARMS = ("flat", "two")
 """`flat` = 扁平链（一个组 · 同步）· `two` = 两层（按层切组 · 交替）。"""
 
 
+def _make_optim(net, lr: float, b_lr: float | None):
+    """优化器。**`b_lr` 非空时给 `B` 矩阵单独设学习率**（其余参数照 `lr`）。
+
+    ⚠️ **为什么需要它**（2026-10-10 实测）：`B` **零初始化** + 与其余参数共用 `lr=1e-4`
+    ⟹ 它只以 **~6.5e-5/步** 增长 ⟹ 200 步后 ‖B‖ ≈ **0.013**，而基底 logits 是 O(1)。
+    `g` 影响不了动作 ⟹ **阶段 A（顶层）的优势恒 0 ⟹ 全程空转**。
+
+    | `lr_B` | ‖B‖（60 步） | **阶段 A 活着的步数** |
+    |---|---|---|
+    | `1e-4`（原样） | 0.0024 | **3 / 60**（5%） |
+    | `1e-2`（×100） | **0.184** | **46 / 60**（**77%**） |
+
+    **⟹ 不把 `B` 单独提速，两层训练的顶层就从来没启动过** ——
+    而 D5（"两层 > 一层"）比的正是它。
+    """
+    if not b_lr or float(b_lr) == float(lr):
+        return torch.optim.Adam(net.parameters(), lr=lr)
+    ids = {id(net.pa.b), id(net.la.b), id(net.ra_maint.b)}
+    fast = [p for p in net.parameters() if id(p) in ids]
+    slow = [p for p in net.parameters() if id(p) not in ids]
+    return torch.optim.Adam([{"params": fast, "lr": float(b_lr)},
+                             {"params": slow, "lr": float(lr)}])
+
+
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             eval_every: int, eval_n: int, rec, workers: int = 0,
-            save_dir: str = "", lr: float = 1e-4, env: dict | None = None) -> None:
+            save_dir: str = "", lr: float = 1e-4, b_lr: float | None = None,
+            env: dict | None = None) -> None:
     """一条 `(臂, 种子)`。**两臂共用 `build` / `evaluate`** ⟹ 实例/布局/编码器/约束档全同。"""
     env = dict(env or {})
     spec, net = build(seed, **env)
-    optim = torch.optim.Adam(net.parameters(), lr=lr)
+    optim = _make_optim(net, lr, b_lr)
     rec({"kind": "start", "arm": arm, "seed": seed, "steps": steps, "n": n,
-         "dt_events": dt_events, "workers": workers,
+         "dt_events": dt_events, "workers": workers, "lr": lr, "b_lr": b_lr,
          "n_params": sum(p.numel() for p in net.parameters())})
     rec({"kind": "eval", "arm": arm, "seed": seed, "step": 0,
          **evaluate(net, spec, n=eval_n, seed=0, dt_events=dt_events)})
@@ -122,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--threads", type=int, default=1, help="父进程基线线程数（§107：段/链要 1）")
     ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--b-lr", type=float, default=None,
+                    help="`B` 矩阵**单独**的学习率（默认 None = 与 `--lr` 同）。"
+                         "⚠️ 实测：与 `--lr` 同时（1e-4），阶段 A 只有 5% 的步活着；"
+                         "给 1e-2（×100）则有 77%。**不设这个，两层训练的顶层从来没启动过。**")
     ap.add_argument("--save-dir", default="")
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
@@ -163,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         workers=a.workers, save_dir=a.save_dir, lr=a.lr,
+                        b_lr=a.b_lr,
                         env={"instance": a.instance, "tau": a.tau,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
