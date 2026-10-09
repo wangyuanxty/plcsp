@@ -1,0 +1,173 @@
+# -*- coding: utf-8 -*-
+"""**把两层策略接到仿真上**（步 5a）——网络 → `policy_*` 回调，并**冻结决策**供带梯度重算。
+
+设计参照 v1 的既有模式（`plcsp/algo/group_rel.py` 的 `Decision` + `chain_logp`）：
+**无梯度地跑一条链，把每个决策点的输入原样记下来；带梯度的 logp 事后**批量重算**。**
+
+⚠️ **v2 比 v1 简单一处**：v1 的 `Decision` 要存**逐候选特征**（S 头挑机台、L 头挑车、R 头挑路），
+因为动作是"从 n 个实体里挑一个"。**v2 的动作是"从固定几条规则里挑一条"** ⟹
+头直接出固定宽度的 logits，**不需要逐候选特征**。`Decision` 因此只剩 `(kind, tok, seg, g, action, logp)`。
+
+══ 四类决策点 ══
+
+| kind | 触发 | 动作 | logits |
+|---|---|---|---|
+| **MA** | 定时器（每 `dt_events` 个完工）+ 扰动（③ 机障 / ⑨ AGV 故障） | 3 维各 4 档 | `(B,3,4)` |
+| **PA** | 一道工序被分配的时刻（= transporter 的每个事件） | 12 条复合规则选 1 | `(B,12)` |
+| **LA** | **与 PA 同一决策点** | 3 条派车规则选 1 | `(B,3)` |
+| **C / M** | RA 的两个头（AGV 待命 / 机台完工且下一件未上机） | `1+n_桩` / 2 | —— |
+
+⚠️ **`policy_l` 拿到的是"规则下标"而不是车号** —— 规则由 `hrl.rules.la_rule_policy` 落到具体车上。
+同理 `policy_pa` 拿到规则下标后由 `rules.apply_pa_rule` 落到 `(池下标, 机台)`。
+**这样"策略的输出"与"规则的输出"分得干干净净**：策略只在**规则层**做选择。
+"""
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import numpy as np
+import torch
+
+from ..env.des import PM_CANDS          # ⚠️ `PM_CANDS` 的**唯一定义处**在 `env/des.py`（动作码语义）
+from ..env.rule_views import LAView, PAView
+from ..env.snapshot import Snapshot
+from ..nn.features import NormContext
+from ..nn.state_emb import build_tok
+from .agents import G_BINS, G_DIM, HierarchicalPolicy, g_to_vec
+from .rules import LA_RULE_NAMES, N_LA_RULES, N_PA_RULES, apply_pa_rule, la_rule_policy
+
+
+class Decision(NamedTuple):
+    """一个决策点的**全部打分输入**（采样时冻结）——事后据此带梯度重算 logp。
+
+    存的是**当时的**上下文，不是事后重建的：仿真状态在变，用最新快照重算等于把策略输入
+    换成另一个状态（决策与 logp 不再对应）。与 v1 同名同义，**只是不要 `cand_feat`**（见模块 docstring）。
+    """
+
+    kind: str                       # "MA" | "PA" | "LA" | "C" | "M"
+    tok: np.ndarray                 # 当时的 token 特征 (N, F_MAX)
+    seg: tuple[int, ...]            # 当时的段长
+    g_bins: tuple[int, int, int]    # 当时生效的 `g`（MA 自己那条存它采到的档）
+    action: int                     # 所取的动作。MA = 三维档压平（b0*16+b1*4+b2）；其余 = 规则/动作码下标
+    logp: float                     # 采样时的 logp（MA = 三维之和）
+    la_ctx: np.ndarray | None = None  # 仅 LA：逐决策任务上下文 (LA_CTX_DIM,)
+
+
+class Recorder:
+    """按**发生顺序**收集 `Decision`。**顺序即链**——事后按同一顺序重算 logp。"""
+
+    def __init__(self) -> None:
+        self.decisions: list[Decision] = []
+
+    def __len__(self) -> int:
+        return len(self.decisions)
+
+    def kinds(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for d in self.decisions:
+            out[d.kind] = out.get(d.kind, 0) + 1
+        return out
+
+
+class NetPolicy:
+    """把 `HierarchicalPolicy` 包成仿真要的那组回调，并记录决策。
+
+    ⚠️ **采样在 `torch.no_grad()` 下做**（rollout 不该建图）；logp 记的是**采样时**的值，
+    带梯度的重算在 `recompute_logp` 里另起一次前向（与 v1 的 `_decision_logp_terms` 同一套形状）。
+    """
+
+    def __init__(self, net: HierarchicalPolicy, inst, layout, ctx: NormContext,
+                 *, g_bins: tuple[int, int, int] | None = None, greedy: bool = False,
+                 seed: int = 0, record: bool = True):
+        self.net, self.inst, self.layout, self.ctx = net, inst, layout, ctx
+        self.greedy = bool(greedy)
+        self.rec = Recorder() if record else None
+        self.gen = torch.Generator().manual_seed(int(seed))
+        # 当前生效的目标：给定时 = **条件在固定 `g`**（阶段 B / 执行）；`None` = 由 MA 现采
+        self.g_bins: tuple[int, int, int] | None = (None if g_bins is None
+                                                    else (int(g_bins[0]), int(g_bins[1]),
+                                                          int(g_bins[2])))
+        self.ma_reasons: list[str] = []
+
+    # ── 内部：一次前向（no_grad，只为采样）──
+    def _forward(self, snap: Snapshot, la_ctx: np.ndarray | None = None):
+        tok, seg = build_tok(snap, self.inst, self.layout, self.ctx)
+        t = torch.as_tensor(tok).unsqueeze(0)
+        gb = None if self.g_bins is None else torch.as_tensor([list(self.g_bins)])
+        lc = None if la_ctx is None else torch.as_tensor(la_ctx, dtype=torch.float32)[None]
+        with torch.no_grad():
+            return self.net(t, seg, gb, la_ctx=lc, hard=self.greedy), tok, seg
+
+    def _pick(self, logits: torch.Tensor, kind: str, tok, seg, action_override=None,
+              la_ctx=None, slot: int | None = None) -> int:
+        """从 `(1, n)` 的 logits 里取一个动作（greedy=argmax，否则按分布采样），并记录。"""
+        row = logits[0] if slot is None else logits[0, slot]
+        prob = torch.softmax(row, dim=-1)
+        a = int(torch.argmax(row)) if self.greedy else int(torch.multinomial(prob, 1, generator=self.gen))
+        logp = float(torch.log(prob[a].clamp_min(1e-12)))
+        if self.rec is not None:
+            gb = self.g_bins if self.g_bins is not None else (0, 0, 0)
+            self.rec.decisions.append(Decision(
+                kind=kind, tok=tok, seg=tuple(seg), g_bins=tuple(gb),
+                action=int(a), logp=logp,
+                la_ctx=None if la_ctx is None else np.asarray(la_ctx, dtype=np.float32)))
+        return a
+
+    # ── 顶层（MA）：采 `g` ──
+    def policy_ma(self, snap: Snapshot, reason: str) -> tuple[int, int, int]:
+        """采一组 `g`（3 维各 4 档）并**就地生效**（下层下一次决策就用它）。"""
+        self.ma_reasons.append(str(reason))
+        out, tok, seg = self._forward(snap)
+        gl = out.g_logits[0]                      # (3, 4)
+        bins, logps = [], []
+        for i in range(G_DIM):
+            prob = torch.softmax(gl[i], dim=-1)
+            b = (int(torch.argmax(gl[i])) if self.greedy
+                 else int(torch.multinomial(prob, 1, generator=self.gen)))
+            bins.append(b)
+            logps.append(float(torch.log(prob[b].clamp_min(1e-12))))
+        self.g_bins = (bins[0], bins[1], bins[2])
+        if self.rec is not None:
+            flat = bins[0] * (G_BINS ** 2) + bins[1] * G_BINS + bins[2]
+            self.rec.decisions.append(Decision(
+                kind="MA", tok=tok, seg=tuple(seg), g_bins=tuple(self.g_bins),
+                action=flat, logp=float(sum(logps))))
+        return self.g_bins
+
+    # ── PA：12 条规则选 1 → `apply_pa_rule` 落到 (池下标, 机台) ──
+    def policy_pa(self, view: PAView, pool, tie_rng=None):
+        out, tok, seg = self._forward(view.snap)
+        rule = self._pick(out.pa, "PA", tok, seg)
+        return apply_pa_rule(rule, view, pool, tie_rng)
+
+    # ── LA：3 条规则选 1 → `la_rule_policy` 落到车号 ──
+    def policy_l(self, view: LAView, cand_v):
+        lc = self._la_ctx(view)
+        out, tok, seg = self._forward(view.snap, lc)
+        rule = self._pick(out.la, "LA", tok, seg, la_ctx=lc)
+        return int(la_rule_policy(rule)(view, cand_v))
+
+    def _la_ctx(self, view: LAView) -> np.ndarray:
+        """LA 的**逐决策任务上下文**（≡ `agents.LA_CTX_DIM`）：
+        `(起点节点, 终点节点, 可运输时刻 − now, 工序号)`，逐项归一。"""
+        d = max(float(self.ctx.bbox_diag), 1e-9)
+        m = max(float(self.ctx.m_ref), 1e-9)
+        return np.array([view.frm_node / d, view.to_node / d,
+                         float(np.clip((view.ready_at - view.now) / m, -2.0, 2.0)),
+                         float(np.clip(view.oi / 8.0, -1.0, 4.0))], dtype=np.float32)
+
+    # ── RA 的两个头 ──
+    def policy_c(self, snap: Snapshot, aid: int, cands):
+        del aid
+        out, tok, seg = self._forward(snap)
+        return self._pick(out.ra_charge, "C", tok, seg)      # 与 `charge_cands` 同序
+
+    def policy_m(self, snap: Snapshot, mach: int, cands):
+        del mach
+        out, tok, seg = self._forward(snap)
+        return self._pick(out.ra_maint, "M", tok, seg)       # 与 `PM_CANDS` 同序
+
+
+# `PM_CANDS` / `LA_RULE_NAMES` 由本模块转出（explicit re-export）——调用方从一处取就够了
+__all__ = ["Decision", "LA_RULE_NAMES", "N_LA_RULES", "N_PA_RULES", "NetPolicy",
+           "PM_CANDS", "Recorder", "g_to_vec", "torch"]

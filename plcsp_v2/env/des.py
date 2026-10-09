@@ -59,6 +59,10 @@ DISTURBANCE = -1
 """事件流的**扰动哨兵**（`frm_idx` 位）——不是工序完工，而是"开一个决策点"。
 原文的决策点定义：*"the time when an operation is assigned **or an AGV breakdown occurs**"*。"""
 
+DISTURBANCE_MACHINE = -2
+"""**机障 ③** 的扰动哨兵。设计 §10⑤：顶层 MA 的触发 = **定时器 + 机障 ③ + AGV 故障 ⑨** ——
+⑨ 的哨兵是 `DISTURBANCE`，③ 的在这里。两者都只是"开一个决策点/顶层决策点"，不产生件。"""
+
 AEI2025_AGV_ACTIVATION_COST = 7.0      # c：启用一台 AGV 的费用
 AEI2025_UNIT_TRANSPORT_COST = 0.5      # uc：单位运输时间成本
 
@@ -497,10 +501,14 @@ class MachineSim:
 
     def __init__(self, env, pad: MachinePad, rng, cfg: SimConfig, stats: dict, completes: dict,
                  events_q: simpy.Store, constraints, track: SimTrack, pm=None,
-                 seq: SeqDecide | None = None):
+                 seq: SeqDecide | None = None, machine_disturbance: bool = False):
         self.env, self.pad, self.rng, self.cfg, self.stats = env, pad, rng, cfg, stats
         self.completes = completes
         self.events_q = events_q
+        # ③ 机障是否向事件流发**扰动哨兵**（顶层 MA 的触发之一，设计 §10⑤）。
+        # ⚠️ **默认 False** ⟹ 不往 `events_q` 多插事件 ⟹ **既有读数逐位不变**；
+        # 只有 `run_gated(policy_ma=...)` 才打开（见 `_build_entities`）。
+        self.machine_disturbance = bool(machine_disturbance)
         self.con = constraints
         self.track = track              # 快照跟踪量（P2 Task 1，见 `SimTrack`）
         self.pm = pm                    # ⑫ 维护头回调（None = 规则驱动，见类 docstring）
@@ -545,6 +553,11 @@ class MachineSim:
                     yield self.env.timeout(seg)
                     if nxt_fail < finish:
                         self.stats["fail_events"] += 1
+                        # ③ 机障 → 顶层 MA 的触发之一（设计 §10⑤）。**只发哨兵**：
+                        # 无 `policy_ma` 时下游收到它只记一个计数、什么都不做 ⟹ 既有读数不变。
+                        if self.machine_disturbance:
+                            self.events_q.put((DISTURBANCE_MACHINE, self.pad.id, -1, None,
+                                               False))
                         yield self.env.timeout(self.cfg.repair_time)   # 中断-恢复
                     t += seg
             self.stats["process_time"] += op.time
@@ -1257,7 +1270,7 @@ class SimWorld:
     def _build_entities(self, env, stats: dict, completes: dict, rng, *, bound: bool,
                         seed_chain: int = 0, charger_res=(), pm=None,
                         charge=None, seq: SeqDecide | None = None,
-                        done=None) -> tuple[
+                        done=None, machine_disturbance: bool = False) -> tuple[
                             list, list[simpy.Store] | simpy.Store, simpy.Store]:
         """建机台 / 装卸站 / 任务队列 / 车辆 / 跟踪量，并把活引用挂到 `self`（`snapshot()` 读它们）。
 
@@ -1290,7 +1303,8 @@ class SimWorld:
         events_q = simpy.Store(env)
         track = SimTrack(self.inst.n_jobs, self.inst.n_machines, self.cfg.n_agv)
         machines = [MachineSim(env, self.layout.machines[i], rng, self.cfg, stats, completes,
-                               events_q, self.constraints, track, pm=pm, seq=seq)
+                               events_q, self.constraints, track, pm=pm, seq=seq,
+                               machine_disturbance=machine_disturbance)
                     for i in range(self.inst.n_machines)]
         lu = LuStation(env, self.layout.lu, self.inst.n_machines, completes, track,
                        done=done, n_jobs=self.inst.n_jobs)
@@ -1763,6 +1777,9 @@ class SimWorld:
                 "pa_assigns": stats.get("pa_assigns", 0),
                 # 扰动触发的决策点数（原文决策点定义的**另一半**，2026-10-08 补齐）
                 "dist_events": stats.get("dist_events", 0),
+                # ③ 机障发出的扰动哨兵数（顶层触发之一）+ 顶层实际决策次数
+                "mf_dist_events": stats.get("mf_dist_events", 0),
+                "ma_decisions": stats.get("ma_decisions", 0),
                 # ⑨ 的三个故障场景分布 + 中断记账（`at` 是 TC 的一项，见式(48)）
                 "agv_fail_sc1": stats.get("agv_fail_sc1", 0),
                 "agv_fail_sc2": stats.get("agv_fail_sc2", 0),
@@ -1774,7 +1791,8 @@ class SimWorld:
                 "agv_load": stats.get("agv_load", []),
                 "dbg": {k: v for k, v in stats.items()
                         if k in ("in_q_gets", "trans_evt", "tasks_put", "tasks_get", "requeue",
-                                 "pa_assigns", "dist_events")},
+                                 "pa_assigns", "dist_events", "mf_dist_events",
+                                 "ma_decisions")},
                 "travel_time_total": float(stats["travel_time"]),
                 # 物流成本（**借 AEI2025 式(48) 的成本模型**，只为让读数可与其表并列）：
                 #   `TC = c·Σ y_v + uc·(Σ(nct−nst+lct−lst) + at)`
@@ -1795,7 +1813,8 @@ class SimWorld:
 
     def run_gated(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
                   policy_l=None, policy_s=None, online_s: bool = False,
-                  policy_m=None, policy_c=None, policy_pa=None) -> dict:
+                  policy_m=None, policy_c=None, policy_pa=None,
+                  policy_ma=None, dt_events: int = 0) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1943,7 +1962,8 @@ class SimWorld:
          events_q) = self._build_entities(env, stats, completes, rng, bound=True,
                                           seed_chain=seed_chain, charger_res=charger_res,
                                           pm=pm_fn, charge=charge_fn,
-                                          done=done)
+                                          done=done,
+                                          machine_disturbance=policy_ma is not None)
         for e in entities:                      # ⚠️ 启动顺序不得变（同刻事件次序由注册顺序定）
             env.process(e.run())
         for agv in self.agvs:
@@ -1954,7 +1974,8 @@ class SimWorld:
         env.process(self._transporter(env, events_q, tasks_in, plans, entities, stats, lu_idx,
                                       bound=True, policy_l=policy_l,
                                       policy_s=policy_s, online_s=online_s,
-                                      policy_pa=policy_pa))
+                                      policy_pa=policy_pa,
+                                      policy_ma=policy_ma, dt_events=dt_events))
         # horizon 的工时上界：**按最短候选**估（在线时 `plans` 是决策日志、读不到时长；
         # 离线且用默认贪婪计划时该式 = 各工序所选时长之和，与旧式逐位相同）。
         # 实际选择可能更长，靠下面的 6× 余量兜底——掐表时 horizon_hit 如实置位。
@@ -2014,6 +2035,9 @@ class SimWorld:
                 "pa_assigns": stats.get("pa_assigns", 0),
                 # 扰动触发的决策点数（原文决策点定义的**另一半**，2026-10-08 补齐）
                 "dist_events": stats.get("dist_events", 0),
+                # ③ 机障发出的扰动哨兵数（顶层触发之一）+ 顶层实际决策次数
+                "mf_dist_events": stats.get("mf_dist_events", 0),
+                "ma_decisions": stats.get("ma_decisions", 0),
                 # ⑨ 的三个故障场景分布 + 中断记账（`at` 是 TC 的一项，见式(48)）
                 "agv_fail_sc1": stats.get("agv_fail_sc1", 0),
                 "agv_fail_sc2": stats.get("agv_fail_sc2", 0),
@@ -2197,7 +2221,7 @@ class SimWorld:
     def _transporter(self, env, events_q, tasks_in, plans, entities, stats, lu_idx: int,
                      bound: bool = False, agv_phi: list[int] | None = None,
                      policy_l=None, policy_s=None, online_s: bool = False,
-                     policy_pa=None):
+                     policy_pa=None, policy_ma=None, dt_events: int = 0):
         """机台完成事件 → 生成搬运任务；`task_i` = 本函数生成序。
 
         **三类事件**（端点号：机台 `0..m-1`、装卸站 = `lu_idx` = `m`）：
@@ -2240,16 +2264,19 @@ class SimWorld:
         # `booking[(j, oi)]` = 该程**已订的车**（LA 在派工那一刻定的，见 §74.5）。
         pending: dict[int, tuple[int, int]] = {}
         booking: dict[tuple[int, int], int] = {}
+        last_ma_ops = -1          # 上一次**定时器**触发顶层时的 `ops_done`（防同刻重复触发）
         while True:
             frm_idx, job, oi, op, is_last = yield events_q.get()
             stats["trans_evt"] = stats.get("trans_evt", 0) + 1
             n_ops = len(self.inst.jobs[job]) if job >= 0 else 0
-            if frm_idx == DISTURBANCE:
-                # ⚠️ **扰动事件（AGV 故障）**：原文的决策点定义含它
-                # （*"…or an AGV breakdown occurs"*）。它**不产生件**、也不改 `pending`，
-                # 只是让 PA/LA 在扰动那一刻**再决策一次**（往下走到决策点即可）。
-                # 见 §77.4 第 5 行；LA 侧对"趴窝车已订任务的重订"**未实现**，登记 §77.5。
+            if frm_idx < 0:
+                # ⚠️ **扰动事件**：`DISTURBANCE`（AGV 故障 ⑨）或 `DISTURBANCE_MACHINE`（机障 ③）。
+                # 它们**不产生件**、也不改 `pending`，只是让下层/顶层**在扰动那一刻再决策一次**。
+                # ⑨：原文的决策点定义含它（见 §77.4 第 5 行）；**LA 侧对"趴窝车已订任务的重订"
+                # 未实现**，登记 §77.5。③：设计 §10⑤ 把机障列为**顶层**的触发之一。
                 stats["dist_events"] = stats.get("dist_events", 0) + 1
+                if frm_idx == DISTURBANCE_MACHINE:
+                    stats["mf_dist_events"] = stats.get("mf_dist_events", 0) + 1
             elif is_last:                                   # 末工序完工 → 回装卸站
                 # ⚠️ 回站**不由 PA 决定**（终点恒为装卸站）⟹ 不走决策点，直接发。
                 # 这是与原文的一处小差异：他们的 dummy 工序（`J_i+1`）也进 PA 的动作。
@@ -2263,6 +2290,20 @@ class SimWorld:
                 if frm_idx != lu_idx:
                     yield entities[frm_idx].out_q.get()
                 pending[job] = (oi + 1, frm_idx)             # 件已到，等目的地
+            # ── 顶层（MA）触发：**定时器 + 扰动**（设计 §10⑤）──
+            # `policy_ma(snap, reason) -> g_bins`；`reason ∈ {"timer", "disturbance"}`。
+            # ⚠️ 触发点放在**决策点之前**：这样本次决策用到的就是刚定下的 `g`。
+            # `dt_events = 0` ⟹ 定时器关（只有扰动触发）。
+            if policy_ma is not None:
+                od = int(stats.get("ops_done", 0))
+                timer_due = (dt_events > 0 and od > 0 and od % dt_events == 0
+                             and od != last_ma_ops)
+                if frm_idx < 0 or timer_due:
+                    if timer_due:
+                        last_ma_ops = od
+                    stats["ma_decisions"] = stats.get("ma_decisions", 0) + 1
+                    policy_ma(self.snapshot(),
+                              "disturbance" if frm_idx < 0 else "timer")
             if policy_pa is not None:
                 # ── 决策点：**恰派一件**（原文："the decision point t is defined as the time
                 #    when an operation is assigned"）──

@@ -144,16 +144,23 @@ def test_bias_is_a_pure_linear_additive_term():
 
 
 @pytest.mark.unit
-def test_missing_la_task_context_is_an_explicit_error():
-    """⚠️ LA 头声明了逐决策上下文 ⟹ **不给就报错**。
+def test_missing_la_task_context_skips_the_la_head_and_direct_calls_still_raise():
+    """⚠️ **没给任务上下文 ⟹ LA 头不算**（`out.la is None`），**不是补 0 再算**。
 
-    静默补 0 会让"任务身份没接上"变成**无声的坏策略**——LA 头会以为每趟任务的
-    起讫都是 0 号节点。与"掩码为空报错"同一条纪律。
+    为什么这样定：LA 的动作是"从 3 条派车规则里挑"，而**规则的自变量含这一趟的任务**——
+    **没有任务就无从打分**。补 0 等于报出一个"每趟任务都一样"的分布 ⟹ 那是**无声的坏策略**。
+
+    ⚠️ **两件事要一起钉住**：
+    1. `forward(la_ctx=None)` ⟹ `out.la is None`（**明确地说"这次不决策 LA"**）；
+    2. **直接调 `net.la(...)` 不给 `ctx_feat` 仍然报错** —— 那一层不许静默。
     """
     tok, seg, n_ch = _tok_seg()
     net = HierarchicalPolicy(n_chargers=n_ch)
+    out = net(tok, seg, torch.zeros(1, G_DIM, dtype=torch.long))
+    assert out.la is None, "没给任务上下文时不该算出 LA 的分布"
+    assert out.pa is not None and out.ra_charge is not None  # 其余三个头照常
     with pytest.raises(ValueError, match="逐决策上下文"):
-        net(tok, seg, torch.zeros(1, G_DIM, dtype=torch.long))
+        net.la(net.enc(tok, seg)[0], net.masks(seg)["LA"], out.g, None)
 
 
 @pytest.mark.unit

@@ -81,7 +81,7 @@ class PolicyOut(NamedTuple):
     g_bins: torch.Tensor            # (B, 3) —— 采到的档（argmax / 采样）
     g: torch.Tensor                 # (B, 3) —— 连续目标向量（`g_to_vec(g_bins)`）
     pa: torch.Tensor                # (B, 12) —— PA 的 12 条复合规则
-    la: torch.Tensor                # (B, 3)
+    la: torch.Tensor | None         # (B, 3)；**`la_ctx` 未给时为 `None`**（见 `forward`）
     ra_charge: torch.Tensor         # (B, 1 + n_chargers) —— 0 = 不去充
     ra_maint: torch.Tensor          # (B, 2) —— 0 = 生产、1 = 保养
 
@@ -182,6 +182,12 @@ class HierarchicalPolicy(nn.Module):
 
         `g_bins` 给定 ⟹ **下层条件在该目标上**（阶段 B / 执行）；`None` ⟹ 顶层现采一个
         （阶段 A / 训练时）。`hard=True`（默认）取 argmax，否则按 logits 采样。
+
+        ⚠️ **`la_ctx=None` ⟹ `out.la` 也是 `None`（LA 头不算）**，不是"补 0 再算"。
+        为什么：LA 的动作空间是"从 3 条派车规则里挑"，而**规则的自变量含这一趟的任务**
+        （`LA_CTX_DIM`）——**没有任务就无从打分**。补 0 等于报出一个"每趟任务都一样"的分布
+        （`_MaskedScoreHead` 会为此显式报错）。**不算 = 明确地说"这次不决策 LA"**。
+        好处附带：一个决策点只用得着一个头，**不必把四个头都算一遍**。
         """
         z, pooled = self.enc(tok, seg, bias)          # (B,N,d), (B,d)
         g_logits = self.ma(pooled)                    # (B,3,n_bins)
@@ -194,7 +200,7 @@ class HierarchicalPolicy(nn.Module):
         return PolicyOut(
             g_logits=g_logits, g_bins=g_bins, g=g,
             pa=self.pa(z, mk["PA"], g),
-            la=self.la(z, mk["LA"], g, la_ctx),
+            la=(None if la_ctx is None else self.la(z, mk["LA"], g, la_ctx)),
             ra_charge=self.ra_charge(z, mk["RA_charge"], g),
             ra_maint=self.ra_maint(z, mk["RA_maint"], g),
         )
