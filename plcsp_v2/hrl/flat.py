@@ -46,15 +46,17 @@ CV_DEFAULT = 0.5
 
 
 def flat_rollout(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
-                 dt_events: int) -> list[tuple[float, NetPolicy, tuple]]:
+                 dt_events: int, greedy: bool = False) -> list[tuple[float, NetPolicy, tuple]]:
     """采 `n` 条**完整链**（全层一起采、不冻结、不重放）→ `[(R, 链, 目标三元组)]`。
 
     ⚠️ 复用 `train.base_chain` —— 它本来就是"一条完整链、全层 live"。
     **扁平链不是另一套策略，是同一套策略的另一种分组方式。**
+
+    `greedy=True` 用于**评测**（确定性、可复现）；训练一律 `False`（要探索）。
     """
     out: list[tuple[float, NetPolicy, tuple]] = []
     for i in range(n):
-        p = base_chain(net, spec, greedy=False, seed=seed * 1000 + i, dt_events=dt_events)
+        p = base_chain(net, spec, greedy=greedy, seed=seed * 1000 + i, dt_events=dt_events)
         f = objective_vector(p.metrics)                      # type: ignore[attr-defined]
         out.append((scalar_reward(f, spec.w), p, f))
     return out
