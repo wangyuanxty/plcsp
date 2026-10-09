@@ -126,8 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
     ap.add_argument("--pm-interval", type=float, default=None, help="⑫ 保养间隔（dev 档 30）")
-    ap.add_argument("--finite-buffer", action="store_true",
-                    help="② 开有限缓冲（默认关）。⚠️ 开时改动力学（见 progress-log §118）")
+    ap.add_argument("--no-finite-buffer", dest="finite_buffer", action="store_false",
+                    help="② **关掉**有限缓冲（**默认是开的**，见 progress-log §118）")
     ap.add_argument("--agv-n-failures", type=int, default=0,
                     help="⑨ 按次数注入（0 = 关，用 agv_mtbf 泊松流）。照 Shi 2025 口径")
     ap.add_argument("--target-failures", type=float, default=None,

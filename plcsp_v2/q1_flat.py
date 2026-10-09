@@ -69,7 +69,7 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
           n_agv: int = 3, with_value: bool = False, device: str = "cpu",
           instance: str = "mk01", pm_interval: float | None = None,
           target_failures: float | None = None, agv_n_failures: int = 0,
-          finite_buffer: bool = False):
+          finite_buffer: bool = True):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
@@ -111,8 +111,10 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
     # ② 有限缓冲：**约束对象要同时给仿真与特征层**（两份不同源 = 假信号）。
-    # `None` = 全默认档（② 关、其余开）⟹ 与改动前逐位相同。
-    cons = ConstraintConfig(finite_buffer=True) if finite_buffer else None
+    # ⚠️ **2026-10-10：② 的默认值翻成 `True`**（用户裁定「在报告档打开」）⟹
+    # 这里**恒传一个真对象**，不再用 `None`。`None` 的语义是"全开"，
+    # 而"全开"现在**恰好等于** `ConstraintConfig()` —— 那就直接给它。
+    cons = ConstraintConfig(finite_buffer=bool(finite_buffer))
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg, constraints=cons)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
     # ⚠️ **2026-10-10：⑪ 去后构造网络不再要 `n_chargers`**（充电头是唯一随布局变宽的头）。
@@ -266,9 +268,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="交期 τ；None = 查逐实例标定表（10/10 可用）")
     ap.add_argument("--pm-interval", type=float, default=None,
                     help="⑫ 保养间隔（主轴分钟）。默认 120；dev 档用 30（MK01 一局只 76 min）")
-    ap.add_argument("--finite-buffer", action="store_true",
-                    help="② 开有限缓冲（默认关）。⚠️ 开时**改动力学**：投递撞上满缓冲会让步"
-                         "重试，PA 的候选机台也会滤掉已满的（见 progress-log §118）")
+    ap.add_argument("--no-finite-buffer", dest="finite_buffer", action="store_false",
+                    help="② **关掉**有限缓冲（**默认是开的**，见 progress-log §118）。"
+                         "关 ⟹ 缓冲无界，退回 2026-10-10 之前的动力学（消融用）")
     ap.add_argument("--agv-n-failures", type=int, default=0,
                     help="⑨ 按次数注入（0 = 关，用 agv_mtbf 泊松流）。照 Shi 2025 口径")
     ap.add_argument("--target-failures", type=float, default=None,

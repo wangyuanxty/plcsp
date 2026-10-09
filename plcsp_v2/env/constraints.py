@@ -34,9 +34,19 @@ class ConstraintConfig:
     # A 类：基建已有
     # ⚠️ **v2：① 拥堵开关已删**（2026-10-08）—— 区段机制整个移除
     # ⚠️ **v2：② 有限缓冲开关曾删**（2026-10-08），**2026-10-10 加回**。
-    # ⚠️ **默认 `False`** —— 开时改动力学（投递会阻塞）。
-    # 为什么默认关：本仓纪律「机制开关默认关 ⟹ 既有读数逐位不变」（同 `agv_failover`）。
-    finite_buffer: bool = False
+    # ⚠️ **2026-10-10：默认值由 `False` 翻成 `True`**（用户裁定「**在报告档打开**」）。
+    # **依据**：② 是五条里**唯一默认档就 binding** 的那条（MK01 makespan 73.01 vs 75.87、
+    # AGV 侧阻塞 58.0 min）。**一个默认关着的约束，在论文里说不出口** ——
+    # 而 AEI2025 的假设 4 恰恰批评"约束建模不现实"，我们不该在这条上留同一个把柄。
+    #
+    # ⚠️ **本条**覆盖**本仓的通用纪律「机制开关默认关 ⟹ 既有读数逐位不变」。
+    # 为什么覆盖是安全的：**只有本开关**翻了默认；其余四条逐位不变。
+    # 代价是**2026-10-10 之前的读数全部作废**（凡是走默认档跑出来的）。
+    #
+    # ⚠️ **它还让 `SimWorld(constraints=None)` 的契约第一次为真** ——
+    # `des.SimWorld` 的 docstring 写着「`None` → **全开**」，
+    # 而 ② 关着时 `None` 其实**不是全开**（少一条）。翻过来才对得上。
+    finite_buffer: bool = True
     machine_failure: bool = True      # ③ 机器故障（泊松 + 中断恢复）
     # B 类：近乎免费
     # ⚠️ **v2：④ 返工开关已删**（2026-10-08）
@@ -69,7 +79,12 @@ ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "-物流": _FULL.with_off("agv_failure"),
     "-生产": _FULL.with_off("finite_buffer", "machine_failure", "maintenance"),
     "-信息": _FULL.with_off("due_dates"),
-    "None": _FULL.with_off("machine_failure",
+    # ⚠️ **`None` = 五条全关** —— 必须**逐条列全**。
+    # 2026-10-10 的教训：② 的默认值翻成 `True` 之后，本组**漏列 `finite_buffer`**
+    # 就会带着 ② 跑，而它叫"None"。**`with_off` 是减法，不是置零** ——
+    # 新加一条默认开的约束时，**本组必须同步**。
+    "None": _FULL.with_off("finite_buffer",
+                           "machine_failure",
                            "due_dates",
                            "agv_failure", "maintenance"),
 }

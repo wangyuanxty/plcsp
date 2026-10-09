@@ -187,8 +187,12 @@ def test_constraint_config_defaults_and_with_off():
     # ⚠️ **2026-10-10：⑪ 充电开关 `charging` 已删**（机制整条移除）—— 原断言
     # `c.charging` 与 `with_off(..., "charging")` 同批删除。v2 现为**五条**约束：
     # ② finite_buffer / ③ machine_failure / ⑧ due_dates / ⑨ agv_failure / ⑫ maintenance。
-    # ⚠️ `finite_buffer` **默认 False**（机制开关默认关 ⟹ 既有读数逐位不变）。
-    assert c.finite_buffer is False
+    # ⚠️ **2026-10-10 当日二次改**：`finite_buffer` 的默认值由 `False` **翻成 `True`**
+    #（用户裁定「在报告档打开」）。**本条断言随之翻** —— 它守的是"默认值是什么"，
+    # 而不是"默认值必须是 False"。
+    # ⚠️ **为什么翻**：② 是五条里唯一**默认档就 binding** 的那条；默认关着 ⟹
+    # 论文里"我们建模了有限缓冲"说不出口，而 AEI2025 的假设 4 批的正是这个。
+    assert c.finite_buffer is True
     off = c.with_off("machine_failure", "due_dates")
     assert not off.machine_failure and not off.due_dates and off.agv_failure
     assert c.machine_failure, "with_off 必须返回**新对象**，原对象不动"
@@ -271,9 +275,20 @@ def test_energy_model_is_linear_in_time_and_additive():
 
 @pytest.mark.unit
 def test_rollout_and_reference_agree_on_the_same_dynamics():
+    """⚠️ **黄金值 2026-10-10 由 `75.870` 改为 `73.010`** —— 原因**唯一且已实测**：
+
+    `ConstraintConfig.finite_buffer` 的默认值由 `False` 翻成 `True`
+    （用户裁定「在报告档打开」，见 `constraints.py` 该字段的注释）。
+
+    ⚠️ **不是"数字变了就改数字"** —— 这条改动有**独立佐证**：在翻默认值**之前**，
+    单独用 `q1_flat.build(0, finite_buffer=True)` 跑同一个局面，得到的正是 **73.01**
+    （而 `finite_buffer=False` 给 75.87）。两个数在**两条互不相干的路径**上对上。
+    ⚠️ 三个金值（本处 + `test_agv_breakdown...` + `test_pa_rules` 那条）是**同一个局面**，
+    故必须**同时**变成同一个数；若它们彼此不一致，说明翻默认值顺带动了别的东西。
+    """
     inst = _inst("mk01")
     m = rollout(inst, seed_layout=0, seed_chain=0)
-    assert m["makespan"] == pytest.approx(75.870)
+    assert m["makespan"] == pytest.approx(73.010)
     assert m["jobs_done"] == inst.n_jobs
     ref = reference_run(inst)
     assert set(ref) >= {"makespan", "energy"}
@@ -422,9 +437,14 @@ def test_agv_breakdown_scenarios_sc1_sc2_sc3_all_occur():
 def test_agv_breakdown_is_inert_at_the_default_mtbf_on_mk01():
     """⚠️ **反向守卫**：默认 MTBF 下 MK01 的 ⑨ **一次都不触发** ⟹ 黄金值必须逐位不变。
 
+    ⚠️ **2026-10-10：黄金值 `75.870` → `73.010`** —— 这是 ② 默认值翻转带来的
+    （见本文件上面那条测试的说明）。**本测试守的性质不变**：⑨ 依然一次都不触发，
+    故它与 `test_rollout_and_reference_agree_on_the_same_dynamics` **必须逐位同值**。
+    **两条测试的值一旦不相等，就说明 ⑨ 不是惰性的。**
+
     （⑨ 的**激活**是另一件事，见 `scaled_agv_mtbf` 与 §78.0。）
     """
     m = _world("mk01").run(seed_chain=0)
-    assert m["makespan"] == pytest.approx(75.870)
+    assert m["makespan"] == pytest.approx(73.010)
     assert (m["agv_fail_sc1"], m["agv_fail_sc2"], m["agv_fail_sc3"]) == (0, 0, 0)
     assert m["agv_at_min"] == 0.0
