@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -16,6 +18,7 @@ from plcsp_v2.env.des import SimConfig, reference_makespan            # noqa: E4
 from plcsp_v2.env.instances import load_mk                            # noqa: E402
 from plcsp_v2.env.reward import ReferenceObjectives, reward_weights   # noqa: E402
 from plcsp_v2.hrl.agents import G_BINS, G_DIM, HierarchicalPolicy     # noqa: E402
+from plcsp_v2.hrl.pool import SegmentPool                             # noqa: E402
 from plcsp_v2.hrl.train import (Spec, base_chain, group_advantage,    # noqa: E402
                                 ma_logp_at, segment_from, train_step)
 from plcsp_v2.nn.features import norm_context                         # noqa: E402
@@ -81,6 +84,39 @@ def test_gradients_reach_only_the_layer_being_trained():
     # 阶段 A：`B=0` ⟹ σ=0 ⟹ Â≡0 ⟹ loss 与梯度都为 0（**预期的空转**）
     assert all(s == 0.0 for s in out["A"]["seg_std"]), out["A"]["seg_std"]
     assert out["A"]["loss"] == 0.0 and a["upper"] == 0.0
+
+
+@pytest.mark.slow
+def test_segment_pool_matches_the_sequential_path():
+    """⚠️ **并行跑段 = 只改怎么算，不改算什么**（设计 §105 的优化 #1）。
+
+    `train_step` 每步要做 `n_top × (M+G)` 条段（mk01 96 条、mk10 400 条），**互相独立**。
+    把它们放进进程池是**唯一不动设计参数**就能拿量级提升的一条 ——
+    但必须证明它**不改读数**，否则所有既有结论作废。
+
+    ⚠️ 容差不是逐位：并行档每进程 **1 线程**，浮点归约次序与父进程不同 ⟹ 末位可差。
+    """
+    spec, net = _spec()
+    torch.manual_seed(0)
+    base_net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
+    n_seq = copy.deepcopy(base_net)
+    seq = train_step(n_seq, spec, None, M=2, G=2, seed=0, dt_events=DT)
+    n_par = copy.deepcopy(base_net)
+    with SegmentPool(n_par, spec, n_workers=3, dt_events=DT) as pool:
+        par = train_step(n_par, spec, None, M=2, G=2, seed=0, dt_events=DT, pool=pool)
+    for ph in ("B", "A"):
+        assert seq[ph]["n_top"] == par[ph]["n_top"], "顶层点数不同 ⟹ 段的结构就不同了"
+        assert seq[ph]["loss"] == pytest.approx(par[ph]["loss"], rel=1e-4, abs=1e-4), \
+            f"阶段 {ph} 的 loss 不同：{seq[ph]['loss']} vs {par[ph]['loss']}"
+
+
+@pytest.mark.unit
+def test_segment_pool_refuses_one_worker():
+    """⚠️ **先查后跑**：1 个进程没有意义，直接报错。"""
+    spec, _ = _spec()
+    net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
+    with pytest.raises(ValueError, match="n_workers"):
+        SegmentPool(net, spec, n_workers=1, dt_events=DT)
 
 
 @pytest.mark.slow

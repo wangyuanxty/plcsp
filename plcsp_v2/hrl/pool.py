@@ -48,10 +48,26 @@ import torch
 
 from ..env.reward import objective_vector, scalar_reward
 from .agents import HierarchicalPolicy
-from .rollout import Decision
+from .replay import run_branch
+from .rollout import Decision, NetPolicy
 from .train import Spec, base_chain
 
 _W: dict = {}
+
+
+def _get_net(spec: Spec, with_value: bool):
+    """子进程里的网络缓存 —— 按 `(n_chargers, with_value)` 键。
+
+    ⚠️ **缓存结构、不缓存权重**：参数每步都在变（父进程 `optim.step()`），
+    故每次任务都 `load_state_dict`（≈5 ms，相对一条 0.15–0.6 s 的链/段可忽略）。
+    """
+    key = (len(spec.layout.chargers), bool(with_value))
+    net = _W.get(key)
+    if net is None:
+        torch.set_num_threads(1)          # ⚠️ 每进程 1 线程（见模块 docstring）
+        net = HierarchicalPolicy(n_chargers=key[0], with_value=key[1])
+        _W[key] = net
+    return net
 
 
 class Chain(NamedTuple):
@@ -63,22 +79,50 @@ class Chain(NamedTuple):
 
 
 def _worker(job):
-    """子进程入口：一条链。`job = (state_dict, spec, with_value, i, seed, dt_events)`。
+    """子进程入口：一条**链**。`job = (state_dict, spec, with_value, i, seed, dt_events)`。
 
-    ⚠️ **`set_num_threads(1)` 放在这里**（不是父进程）—— 见模块 docstring。
     ⚠️ 每任务都 `load_state_dict`：参数每步都在变，缓存网络结构、**不缓存权重**。
-    （600k 参数的加载约 5 ms，相对 0.6 s 的链可忽略。）
     """
     state, spec, with_value, i, seed, dt_events = job
-    net = _W.get("net")
-    if net is None:
-        torch.set_num_threads(1)
-        net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers), with_value=with_value)
-        _W["net"] = net
+    net = _get_net(spec, with_value)
     net.load_state_dict(state)
     p = base_chain(net, spec, greedy=False, seed=seed * 1000 + i, dt_events=dt_events)
     f = objective_vector(p.metrics)                     # type: ignore[attr-defined]
     return scalar_reward(f, spec.w), tuple(f), p.rec.decisions
+
+
+def _seg_worker(chunk):
+    """子进程入口：**一批段**（`chunk = (state, spec, with_value, jobs)`）。
+
+    `jobs = [(prefix, j, goal, seed, greedy, dt_events), ...]` —— 与
+    `train.segment_from` 同一件事，只是不在这里算 loss（那要梯度，回父进程做）。
+
+    ⚠️ **按批送**（不是一个任务一条段）：`state_dict` 约 2.4 MB，逐条送的话
+    400 条段要传近 1 GB；按 `n_workers` 批送只要 ~40 MB。
+    """
+    state, spec, with_value, jobs = chunk
+    net = _get_net(spec, with_value)
+    net.load_state_dict(state)
+    out = []
+    for prefix, j, goal, seed, greedy, dt_events in jobs:
+        inner = NetPolicy(net, spec.inst, spec.layout, spec.ctx, g_bins=goal,
+                          greedy=greedy, seed=seed, dt_events=dt_events, freeze_g=True)
+        _, counters = run_branch(spec.world(), prefix, inner,
+                                 switch_after_ma=j, stop_after_ma=j + 2)
+        out.append((counters, inner.rec.decisions))
+    return out
+
+
+def _chunk_round_robin(jobs: list, n_chunks: int) -> list[tuple[list[int], list]]:
+    """**轮转**分块 → `[(原下标, [job, ...]), ...]`。
+
+    为什么轮转：**段的成本随 `j` 涨**（前缀越长）—— 连续切块会让最后一块独占大半时间。
+    带上原下标，回填时按它复位（**不能靠比对 job 内容** —— 两条段可以逐字段相同）。
+    """
+    buckets: list[list[tuple[int, object]]] = [[] for _ in range(n_chunks)]
+    for i, job in enumerate(jobs):
+        buckets[i % n_chunks].append((i, job))
+    return [([i for i, _ in b], [j for _, j in b]) for b in buckets if b]
 
 
 class ChainPool:
@@ -122,6 +166,64 @@ class ChainPool:
         self.ex.shutdown(wait=True, cancel_futures=True)
 
     def __enter__(self) -> "ChainPool":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+class SegmentPool:
+    """进程池：**并行跑"段"**（两层训练器 `train_step` 的 `M+G` 段）。
+
+    ⚠️ **为什么这是最大的一条优化**（§104.5 / §105）：`train_step` 每步要做
+    `n_top × (M+G)` 条段 —— **96 条（mk01）到 400 条（mk10）**，而它们**互相独立**
+    （每条都是"从 t=0 回放到 `Z_j`、再换目标接续"）。
+    实测单段 145–298 ms，**全部串行** ⟹ mk10 一步 119 s。
+
+    ⚠️ **与 `ChainPool` 同一套模式**，只是任务粒度为"段"。
+    ⚠️ **每进程 1 线程**，见模块 docstring。
+    ⚠️ **`net` 是引用**（整轮复用），权重每步重发。
+    """
+
+    def __init__(self, net: HierarchicalPolicy, spec: Spec, *, n_workers: int,
+                 dt_events: int = 20):
+        if n_workers < 2:
+            raise ValueError(f"n_workers={n_workers} 少于 2 ⟹ 请直接用顺序档（`pool=None`）")
+        self.net, self.spec = net, spec
+        self.n_workers = int(n_workers)
+        self.dt_events = int(dt_events)
+        self._ctx = mp.get_context("spawn")
+        self.ex = ProcessPoolExecutor(max_workers=self.n_workers, mp_context=self._ctx)
+
+    def segments(self, jobs: list[tuple]) -> list[tuple]:
+        """`jobs = [(prefix, j, goal, seed, greedy), ...]` → `[(StepCounters, decisions), ...]`。
+
+        **返回顺序与 `jobs` 一致**（分块是轮转的，回填时按原下标复位）。
+        """
+        net = self.net
+        if next(net.parameters()).type() != "torch.FloatTensor":
+            raise ValueError("并行档只跑 CPU —— 先把 `net` 留在 CPU，或改用顺序档")
+        if not jobs:
+            return []
+        state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+        with_value = net.value_head is not None
+        full = [(p, j, g, s, gr, self.dt_events) for (p, j, g, s, gr) in jobs]
+        chunks = _chunk_round_robin(full, self.n_workers)
+        payload = [(state, self.spec, with_value, c) for _idx, c in chunks]
+        res = list(self.ex.map(_seg_worker, payload))
+        # ⚠️ **按记录的原下标复位**（轮转分块打乱了顺序，直接拼接会错位）
+        out: list = [None] * len(jobs)
+        for ci, (idxs, _c) in enumerate(chunks):
+            for k, orig in enumerate(idxs):
+                out[orig] = res[ci][k]
+        if any(o is None for o in out):
+            raise RuntimeError("段回填错位 —— 并行档的结果对不上任务列表")
+        return out
+
+    def close(self) -> None:
+        self.ex.shutdown(wait=True, cancel_futures=True)
+
+    def __enter__(self) -> "SegmentPool":
         return self
 
     def __exit__(self, *exc) -> None:

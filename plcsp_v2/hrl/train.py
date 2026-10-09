@@ -297,10 +297,26 @@ def segment_from(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int, *
     return Branch(counters=counters, decisions=inner.rec.decisions)
 
 
+def _run_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int,
+                  jobs: list[tuple[tuple[int, int, int], int, bool]], *,
+                  dt_events: int, pool) -> list[Branch]:
+    """跑 `Z_j` 上的一批段 —— `pool=None` 就地跑，给了就用 `SegmentPool` 并行。
+
+    `jobs = [(goal, seed, greedy), ...]`。**两条路产出同形的 `Branch`**。
+    ⚠️ 并行档在**子进程**里跑仿真与采样，**loss 仍在父进程算**（那要梯度）。
+    """
+    if pool is None:
+        return [segment_from(net, spec, base, j, goal=g, seed=sd, greedy=gr,
+                             dt_events=dt_events) for g, sd, gr in jobs]
+    prefix, _ = _prefix_to(base.rec.decisions, j)
+    out = pool.segments([(prefix, j, g, sd, gr) for g, sd, gr in jobs])
+    return [Branch(counters=c, decisions=d) for c, d in out]
+
+
 # ══════════════════ 两个阶段 ══════════════════
 
 def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
-            M: int = 8, seed: int = 0, dt_events: int = 20) -> dict:
+            M: int = 8, seed: int = 0, dt_events: int = 20, pool=None) -> dict:
     """**阶段 B**：目标冻结在 base 链的 `g`（stop-gradient），M 条**只变执行**的轨迹。
 
     只更新**下层**（PA/LA/C/M）的 logp —— **顶层的 logp 不进图**。
@@ -311,8 +327,9 @@ def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
     for j in range(n_top):
         _prefix, goal = _prefix_to(base.rec.decisions, j)
         before = base.ma_counters[j]
-        runs = [segment_from(net, spec, base, j, goal=goal, seed=seed * 1000 + m,
-                             greedy=False, dt_events=dt_events) for m in range(M)]
+        runs = _run_segments(net, spec, base, j,
+                             [(goal, seed * 1000 + m, False) for m in range(M)],
+                             dt_events=dt_events, pool=pool)
         segs = [segment_return(before, br.counters) for br in runs]
         adv = group_advantage([_scalar(sg, spec.w) for sg in segs])
         for a, sg in zip(adv, segs):
@@ -325,7 +342,7 @@ def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
 
 
 def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
-            G: int = 8, seed: int = 0, dt_events: int = 20) -> dict:
+            G: int = 8, seed: int = 0, dt_events: int = 20, pool=None) -> dict:
     """**阶段 A**：下层**确定性**（greedy），每个顶层点采 G 个目标。
 
     只更新**顶层**（MA）的 logp。⚠️ `B=0` 时 G 条段的回报会全相同 ⟹ `σ=0` ⟹ `Â≡0` ⟹
@@ -339,8 +356,8 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
         gen = torch.Generator().manual_seed(seed * 1000 + j)
         goals = [tuple(int(x) for x in torch.randint(0, G_BINS, (G_DIM,), generator=gen))
                  for _ in range(G)]
-        runs = [segment_from(net, spec, base, j, goal=goal, seed=0,
-                             greedy=True, dt_events=dt_events) for goal in goals]
+        runs = _run_segments(net, spec, base, j, [(g, 0, True) for g in goals],
+                             dt_events=dt_events, pool=pool)
         rewards = [_scalar(segment_return(before, br.counters), spec.w) for br in runs]
         adv = group_advantage(rewards)
         seg_std.append(float(np.std(rewards)))
@@ -356,7 +373,7 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
 
 def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer | None,
                *, M: int = 8, G: int = 8, seed: int = 0, dt_events: int = 20,
-               lr: float = 1e-4) -> dict:
+               lr: float = 1e-4, pool=None) -> dict:
     """一次**交替**：**先 B 后 A**（顺序的理由见模块 docstring）。
 
     每阶段各自：跑组 → 算优势 → **只对那一层**带梯度重算 → 反传 → 走一步。
@@ -367,7 +384,7 @@ def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer
     out: dict = {"base_makespan": float(base.metrics["makespan"])}   # type: ignore[attr-defined]
     for name, fn, kw in (("B", phase_b, {"M": M}), ("A", phase_a, {"G": G})):
         optim.zero_grad(set_to_none=True)
-        res = fn(net, spec, base, seed=seed, dt_events=dt_events, **kw)
+        res = fn(net, spec, base, seed=seed, dt_events=dt_events, pool=pool, **kw)
         res["loss"].backward()
         grad = _grad_norm(net, name)
         optim.step()
