@@ -51,6 +51,7 @@ from .env.instances import load_mk
 from .env.reward import ReferenceObjectives, reward_weights
 from .hrl.agents import HierarchicalPolicy
 from .hrl.flat import flat_rollout, flat_step
+from .hrl.pool import ChainPool
 from .hrl.train import Spec
 from .nn.features import norm_context
 
@@ -96,51 +97,68 @@ def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
         runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events, greedy=True)
     finally:
         net.train(prev)
-    f = np.array([x[2] for x in runs], dtype=np.float64)
+    f = np.array([x.f for x in runs], dtype=np.float64)
     return {"n": n,
             "makespan": float(f[:, 0].mean()), "makespan_se": float(f[:, 0].std(ddof=1)
                                                                    / np.sqrt(n)) if n > 1 else 0.0,
             "energy": float(f[:, 1].mean()),
             "twt": float(f[:, 2].mean()),
-            "R": float(np.mean([x[0] for x in runs]))}
+            "R": float(np.mean([x.R for x in runs]))}
 
 
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
-            eval_every: int, eval_n: int, rec, device: str = "cpu") -> None:
-    """一条 `(臂, 种子)` 的完整训练 + 评测。`rec` = 写一行的回调。"""
+            eval_every: int, eval_n: int, rec, device: str = "cpu",
+            workers: int = 0) -> None:
+    """一条 `(臂, 种子)` 的完整训练 + 评测。`rec` = 写一行的回调。
+
+    `workers > 1` ⟹ 多进程并行采链（`hrl/pool.py`，**只支持 CPU**）。
+    ⚠️ **并行档与单进程档不是逐位相同**（每进程 1 线程 ⟹ 浮点归约次序不同）⟹
+    **同一次对比里两臂必须同档**，且报出的数字要注明档位。
+    """
     spec, net = build(seed, with_value=(arm == "A"), device=device)
     optim = torch.optim.Adam(net.parameters(), lr=1e-4)
     rec({"kind": "start", "arm": arm, "seed": seed, "steps": steps, "n": n,
-         "dt_events": dt_events, "device": device,
+         "dt_events": dt_events, "device": device, "workers": workers,
          "n_params": sum(p.numel() for p in net.parameters())})
     base = evaluate(net, spec, n=eval_n, seed=0, dt_events=dt_events)
     rec({"kind": "eval", "arm": arm, "seed": seed, "step": 0, **base})
 
+    pool = None
+    if workers > 1:
+        if device != "cpu":
+            raise ValueError("并行档只跑 CPU（一个 GPU 上开多上下文只会互抢）——"
+                             "`--workers` 与 `--device cuda` 二选一")
+        pool = ChainPool(net, spec, n_workers=workers, dt_events=dt_events)
     t0 = time.perf_counter()
-    for step in range(1, steps + 1):
-        out = flat_step(net, spec, optim, arm=arm, n=n, seed=seed * 10000 + step,
-                        dt_events=dt_events)
-        gn = out["grad_norm"]
-        rs = [r["R"] for r in out["runs"]]
-        # ⚠️ `flat_step` 返回的 loss 是**整组 8 条链的和**（真实被优化的量）。这里**除以 `n`**
-        # 再记，否则两个数会读错：
-        #   · 臂 A 的 `loss ≈ −9.4e4` 看着吓人，其实是 8 条链之和（每条 ≈ −1.2e4）；
-        #   · 臂 B 的 `loss ≈ −12.6` **不是"没学"** —— 组内 z 化使 `Σ_i z_i ≡ 0`，
-        #     8 条链的贡献**互相抵消**。**这才是 GRPO 的正常形状**，别当成 bug。
-        rec({"kind": "train", "arm": arm, "seed": seed, "step": step,
-             "r_mean": float(np.mean(rs)), "r_std": float(np.std(rs, ddof=1)) if n > 1 else 0.0,
-             "loss_per_chain": out["loss"] / n,
-             "policy_loss_per_chain": out["policy_loss"] / n,
-             "critic_loss_per_chain": out["critic_loss"] / n,
-             # ⚠️ `critic_loss_per_chain` ≈ `E[(V−R)²]`：初值 ≈ R² ≈ 1300 ⟹ 说明 **`V` 从 0 附近起步**
-             # （critic 头是默认小初值）。随训练下降才说明 critic 在学。
-             "heads_grad": gn["heads"], "critic_grad": gn["critic"],
-             "enc_grad": gn["encoder"],
-             "makespan": float(np.mean([r["makespan"] for r in out["runs"]])),
-             "elapsed_s": time.perf_counter() - t0})
-        if eval_every and step % eval_every == 0:
-            ev = evaluate(net, spec, n=eval_n, seed=0, dt_events=dt_events)
-            rec({"kind": "eval", "arm": arm, "seed": seed, "step": step, **ev})
+    try:
+        for step in range(1, steps + 1):
+            out = flat_step(net, spec, optim, arm=arm, n=n, seed=seed * 10000 + step,
+                            dt_events=dt_events, pool=pool)
+            gn = out["grad_norm"]
+            rs = [r["R"] for r in out["runs"]]
+            # ⚠️ `flat_step` 返回的 loss 是**整组 8 条链的和**（真实被优化的量）。这里**除以 `n`**
+            # 再记，否则两个数会读错：
+            #   · 臂 A 的 `loss ≈ −9.4e4` 看着吓人，其实是 8 条链之和（每条 ≈ −1.2e4）；
+            #   · 臂 B 的 `loss ≈ −12.6` **不是"没学"** —— 组内 z 化使 `Σ_i z_i ≡ 0`，
+            #     8 条链的贡献**互相抵消**。**这才是 GRPO 的正常形状**，别当成 bug。
+            rec({"kind": "train", "arm": arm, "seed": seed, "step": step,
+                 "r_mean": float(np.mean(rs)),
+                 "r_std": float(np.std(rs, ddof=1)) if n > 1 else 0.0,
+                 "loss_per_chain": out["loss"] / n,
+                 "policy_loss_per_chain": out["policy_loss"] / n,
+                 "critic_loss_per_chain": out["critic_loss"] / n,
+                 # ⚠️ `critic_loss_per_chain` ≈ `E[(V−R)²]`：初值 ≈ R² ≈ 1300 ⟹ 说明 **`V` 从 0 附近起步**
+                 # （critic 头是默认小初值）。随训练下降才说明 critic 在学。
+                 "heads_grad": gn["heads"], "critic_grad": gn["critic"],
+                 "enc_grad": gn["encoder"],
+                 "makespan": float(np.mean([r["makespan"] for r in out["runs"]])),
+                 "elapsed_s": time.perf_counter() - t0})
+            if eval_every and step % eval_every == 0:
+                ev = evaluate(net, spec, n=eval_n, seed=0, dt_events=dt_events)
+                rec({"kind": "eval", "arm": arm, "seed": seed, "step": step, **ev})
+    finally:
+        if pool is not None:
+            pool.close()
 
     # 最终：**扰动**（⑨ 激活）下的业绩
     dspec, _ = build(seed, disturb=True, with_value=(arm == "A"))
@@ -160,8 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--eval-every", type=int, default=25, help="0 = 不中途评测")
     ap.add_argument("--eval-n", type=int, default=3, help="评测链数（greedy）")
     ap.add_argument("--device", default="cpu", help="cpu / cuda（⚠️ 必须用 GPU 版解释器才认 cuda）")
-    ap.add_argument("--threads", type=int, default=0,
-                    help="torch 线程数；0 = 不动（默认值）。⚠️ 实测见 §99：默认 24 线程反而慢 2.1×")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="torch 线程数（默认 1）。⚠️ 实测 §99：24 线程比 1 线程慢 2.7×")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="多进程并行采链的进程数（0 = 顺序档）。仅 CPU；每进程 1 线程")
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
@@ -190,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             for arm in a.arms:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
-                        device=a.device)
+                        device=a.device, workers=a.workers)
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 

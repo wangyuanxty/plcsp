@@ -22,6 +22,7 @@ from plcsp_v2.env.instances import load_mk                            # noqa: E4
 from plcsp_v2.env.reward import ReferenceObjectives, reward_weights   # noqa: E402
 from plcsp_v2.hrl.agents import HierarchicalPolicy                    # noqa: E402
 from plcsp_v2.hrl.flat import (ALL_KINDS, flat_rollout, flat_step)    # noqa: E402
+from plcsp_v2.hrl.pool import ChainPool                              # noqa: E402
 from plcsp_v2.hrl.train import Spec, base_chain, batched_terms        # noqa: E402
 from plcsp_v2.nn.features import norm_context                         # noqa: E402
 
@@ -141,3 +142,36 @@ def test_flat_rollout_is_deterministic_in_the_seed():
     assert [x[0] for x in r1] == [x[0] for x in r2]
     r3 = flat_rollout(net, spec, n=2, seed=8, dt_events=DT)
     assert [x[0] for x in r1] != [x[0] for x in r3], "换种子该换链（否则种子没接上）"
+
+
+@pytest.mark.slow
+def test_parallel_pool_matches_the_sequential_path():
+    """⚠️ **并行档与顺序档必须采到同一批链**（同种子）。
+
+    ⚠️ **但两者不是逐位相同**：并行档每进程 **1 线程**、顺序档用默认线程数 ⟹
+    浮点归约的结合次序不同 ⟹ **末位可以差**。故这里比的是**回报是否一致到 1e-4**，
+    而不是逐位相等。**这条差异要在报告里注明**（两臂必须同档）。
+    """
+    spec = _spec()
+    torch.manual_seed(0)
+    net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
+    seq = flat_rollout(net, spec, n=3, seed=5, dt_events=DT)
+    with ChainPool(net, spec, n_workers=3, dt_events=DT) as pool:
+        par = flat_rollout(net, spec, n=3, seed=5, dt_events=DT, pool=pool)
+    assert len(par) == len(seq) == 3
+    for a, b in zip(seq, par):
+        assert a.R == pytest.approx(b.R, abs=1e-4), f"并行与顺序采到的链不同：{a.R} vs {b.R}"
+        assert len(a.decisions) == len(b.decisions), "决策条数不同 ⟹ 采的不是同一条链"
+
+
+@pytest.mark.unit
+def test_pool_refuses_a_one_worker_or_a_gpu_setup():
+    """⚠️ 两条**先查后跑**的护栏，都不许静默降级。"""
+    spec = _spec()
+    net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
+    with pytest.raises(ValueError, match="n_workers"):
+        ChainPool(net, spec, n_workers=1, dt_events=DT)      # 1 进程 ⟹ 直接用顺序档
+    with pytest.raises(ValueError, match="greedy"):
+        # 并行档不给 `greedy=True`（评测要确定性）
+        flat_rollout(net, spec, n=2, seed=0, dt_events=DT, greedy=True,
+                     pool=object())                          # type: ignore[arg-type]

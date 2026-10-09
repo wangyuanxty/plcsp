@@ -28,13 +28,18 @@
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
 from ..env.reward import objective_vector, scalar_reward
 from .agents import HierarchicalPolicy
-from .rollout import NetPolicy
+from .pool import Chain
 from .train import Spec, base_chain, batched_terms, group_advantage
+
+if TYPE_CHECKING:
+    from .pool import ChainPool
 
 ALL_KINDS: tuple[str, ...] = ("MA", "PA", "LA", "C", "M")
 """一条链上的**全部**决策种类 —— 扁平链不分层 ⟹ 一个组覆盖它们全部。"""
@@ -46,19 +51,26 @@ CV_DEFAULT = 0.5
 
 
 def flat_rollout(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
-                 dt_events: int, greedy: bool = False) -> list[tuple[float, NetPolicy, tuple]]:
-    """采 `n` 条**完整链**（全层一起采、不冻结、不重放）→ `[(R, 链, 目标三元组)]`。
+                 dt_events: int, greedy: bool = False,
+                 pool: "ChainPool | None" = None) -> list[Chain]:
+    """采 `n` 条**完整链**（全层一起采、不冻结、不重放）→ `Chain` 列表。
 
     ⚠️ 复用 `train.base_chain` —— 它本来就是"一条完整链、全层 live"。
     **扁平链不是另一套策略，是同一套策略的另一种分组方式。**
 
     `greedy=True` 用于**评测**（确定性、可复现）；训练一律 `False`（要探索）。
+    `pool`（`hrl/pool.py`）：给了就**多进程并行**跑这 `n` 条链（每进程 1 线程）。
+    ⚠️ **并行档只支持 `greedy=False` 且 CPU** —— 评测要确定性，且一个 GPU 开多上下文只会互抢。
     """
-    out: list[tuple[float, NetPolicy, tuple]] = []
+    if pool is not None:
+        if greedy:
+            raise ValueError("并行档不支持 `greedy=True`（评测要确定性、且要 GPU 单档）")
+        return pool.rollout(n, seed)
+    out: list[Chain] = []
     for i in range(n):
         p = base_chain(net, spec, greedy=greedy, seed=seed * 1000 + i, dt_events=dt_events)
         f = objective_vector(p.metrics)                      # type: ignore[attr-defined]
-        out.append((scalar_reward(f, spec.w), p, f))
+        out.append(Chain(scalar_reward(f, spec.w), tuple(f), p.rec.decisions))
     return out
 
 
@@ -79,11 +91,14 @@ def grad_norm(net: HierarchicalPolicy) -> dict:
 def flat_step(net: HierarchicalPolicy, spec: Spec,
               optim: torch.optim.Optimizer | None = None, *, arm: str = "B",
               n: int = 8, seed: int = 0, dt_events: int = 20, lr: float = 1e-4,
-              cv: float = CV_DEFAULT) -> dict:
+              cv: float = CV_DEFAULT, pool: "ChainPool | None" = None) -> dict:
     """**一步扁平组更新**（臂 A 或 B）。返回读数 + 梯度分布。
 
     两臂共用：采链 → 算优势 → `−Σ Â·logp` → 反传 → 走一步。
     **只有优势那一行不同**（见模块 docstring 的口径 ②）。
+
+    `pool`：给了就用多进程并行采链（见 `hrl/pool.py`）。
+    ⚠️ **两臂必须同档**（都带池或都不带）—— 并行档每进程 1 线程，浮点归约次序不同。
     """
     if arm not in ARMS:
         raise ValueError(f"arm={arm!r} 未知：只接受 {ARMS}")
@@ -92,29 +107,30 @@ def flat_step(net: HierarchicalPolicy, spec: Spec,
         raise ValueError("臂 A 需要 critic 头 —— 构造时须给 `HierarchicalPolicy(with_value=True)`")
     if optim is None:
         optim = torch.optim.Adam(net.parameters(), lr=lr)
-    runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events)
-    z = group_advantage([r for r, _, _ in runs])
+    runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events, pool=pool)
+    z = group_advantage([ch.R for ch in runs])
 
     optim.zero_grad(set_to_none=True)
     pg = torch.zeros((), requires_grad=True)
     crit = torch.zeros((), requires_grad=True)
     rows = []
-    for i, (R, p, f) in enumerate(runs):
+    for i, ch in enumerate(runs):
         # 一次前向同时拿 logp 与 V（臂 A）—— 见 `train.batched_terms`
-        lp, v = batched_terms(net, p.rec.decisions, ALL_KINDS, want_value=(arm == "A"))
+        lp, v = batched_terms(net, ch.decisions, ALL_KINDS, want_value=(arm == "A"))
         if arm == "A":
-            adv = R - v.detach()                             # 逐决策：R − V(s_t)
-            crit = crit + (v - R).pow(2).mean()
+            adv = ch.R - v.detach()                          # 逐决策：R − V(s_t)
+            crit = crit + (v - ch.R).pow(2).mean()
         else:
             adv = torch.full_like(lp, float(z[i]))           # 整条链**一个**优势
         pg = pg - (adv * lp).sum()
-        rows.append({"R": float(R), "n_dec": len(p.rec.decisions),
-                     "makespan": float(f[0]), "energy": float(f[1]), "twt": float(f[2])})
+        rows.append({"R": float(ch.R), "n_dec": len(ch.decisions),
+                     "makespan": float(ch.f[0]), "energy": float(ch.f[1]),
+                     "twt": float(ch.f[2])})
     loss = pg + (cv * crit if arm == "A" else 0.0)
     loss.backward()
     gn = grad_norm(net)
     optim.step()
     return {"arm": arm, "loss": float(loss.detach()), "policy_loss": float(pg.detach()),
             "critic_loss": float(crit.detach()), "adv_std": float(np.std(z)),
-            "r_mean": float(np.mean([r for r, _, _ in runs])),
+            "r_mean": float(np.mean([ch.R for ch in runs])),
             "runs": rows, "grad_norm": gn}
