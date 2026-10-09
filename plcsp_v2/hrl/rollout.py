@@ -219,6 +219,24 @@ class NetPolicy:
         return self._pick(out.ra_maint, "M", tok, seg)       # 与 `PM_CANDS` 同序
 
 
+def gated_by_constraints(pol, constraints) -> dict:
+    """按**约束档**决定哪些决策回调挂上 —— **约束关掉 ⟹ 那个决策点不存在 ⟹ 回调必须是 `None`。**
+
+    ⚠️ **为什么必须有这一层**：`run_gated` 对"给了回调、但该约束关着"是**显式报错**
+    （"给策略一个死动作只会污染链 logp"，见 `env/des.SimWorld.run_gated`）。
+    而训练器**无条件**挂全部回调 ⟹ **约束组消融里关了 ⑫ 的那几组一跑就炸**。
+
+    **实测踩过**：`b_ablation` 的冒烟在 `--arms None` 上当场 `ValueError` ——
+    它关掉了 `maintenance`，而 `base_chain` 照旧传 `policy_m`。
+
+    ⚠️ 返回的是**关键字参数字典**，调用方 `**` 展开进 `run_gated`。
+    ⚠️ 目前只有 `maintenance` 受约束门控（⑪ 删除后充电头不存在；
+    剩下 PA / LA / MA 三个回调与约束开关无关）。
+    """
+    on_m = constraints is None or bool(constraints.maintenance)
+    return {"policy_m": pol.policy_m if on_m else None}
+
+
 # `PM_CANDS` / `LA_RULE_NAMES` 由本模块转出（explicit re-export）——调用方从一处取就够了
 __all__ = ["Decision", "LA_RULE_NAMES", "N_LA_RULES", "N_PA_RULES", "NetPolicy",
-           "PM_CANDS", "Recorder", "g_to_vec", "torch"]
+           "PM_CANDS", "Recorder", "g_to_vec", "gated_by_constraints", "torch"]

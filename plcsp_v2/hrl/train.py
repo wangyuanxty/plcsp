@@ -45,7 +45,7 @@ from ..env.layout import Layout
 from ..nn.features import NormContext
 from .agents import G_BINS, G_DIM, LA_CTX_DIM, HierarchicalPolicy
 from .replay import run_branch, segment_return
-from .rollout import Decision, NetPolicy, net_device
+from .rollout import Decision, NetPolicy, gated_by_constraints, net_device
 
 EPS = 1e-6
 """组内 z 化的分母下限（设计 §4.1 的 `+ε`）。"""
@@ -95,8 +95,10 @@ def base_chain(net: HierarchicalPolicy, spec: Spec, *, greedy: bool = False,
     p.world = spec.world()                                 # type: ignore[attr-defined]
     p.metrics = p.world.run_gated(                          # type: ignore[attr-defined]
         seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
-        policy_m=p.policy_m, policy_ma=p.policy_ma,
-        dt_events=dt_events)
+        policy_ma=p.policy_ma, dt_events=dt_events,
+        # ⚠️ **按约束档撤回调**（2026-10-10）：约束关掉 ⟹ 那个决策点不存在 ⟹
+        # 传 `policy_m` 会被 `run_gated` 当场拒绝。约束消融踩过。见 `gated_by_constraints`。
+        **gated_by_constraints(p, spec.constraints))
     return p
 
 

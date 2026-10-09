@@ -35,7 +35,7 @@ from typing import NamedTuple
 from ..env.des import StepCounters, SimWorld
 from ..env.rule_views import LAView, PAView
 from ..env.snapshot import Snapshot
-from .rollout import NetPolicy
+from .rollout import NetPolicy, gated_by_constraints
 from .rules import apply_pa_rule, la_rule_policy
 
 
@@ -143,9 +143,10 @@ def run_branch(world: SimWorld, prefix_actions: Sequence[int], net: NetPolicy,
                  graph=world.g, constraints=world.constraints)
     pol = BranchPolicy(ScriptedPolicy(prefix_actions), switch_after_ma, net)
     m = w.run_gated(seed_chain=0, policy_pa=pol.policy_pa, policy_l=pol.policy_l,
-                    policy_m=pol.policy_m,
                     policy_ma=pol.policy_ma, dt_events=net.dt_events,
-                    stop_after_ma=stop_after_ma)
+                    stop_after_ma=stop_after_ma,
+                    # ⚠️ 同 `base_chain`：按**该世界的**约束档撤回调（2026-10-10）
+                    **gated_by_constraints(pol, world.constraints))
     if not net.ma_counters:
         raise RuntimeError("停表处没有读到累计读数 —— `switch_after_ma` 与 `stop_after_ma` 配错")
     return m, net.ma_counters[-1]

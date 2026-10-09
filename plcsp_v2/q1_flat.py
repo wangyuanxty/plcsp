@@ -69,7 +69,8 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
           n_agv: int = 3, with_value: bool = False, device: str = "cpu",
           instance: str = "mk01", pm_interval: float | None = None,
           target_failures: float | None = None, agv_n_failures: int = 0,
-          finite_buffer: bool = True):
+          finite_buffer: bool = True, constraints: ConstraintConfig | None = None,
+          sim_overrides: dict | None = None):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
@@ -94,6 +95,12 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     if target_failures is not None:
         mtbf = scaled_agv_mtbf(inst, target_failures)
     over = {}
+    # ⚠️ `sim_overrides`（2026-10-10 加）：**机制消融**用的通用 `SimConfig` 覆盖口
+    # （如 `{"agv_failover": False}` / `{"machine_age_failure": False}`）。
+    # **并进 `over` ⟹ 参考解与奖励权重也用它**（它们必须与仿真的 cfg 同源，否则归一化错位）。
+    # 未知键由 `dataclasses.replace` 当场 `TypeError` —— **不静默忽略**。
+    if sim_overrides:
+        over.update(sim_overrides)
     if mtbf is not None:
         over["agv_mtbf"] = mtbf
     if pm_interval is not None:
@@ -114,7 +121,11 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     # ⚠️ **2026-10-10：② 的默认值翻成 `True`**（用户裁定「在报告档打开」）⟹
     # 这里**恒传一个真对象**，不再用 `None`。`None` 的语义是"全开"，
     # 而"全开"现在**恰好等于** `ConstraintConfig()` —— 那就直接给它。
-    cons = ConstraintConfig(finite_buffer=bool(finite_buffer))
+    #
+    # ⚠️ `constraints=`（2026-10-10 加）：给**整个**约束对象，供**约束组消融**用
+    # （`ABLATION_GROUPS` 的五个组）。给了它就忽略 `finite_buffer`。
+    cons = (constraints if constraints is not None
+            else ConstraintConfig(finite_buffer=bool(finite_buffer)))
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg, constraints=cons)
     w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
     # ⚠️ **2026-10-10：⑪ 去后构造网络不再要 `n_chargers`**（充电头是唯一随布局变宽的头）。
