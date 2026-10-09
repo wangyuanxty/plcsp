@@ -11,7 +11,7 @@
 | **设计记录** | `superpowers/specs/2026-10-02-plcsp-rebuild-design.md`<br>`superpowers/specs/2026-10-06-sequencing-design.md` | ⭐ **`v2/design.md`** |
 | **策略结构** | **六头联合链**（S/L/R/M/C/B） | **目标条件化两层**（MA 出 `g`；PA/LA/RA） |
 | **派工流** | 推式 | **派工即决策点** |
-| **约束** | 十条 | **五条**（删 ①②④⑤⑩） |
+| **约束** | 十条 | **五条**（删 ①④⑤⑩**⑪**；**② 2026-10-10 加回，替掉 ⑪**）—— 见 `v2/design.md` §7 |
 | **状态** | **保持可跑，只作对照。不再改** | **在改**（步 0–5b 完成） |
 | **进展记录** | `progress-log.md`（**§1–§68**，已封笔） | ⭐ **`v2/progress-log.md`**（**§69 起**） |
 | **实验计划** | `experiment-plan.md`（A–I + 冻结清单，**全是 v1**） | ⭐ **`v2/experiment-plan.md`**（**2026-10-09 起草**，除 Q1 外未跑） |
