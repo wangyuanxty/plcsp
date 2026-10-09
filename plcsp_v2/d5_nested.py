@@ -47,9 +47,10 @@ ARMS = ("flat", "two")
 
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             eval_every: int, eval_n: int, rec, workers: int = 0,
-            save_dir: str = "", lr: float = 1e-4) -> None:
+            save_dir: str = "", lr: float = 1e-4, env: dict | None = None) -> None:
     """一条 `(臂, 种子)`。**两臂共用 `build` / `evaluate`** ⟹ 实例/布局/编码器/约束档全同。"""
-    spec, net = build(seed)
+    env = dict(env or {})
+    spec, net = build(seed, **env)
     optim = torch.optim.Adam(net.parameters(), lr=lr)
     rec({"kind": "start", "arm": arm, "seed": seed, "steps": steps, "n": n,
          "dt_events": dt_events, "workers": workers,
@@ -90,7 +91,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
 
         # ⚠️ **结果先落盘、再关池**（§110）：实测一次长跑在 `shutdown` 里挂掉，
         # 把刚跑完的 200 步整轮拖没了。收尾动作不该有权否决已经算出来的结果。
-        dspec, _ = build(seed, disturb=True)
+        dspec, _ = build(seed, disturb=True, **env)
         rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
              "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
              "disturbed": evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events),
@@ -121,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--threads", type=int, default=1, help="父进程基线线程数（§107：段/链要 1）")
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--save-dir", default="")
+    ap.add_argument("--instance", default="mk01", help="mk01–mk10")
+    ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
+    ap.add_argument("--soc0", type=float, default=1.0, help="AGV 初始荷电率（1.0 = 逐位不变）")
+    ap.add_argument("--pm-interval", type=float, default=None, help="⑫ 保养间隔（dev 档 30）")
+    ap.add_argument("--target-failures", type=float, default=None,
+                    help="⑨ 按每局期望故障次数反推 agv_mtbf")
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
@@ -151,7 +158,10 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
-                        workers=a.workers, save_dir=a.save_dir, lr=a.lr)
+                        workers=a.workers, save_dir=a.save_dir, lr=a.lr,
+                        env={"instance": a.instance, "tau": a.tau, "soc0": a.soc0,
+                             "pm_interval": a.pm_interval,
+                             "target_failures": a.target_failures})
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 

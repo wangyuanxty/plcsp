@@ -74,6 +74,13 @@ class StepCounters(NamedTuple):
     twt: float
 
 
+AGV_FAIL_N_SEED = 3000
+"""⑨ **按次数注入**（`SimConfig.agv_n_failures`）的独立子流：`default_rng([seed_chain, AGV_FAIL_N_SEED])`。
+
+⚠️ **必须与既有流分开**（与 `PA_TIE_SEED` 同一条纪律）：机台故障消费 `default_rng(seed_chain)`、
+车队消费 `[seed_chain, 1000+a]`、PA 平局消费 `[seed_chain, PA_TIE_SEED]`。
+借任何一条都会把它**整体移位** ——"只改了故障注入方式"就变成"顺手改了别的流"。"""
+
 DISTURBANCE_MACHINE = -2
 """**机障 ③** 的扰动哨兵。设计 §10⑤：顶层 MA 的触发 = **定时器 + 机障 ③ + AGV 故障 ⑨** ——
 ⑨ 的哨兵是 `DISTURBANCE`，③ 的在这里。两者都只是"开一个决策点/顶层决策点"，不产生件。"""
@@ -151,6 +158,23 @@ class SimConfig:
     # `multi_drop`（多卸货点行程模型）两个参数一并去掉。车队同构单车单载。
     agv_mtbf: float = 480.0       # ⑨ AGV 平均无故障时间 [min]（8 h）
     agv_mttr: float = 10.0        # ⑨ AGV 平均修复时间 [min]
+    # ⑨ **按次数注入**（0 = 关，用上面的 `agv_mtbf` 泊松流）。
+    # ⚠️ **口径照 Shi et al. 2025**（AEI 65:103195）：该文**不设 MTBF**，而是
+    #   "实例中每个实例的**故障次数在 1–8 之间随机**；故障在**最短调度周期**内随机发生
+    #    并随机指派给某台 AGV；每次修理时间在 5–10 随机"。
+    # `>0` 时：`SimWorld` 在 `[0, reference_makespan]` 上**均匀抽 N 个时刻**，
+    # 再**轮转指派**给各车（保证均衡），本车只负责到点触发。
+    # ⚠️ **实际注入次数可能少于 N**：抽出的时刻若落在**完工之后**就不发生（Shi 同此局限）。
+    # 期望次数 ≠ 固定次数的差别：泊松的 sd = √N（N=4 时实际 2–6 次），本档恒为 N。
+    agv_n_failures: int = 0
+    # ⚠️ **按次数注入的抽签上界**（`[0, agv_fail_horizon]` 上均匀抽）。
+    # **必须由调用方填**（`q1_flat.build` 会填），`_build_entities` **不去自己算** ——
+    # 理由：算它要跑一次参考解，而**参考解自己也会走 `_build_entities`** ⟹ 递归 ⟹
+    # `reference_run` 的 `_MREF_BUSY` 守卫当场抛"重入"（实测踩过）。
+    # ⚠️ 该值的算法：`reference_makespan(inst, cfg_不含故障注入)` —— 用**没注入**的 cfg，
+    # 否则"注入改动力学 ⟹ 改 T ⟹ 改注入"自指。
+    # `agv_n_failures > 0` 时**必须给**，否则显式报错（不静默退化）。
+    agv_fail_horizon: float | None = None
     # ⑨ **故障 failover 开关**（2026-10-05）：`True` = 停机期间把该车**手上/队列里**的任务
     # 退回队列（bound 配置转交未停机的其它车，FIFO 配置放回共享队列）——任务不再"车趴多久卡多久"。
     # ⚠️ **这是改动力学**：打开后 makespan / travel / requeue 都会变，是 ⑨ 的代价口径从
@@ -739,7 +763,8 @@ class AgvSim:
                  stats: dict,
                  tasks_in, machines: list, graph, constraints, spec, rng,
                  track: SimTrack, chargers=(), charger_res=(), bound: bool = False,
-                 charge=None, fleet: list | None = None, events_q=None):
+                 charge=None, fleet: list | None = None, events_q=None,
+                 fail_times: tuple[float, ...] = ()):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -747,6 +772,8 @@ class AgvSim:
         self.g = graph
         self.con = constraints              # 物流侧开关（⑨ 等）从这里读
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
+        # ⚠️ **按次数注入**的预排时刻（空 = 用 `agv_mtbf` 泊松流）。见 `SimConfig.agv_n_failures`。
+        self.fail_times = tuple(float(t) for t in fail_times)
         # ⚠️ **v2：⑩ 的 `multi_drop` 与拼批头（B）回调已删**（2026-10-08）
 
         # ⚠️ **v2：① 去后路线头（R）与 `route` 回调已删**（2026-10-08）—— `_drive` 恒走最短路。
@@ -855,28 +882,39 @@ class AgvSim:
         时点**不变**——仍只在段间、且车不持任何区段锁（持锁停机 = 同区段的车永久等待 = 死锁）。
         默认关时本函数**逐字**是今日行为（只设 down/up）。
         """
+        if self.fail_times:
+            # ⚠️ **按次数注入**（`SimConfig.agv_n_failures`，口径照 Shi et al. 2025）：
+            # 时刻由 `SimWorld` 一次性抽好并指派到车，本车只负责到点触发。
+            for t in self.fail_times:
+                yield self.env.timeout(max(0.0, t - self.env.now))
+                yield from self._do_failure()
+            return
         while True:
             yield self.env.timeout(self.rng.exponential(self.cfg.agv_mtbf))
-            self.stats["agv_fail_events"] += 1
-            # ── ⑨ 的三个场景（AEI2025 §3.2）：按车的**即时状态**判定 ──
-            # SC1 空闲 · SC2 空载段中 · SC3 负载段中。计数逐场景入 stats，供报告如实声明分布。
-            scen = {"idle": "sc1", "empty": "sc2", "loaded": "sc3"}[self.stage]
-            self.stats[f"agv_fail_{scen}"] = self.stats.get(f"agv_fail_{scen}", 0) + 1
-            # ⚠️ 必须**先换一个新的未触发事件**再置 down：否则等待者会反复 yield 一个
-            # 已经 succeed 的事件 → 仿真时间不推进、空转成死循环（实测 pytest 直接挂死）。
-            self.up = simpy.Event(self.env)
-            self.down = True
-            if self.events_q is not None:
-                # 扰动事件（哨兵：`frm_idx = -1`）——transporter 收到后**开一个决策点**。
-                yield self.events_q.put((DISTURBANCE, self.aid, -1, None, False))
-            # ⚠️ **SC2/SC3：打断正在进行的行驶**（`_drive` 里接 `simpy.Interrupt`）。
-            # 只在 `stage != "idle"` 时打断——空闲时车可能停在任意 yield 点上，
-            # 盲目打断会把 Interrupt 抛到无关的等待里。
-            if self.stage != "idle" and self._main is not None:
-                self._main.interrupt(("agv_breakdown", self.stage))
-            yield self.env.timeout(self.cfg.agv_mttr)
-            self.down = False
-            self.up.succeed()
+            yield from self._do_failure()
+
+    def _do_failure(self):
+        """一次故障的**全部后果**（两条注入路径共用，两份拷贝必然漂）。"""
+        self.stats["agv_fail_events"] += 1
+        # ── ⑨ 的三个场景（AEI2025 §3.2）：按车的**即时状态**判定 ──
+        # SC1 空闲 · SC2 空载段中 · SC3 负载段中。计数逐场景入 stats，供报告如实声明分布。
+        scen = {"idle": "sc1", "empty": "sc2", "loaded": "sc3"}[self.stage]
+        self.stats[f"agv_fail_{scen}"] = self.stats.get(f"agv_fail_{scen}", 0) + 1
+        # ⚠️ 必须**先换一个新的未触发事件**再置 down：否则等待者会反复 yield 一个
+        # 已经 succeed 的事件 → 仿真时间不推进、空转成死循环（实测 pytest 直接挂死）。
+        self.up = simpy.Event(self.env)
+        self.down = True
+        if self.events_q is not None:
+            # 扰动事件（哨兵：`frm_idx = -1`）——transporter 收到后**开一个决策点**。
+            yield self.events_q.put((DISTURBANCE, self.aid, -1, None, False))
+        # ⚠️ **SC2/SC3：打断正在进行的行驶**（`_drive` 里接 `simpy.Interrupt`）。
+        # 只在 `stage != "idle"` 时打断——空闲时车可能停在任意 yield 点上，
+        # 盲目打断会把 Interrupt 抛到无关的等待里。
+        if self.stage != "idle" and self._main is not None:
+            self._main.interrupt(("agv_breakdown", self.stage))
+        yield self.env.timeout(self.cfg.agv_mttr)
+        self.down = False
+        self.up.succeed()
 
     def _wait_up(self):
         """⑨ 若当前停机，等到修复。"""
@@ -1338,6 +1376,26 @@ class SimWorld:
             tasks_in = simpy.Store(env)                                    # 旧 FIFO 规则路径
         # ⚠️ 车队列表**边建边填**（每个 AgvSim 拿同一份列表的引用）：⑨ failover 转交前要查
         #    目标车是否停机。`run()` 在所有车建好之后才启动，故运行时列表一定是满的。
+        # ⚠️ ⑨ **按次数注入**（`SimConfig.agv_n_failures` > 0）：在 `[0, 参考解 makespan]` 上
+        # **均匀抽 N 个时刻**，再**轮转指派**给各车（保证均衡，不让某台车独吞）。
+        # 口径照 Shi et al. 2025：该文不设 MTBF，直接规定每实例的故障次数。
+        # ⚠️ 抽在 `[0, T_ref]` 上 ⟹ **实际注入次数可能 < N**（落在完工之后的就不发生），Shi 同此局限。
+        # ⚠️ `T_ref` 走 `reference_makespan` —— 它**有缓存**（`_MREF_CACHE`），故这里不是每局重跑。
+        per_agv: dict[int, list[float]] = {}
+        if self.cfg.agv_n_failures > 0:
+            # ⚠️ **不许在这里算参考解**（会递归，见 `SimConfig.agv_fail_horizon`）——
+            # 要求调用方填好，缺了就显式报错，不静默退化成一个拍脑袋的上界。
+            if self.cfg.agv_fail_horizon is None:
+                raise ValueError(
+                    "SimConfig.agv_n_failures > 0 但 agv_fail_horizon=None ——"
+                    "抽签上界必须由调用方填（用 `reference_makespan(inst, 不含注入的 cfg)`）。"
+                    "在本层自己算会造成 `reference_run` 递归（实测抛『重入』）。")
+            fn_rng = np.random.default_rng([seed_chain, AGV_FAIL_N_SEED])
+            t_ref = float(self.cfg.agv_fail_horizon)
+            ts = np.sort(fn_rng.uniform(0.0, t_ref, size=int(self.cfg.agv_n_failures)))
+            order = fn_rng.permutation(self.cfg.n_agv)
+            for i, t in enumerate(ts):
+                per_agv.setdefault(int(order[i % self.cfg.n_agv]), []).append(float(t))
         agvs: list[AgvSim] = []
         for a in range(self.cfg.n_agv):
             agvs.append(AgvSim(env, a, self.m_dm, self.transport, self.cfg, stats, tasks_in,
@@ -1345,7 +1403,7 @@ class SimWorld:
                                np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
                                track, chargers=self.layout.chargers, charger_res=charger_res,
                                bound=bound, charge=charge, fleet=agvs,
-                               events_q=events_q))
+                               events_q=events_q, fail_times=tuple(per_agv.get(a, ()))))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes

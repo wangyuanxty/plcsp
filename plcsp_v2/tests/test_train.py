@@ -43,18 +43,26 @@ def _spec(tau: float = 1.0):
 
 @pytest.mark.unit
 def test_reward_weights_refuse_a_zero_component():
-    """⚠️ MK01 的**默认**参考解 TWT=0 ⟹ `reward_weights` 必须**显式报错**。
+    """⚠️ 参考目标**任一分量为 0** ⟹ `reward_weights` 必须**显式报错**。
 
     **这不是障碍，是纪律**：0 分量会让逆量纲权重变成 `1/0`。语料里写明的处置是
     "先调 τ"，**不是**给一个假权重。
+
+    ⚠️ **2026-10-09 改**：本测试原来拿 **MK01 的默认参考解**当"0 分量"的例子
+    （表里 τ=2.75 时 TWT 恰好 = 0）。**而那正是被修掉的毛病** ——
+    `due_dates.TF_RDD` 的 mk01/mk04/mk07 三个 τ **都恰好在悬崖上**，
+    参考解没有拖期 ⟹ 那三个实例跑不起来。修完 τ（mk01 → 2.00 等）后，
+    MK01 的默认参考解 TWT = 35.6 ≠ 0，**旧的断言不再成立**。
+    **⟹ 改成直接构造 0 分量** —— 这样测的是 `reward_weights` 的行为，
+    不再依赖任何一个实例的标定值（标定再变，本测试不受影响）。
     """
-    torch.manual_seed(0)
-    inst = load_mk("mk01")
-    cfg = SimConfig()                                   # 默认 τ = 冻结标定表
-    ref = ReferenceObjectives.of(inst, cfg)
-    assert ref.as_tuple()[2] == 0.0, "MK01 默认参考解应无拖期（本测试的前提）"
     with pytest.raises(ValueError, match="TWT=0"):
-        reward_weights(ref.as_tuple())
+        reward_weights((75.9, 4.96, 0.0))
+    with pytest.raises(ValueError, match="参考目标值必须为正"):
+        reward_weights((0.0, 4.96, 240.0))        # 分量 0 的另一种位置
+    # 正分量照常可用
+    w = reward_weights((75.9, 4.96, 240.0))
+    assert abs(sum(w) - 1.0) < 1e-9
 
 
 @pytest.mark.unit

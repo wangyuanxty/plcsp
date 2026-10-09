@@ -64,21 +64,52 @@ TARGET_FAILURES = 4.0
 ⟹ **默认档下 ⑨ 几乎不发生**，"故障下稳不稳"就测了个空。"""
 
 
-def build(seed: int, *, tau: float = 1.0, disturb: bool = False,
-          n_agv: int = 3, with_value: bool = False, device: str = "cpu"):
+def build(seed: int, *, tau: float | None = None, disturb: bool = False,
+          n_agv: int = 3, with_value: bool = False, device: str = "cpu",
+          instance: str = "mk01", soc0: float = 1.0, pm_interval: float | None = None,
+          target_failures: float | None = None, agv_n_failures: int = 0):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
+    `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
+    ⚠️ Q1/D5 早先的轮次用的是**显式 `tau=1.0`**（不查表）—— 两者奖励权重不同，**不可混比**。
+
     `disturb=True`：⑨ 按 `TARGET_FAILURES` 激活（只用于**最终评测**，不用于训练）。
-    `device`：`"cpu"`（默认）/ `"cuda"`。⚠️ **两臂必须同设备**，否则比出来的差没有意义。
+    `device`：`"cpu"`（默认）/ `"cuda"`。⚠️ **两臂必须同设备**。
+
+    ══ 三条"让约束真的触发"的开关（见 progress-log §110–§112）══
+    - `soc0`：**初始荷电率**（`AgvSpec.soc0`）。满电出发时 ⑪ 在短实例上永不触发；
+      **MK01 需要 ≤ 0.25**。默认 1.0（逐位不变）。
+    - `pm_interval`：⑫ 保养间隔（主轴分钟）。默认 120；**MK01 一局只有 ~76 min ⟹ 永不触发**，
+      **dev 档用 30**。
+    - `target_failures`：⑨ 按**每局期望故障次数**反推 `agv_mtbf`（`scaled_agv_mtbf`）。
+      **对位论文 Shi 2025 就是按次数注入（每实例 1–8 次），不设 MTBF** ⟹ 比固定 480 min 有依据。
     """
     torch.manual_seed(seed)
-    inst = load_mk("mk01")
+    inst = load_mk(instance)
     cfg = SimConfig(tau=tau, n_agv=n_agv)
-    if disturb:
-        # ⚠️ `SimConfig` 是**普通 dataclass**（不是 frozen/NamedTuple）⟹ 用 `dataclasses.replace`，
-        # 不用 `_replace`（那是 NamedTuple 的方法，写错是 AttributeError 而不是静默）。
-        cfg = dataclasses.replace(cfg, agv_mtbf=scaled_agv_mtbf(inst, TARGET_FAILURES))
+    # ⚠️ `SimConfig` / `AgvSpec` 都是**普通 dataclass** ⟹ 用 `dataclasses.replace`，
+    # 不用 `_replace`（那是 NamedTuple 的方法，写错是 AttributeError 而不是静默）。
+    mtbf = scaled_agv_mtbf(inst, TARGET_FAILURES) if disturb else None
+    if target_failures is not None:
+        mtbf = scaled_agv_mtbf(inst, target_failures)
+    over = {}
+    if mtbf is not None:
+        over["agv_mtbf"] = mtbf
+    if pm_interval is not None:
+        over["pm_interval"] = float(pm_interval)
+    if agv_n_failures:
+        # ⚠️ **按次数注入**（口径照 Shi et al. 2025）—— 比 `target_failures`（只定期望）更接近对位论文。
+        # ⚠️ **抽签上界必须在这里算**：`_build_entities` 自己算会递归（参考解也走那条路）。
+        # 而且用**不含注入**的 cfg 算 —— 否则"注入改动力学 ⟹ 改 T ⟹ 改注入"自指。
+        over["agv_fail_horizon"] = float(
+            reference_makespan(inst, dataclasses.replace(cfg, **over) if over else cfg))
+        over["agv_n_failures"] = int(agv_n_failures)
+    if over:
+        cfg = dataclasses.replace(cfg, **over)
     lay = layout_mod.sample_layout(inst.n_machines, seed=seed, n_agv=cfg.n_agv)
+    if soc0 != 1.0:
+        lay = dataclasses.replace(lay, agvs=[dataclasses.replace(a, soc0=soc0)
+                                             for a in lay.agvs])
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
@@ -108,14 +139,15 @@ def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
 
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             eval_every: int, eval_n: int, rec, device: str = "cpu",
-            workers: int = 0, save_dir: str = "") -> None:
+            workers: int = 0, save_dir: str = "", env: dict | None = None) -> None:
     """一条 `(臂, 种子)` 的完整训练 + 评测。`rec` = 写一行的回调。
 
     `workers > 1` ⟹ 多进程并行采链（`hrl/pool.py`，**只支持 CPU**）。
     ⚠️ **并行档与单进程档不是逐位相同**（每进程 1 线程 ⟹ 浮点归约次序不同）⟹
     **同一次对比里两臂必须同档**，且报出的数字要注明档位。
     """
-    spec, net = build(seed, with_value=(arm in ("A", "A2")), device=device)
+    env = dict(env or {})
+    spec, net = build(seed, with_value=(arm in ("A", "A2")), device=device, **env)
     optim = torch.optim.Adam(net.parameters(), lr=1e-4)
     rec({"kind": "start", "arm": arm, "seed": seed, "steps": steps, "n": n,
          "dt_events": dt_events, "device": device, "workers": workers,
@@ -161,7 +193,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             pool.close()
 
     # 最终：**扰动**（⑨ 激活）下的业绩
-    dspec, _ = build(seed, disturb=True, with_value=(arm in ("A", "A2")))
+    dspec, _ = build(seed, disturb=True, with_value=(arm in ("A", "A2")), **env)
     dist = evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events)
     rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
          "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
@@ -200,6 +232,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="多进程并行采链的进程数（0 = 顺序档）。仅 CPU；每进程 1 线程")
     ap.add_argument("--save-dir", default="",
                     help="存训练好的策略（.pt）；空 = 不存。⚠️ 不存就无法做 D6/H")
+    # ── ⚠️ 让约束真的触发（§110–§112）──
+    ap.add_argument("--instance", default="mk01", help="mk01–mk10")
+    ap.add_argument("--tau", type=float, default=None,
+                    help="交期 τ；None = 查逐实例标定表（10/10 可用）")
+    ap.add_argument("--soc0", type=float, default=1.0,
+                    help="AGV 初始荷电率（1.0 = 满电，逐位不变）。MK01 要 ⑪ 触发需 ≤ 0.25")
+    ap.add_argument("--pm-interval", type=float, default=None,
+                    help="⑫ 保养间隔（主轴分钟）。默认 120；dev 档用 30（MK01 一局只 76 min）")
+    ap.add_argument("--target-failures", type=float, default=None,
+                    help="⑨ 按「每局期望故障次数」反推 agv_mtbf（对位论文 Shi 2025 同口径）")
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
@@ -244,7 +286,10 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
-                        device=a.device, workers=a.workers, save_dir=a.save_dir)
+                        device=a.device, workers=a.workers, save_dir=a.save_dir,
+                        env={"instance": a.instance, "tau": a.tau, "soc0": a.soc0,
+                             "pm_interval": a.pm_interval,
+                             "target_failures": a.target_failures})
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 
