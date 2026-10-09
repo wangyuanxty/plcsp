@@ -94,12 +94,35 @@ def test_only_arm_a_trains_the_critic():
 
 
 @pytest.mark.unit
-def test_arm_a_refuses_a_net_without_a_critic_head():
-    """⚠️ **先查后跑**：critic 头缺了要当场报错，不能先花几分钟仿真再炸。"""
+def test_critic_arms_refuse_a_net_without_a_critic_head():
+    """⚠️ **先查后跑**：critic 头缺了要当场报错，不能先花几分钟仿真再炸。`A` 与 `A2` 都要。"""
     spec = _spec()
     net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers))
-    with pytest.raises(ValueError, match="critic 头"):
-        flat_step(net, spec, arm="A", n=2, seed=0, dt_events=DT)
+    for arm in ("A", "A2"):
+        with pytest.raises(ValueError, match="critic 头"):
+            flat_step(net, spec, arm=arm, n=2, seed=0, dt_events=DT)
+
+
+@pytest.mark.slow
+def test_a2_pulls_the_advantage_scale_back_to_b():
+    """⚠️ **A2 存在的唯一理由**：把 critic 臂的优势尺度拉回与 B 同量级。
+
+    §98.3 实测：未归一化的 `A` 的 `heads_grad` 比 `B` 大 ~50 倍 ⟹ 同 lr 下步长差 ~50 倍
+    ⟹ **A 的失败说明不了 critic 没用**（§101.4）。
+    `A2` 做标准 PPO 的 `(A − μ)/σ` 之后，两者应当回到同一量级。
+
+    ⚠️ 用 `grad_norm` 的**比值**做判据（不是绝对值）—— 比值对机器快慢不敏感。
+    """
+    spec = _spec()
+    torch.manual_seed(0)
+    net = HierarchicalPolicy(n_chargers=len(spec.layout.chargers), with_value=True)
+    a = flat_step(copy.deepcopy(net), spec, arm="A", n=2, seed=0, dt_events=DT)
+    a2 = flat_step(copy.deepcopy(net), spec, arm="A2", n=2, seed=0, dt_events=DT)
+    b = flat_step(copy.deepcopy(net), spec, arm="B", n=2, seed=0, dt_events=DT)
+    ra = a["grad_norm"]["heads"] / b["grad_norm"]["heads"]
+    ra2 = a2["grad_norm"]["heads"] / b["grad_norm"]["heads"]
+    assert ra > 10.0, f"未归一化的 critic 尺度该比 B 大一个量级，实测只差 {ra:.1f}×"
+    assert ra2 < 5.0, f"A2 归一化后该回到 B 的量级，实测仍差 {ra2:.1f}×"
 
 
 @pytest.mark.unit

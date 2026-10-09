@@ -115,7 +115,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
     ⚠️ **并行档与单进程档不是逐位相同**（每进程 1 线程 ⟹ 浮点归约次序不同）⟹
     **同一次对比里两臂必须同档**，且报出的数字要注明档位。
     """
-    spec, net = build(seed, with_value=(arm == "A"), device=device)
+    spec, net = build(seed, with_value=(arm in ("A", "A2")), device=device)
     optim = torch.optim.Adam(net.parameters(), lr=1e-4)
     rec({"kind": "start", "arm": arm, "seed": seed, "steps": steps, "n": n,
          "dt_events": dt_events, "device": device, "workers": workers,
@@ -161,7 +161,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             pool.close()
 
     # 最终：**扰动**（⑨ 激活）下的业绩
-    dspec, _ = build(seed, disturb=True, with_value=(arm == "A"))
+    dspec, _ = build(seed, disturb=True, with_value=(arm in ("A", "A2")))
     dist = evaluate(net, dspec, n=eval_n, seed=1, dt_events=dt_events)
     rec({"kind": "final", "arm": arm, "seed": seed, "total_s": time.perf_counter() - t0,
          "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
@@ -170,7 +170,8 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Q1：扁平链两臂（设计 §12.2–§12.4）")
-    ap.add_argument("--arms", nargs="+", default=["A", "B"], choices=["A", "B"])
+    ap.add_argument("--arms", nargs="+", default=["A", "B"], choices=["A", "A2", "B"],
+                    help="A=critic(原始优势) · A2=critic+优势归一化 · B=组内 z 化")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0])
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--n", type=int, default=8, help="组大小（设计 §12.2 的 G）")
@@ -200,6 +201,20 @@ def main(argv: list[str] | None = None) -> int:
 
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    # ⚠️ **断点续跑**：跳过已经写出 `final` 的 `(臂, 种子)`。
+    # 为什么需要：一次全量是小时级，而这台笔记本目前**电源功率不足（电池 1%）**——
+    # 跑到一半掉电会整个丢失，跑数器本身不写中间检查点。
+    done: set[tuple[str, int]] = set()
+    if out.exists():
+        for ln in out.read_text(encoding="utf-8").splitlines():
+            try:
+                d = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if d.get("kind") == "final":
+                done.add((str(d["arm"]), int(d["seed"])))
+        if done:
+            print(f"续跑：已完成 {sorted(done)}，跳过", file=sys.stderr)
     with out.open("a", encoding="utf-8") as fh:
         def rec(d: dict) -> None:
             fh.write(json.dumps(d, ensure_ascii=False) + "\n")
@@ -208,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
 
         for seed in a.seeds:
             for arm in a.arms:
+                if (arm, seed) in done:
+                    continue
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         device=a.device, workers=a.workers)

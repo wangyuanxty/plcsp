@@ -5,10 +5,20 @@
 *"learned critics remain essential for long-horizon tasks"* —— **而调度是长时程。**
 **⟹ 拿我们自己这套策略，只换"优势怎么算"这一个变量，其余全同。**
 
-| 臂 | 优势 | critic | 更新 |
+| 臂 | 优势 | critic | 归一化 |
 |---|---|---|---|
-| **A** | `R − V(s_t)`（逐决策） | **有**（`HierarchicalPolicy(with_value=True)`） | 同步 |
-| **B** | `(R − μ)/σ`（**整条链一个值**） | 无 | 同步 |
+| **A** | `R − V(s_t)`（逐决策） | **有** | **无**（原始尺度） |
+| **A2** | `R − V(s_t)`（逐决策） | **有** | **有**（标准 PPO） |
+| **B** | `(R − μ)/σ`（**整条链一个值**） | 无 | 有（自带） |
+
+**⚠️ 为什么必须有 A2**：A 的优势尺度与 B 差约 **50 倍**（`grad_norm` 实测 10527 vs 199，§98.3）。
+标准 PPO 会给优势做 `(A − μ)/σ`；**A 故意没做**（做了就不是"只差优势"了）。
+但**一个没做归一化的 critic 臂发散，说明不了 critic 没用** —— 审稿人会写
+*"This is not evidence that critics are unnecessary — it is evidence that the baseline was not tuned."*
+**⟹ A2 才是那个"公平的 critic"。没有它，Q1 的结论不能进论文**（§101.4）。
+
+**A2 的归一化口径**：`Â = (A − μ_A)/(σ_A + ε)`，**在整组更新的全部决策上算** ——
+标准 PPO 的 minibatch 归一化在这里对应的就是"这一组"。
 
 **"扁平"= 不分层**：一条链的**全部**决策（MA + PA + LA + C + M）算**一个**组，
 不像两层那样按层切成两个组、交替更新。这是 v1 `joint_chain_step` 的口径。
@@ -36,7 +46,7 @@ import torch
 from ..env.reward import objective_vector, scalar_reward
 from .agents import HierarchicalPolicy
 from .pool import Chain
-from .train import Spec, base_chain, batched_terms, group_advantage
+from .train import EPS, Spec, base_chain, batched_terms, group_advantage
 
 if TYPE_CHECKING:
     from .pool import ChainPool
@@ -44,7 +54,14 @@ if TYPE_CHECKING:
 ALL_KINDS: tuple[str, ...] = ("MA", "PA", "LA", "C", "M")
 """一条链上的**全部**决策种类 —— 扁平链不分层 ⟹ 一个组覆盖它们全部。"""
 
-ARMS: tuple[str, ...] = ("A", "B")
+ARMS: tuple[str, ...] = ("A", "A2", "B")
+"""`A` = critic 原始优势 · `A2` = **critic + 优势归一化**（标准 PPO 口径）· `B` = 组内 z 化。"""
+
+CRITIC_ARMS: tuple[str, ...] = ("A", "A2")
+"""要 critic 头的臂。"""
+
+NORM_ARMS: tuple[str, ...] = ("A2",)
+"""要**优势归一化**的臂 —— 见模块 docstring「A2 的归一化口径」。"""
 
 CV_DEFAULT = 0.5
 """critic 损失系数（仅臂 A）：`loss = 策略损失 + cv × critic 损失`。"""
@@ -103,30 +120,40 @@ def flat_step(net: HierarchicalPolicy, spec: Spec,
     if arm not in ARMS:
         raise ValueError(f"arm={arm!r} 未知：只接受 {ARMS}")
     # ⚠️ **先查后跑**：critic 头缺了要**当场**报错，不能先花几分钟仿真再炸（快速失败纪律）。
-    if arm == "A" and net.value_head is None:
-        raise ValueError("臂 A 需要 critic 头 —— 构造时须给 `HierarchicalPolicy(with_value=True)`")
+    if arm in CRITIC_ARMS and net.value_head is None:
+        raise ValueError(f"臂 {arm} 需要 critic 头 —— 构造时须给 `HierarchicalPolicy(with_value=True)`")
     if optim is None:
         optim = torch.optim.Adam(net.parameters(), lr=lr)
     runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events, pool=pool)
     z = group_advantage([ch.R for ch in runs])
 
     optim.zero_grad(set_to_none=True)
-    pg = torch.zeros((), requires_grad=True)
     crit = torch.zeros((), requires_grad=True)
     rows = []
+    terms: list[tuple[torch.Tensor, torch.Tensor]] = []
     for i, ch in enumerate(runs):
-        # 一次前向同时拿 logp 与 V（臂 A）—— 见 `train.batched_terms`
-        lp, v = batched_terms(net, ch.decisions, ALL_KINDS, want_value=(arm == "A"))
-        if arm == "A":
+        # 一次前向同时拿 logp 与 V（critic 臂）—— 见 `train.batched_terms`
+        lp, v = batched_terms(net, ch.decisions, ALL_KINDS,
+                              want_value=(arm in CRITIC_ARMS))
+        if arm in CRITIC_ARMS:
             adv = ch.R - v.detach()                          # 逐决策：R − V(s_t)
             crit = crit + (v - ch.R).pow(2).mean()
         else:
             adv = torch.full_like(lp, float(z[i]))           # 整条链**一个**优势
-        pg = pg - (adv * lp).sum()
+        terms.append((adv, lp))
         rows.append({"R": float(ch.R), "n_dec": len(ch.decisions),
                      "makespan": float(ch.f[0]), "energy": float(ch.f[1]),
                      "twt": float(ch.f[2])})
-    loss = pg + (cv * crit if arm == "A" else 0.0)
+
+    if arm in NORM_ARMS:
+        # ⚠️ **整组一次归一化**（标准 PPO 的 minibatch 口径）。逐链各归一会把
+        # "哪条链更好"这条信息（= 跨链比较）整条抹掉 —— 那正是组内相对法赖以工作的东西。
+        all_adv = torch.cat([a for a, _ in terms])
+        mu, sd = all_adv.mean(), all_adv.std()
+        terms = [((a - mu) / (sd + EPS), lp) for a, lp in terms]
+
+    pg = -sum((a * lp).sum() for a, lp in terms)
+    loss = pg + (cv * crit if arm in CRITIC_ARMS else 0.0)
     loss.backward()
     gn = grad_norm(net)
     optim.step()
