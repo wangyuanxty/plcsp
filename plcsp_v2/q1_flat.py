@@ -95,16 +95,21 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     if target_failures is not None:
         mtbf = scaled_agv_mtbf(inst, target_failures)
     over = {}
-    # ⚠️ `sim_overrides`（2026-10-10 加）：**机制消融**用的通用 `SimConfig` 覆盖口
-    # （如 `{"agv_failover": False}` / `{"machine_age_failure": False}`）。
-    # **并进 `over` ⟹ 参考解与奖励权重也用它**（它们必须与仿真的 cfg 同源，否则归一化错位）。
-    # 未知键由 `dataclasses.replace` 当场 `TypeError` —— **不静默忽略**。
-    if sim_overrides:
-        over.update(sim_overrides)
     if mtbf is not None:
         over["agv_mtbf"] = mtbf
     if pm_interval is not None:
         over["pm_interval"] = float(pm_interval)
+    # ⚠️ **`sim_overrides` 最后应用 ⟹ 它优先**（2026-10-10 修）。
+    #
+    # 原先它**在最前面**，于是被后面的 `pm_interval=` / `agv_mtbf` **覆盖掉** ⟹
+    # 调用方以为自己在覆盖，其实没有。**实测踩过**：`h_sensitivity` 扫 `pm_interval`
+    # 的 15/60/120 三档，读数**全部是 0.0%** —— 因为每一档都被基准 30 盖回去了，
+    # 扫的根本不是那个参数。**零报错、零异常，只是一张全 0 的表。**
+    #
+    # ⚠️ **语义**：具名参数（`pm_interval=` / `target_failures=` …）是**常用入口**，
+    # `sim_overrides` 是**通用逃生口** —— 逃生口应当能盖住常用入口，反之则没有意义。
+    if sim_overrides:
+        over.update(sim_overrides)
     if agv_n_failures:
         # ⚠️ **按次数注入**（口径照 Shi et al. 2025）—— 比 `target_failures`（只定期望）更接近对位论文。
         # ⚠️ **抽签上界必须在这里算**：`_build_entities` 自己算会递归（参考解也走那条路）。
