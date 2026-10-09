@@ -108,7 +108,7 @@ def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
 
 def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             eval_every: int, eval_n: int, rec, device: str = "cpu",
-            workers: int = 0) -> None:
+            workers: int = 0, save_dir: str = "") -> None:
     """一条 `(臂, 种子)` 的完整训练 + 评测。`rec` = 写一行的回调。
 
     `workers > 1` ⟹ 多进程并行采链（`hrl/pool.py`，**只支持 CPU**）。
@@ -167,6 +167,21 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
          "clean": evaluate(net, spec, n=eval_n, seed=1, dt_events=dt_events),
          "disturbed": dist, "agv_mtbf": dspec.cfg.agv_mtbf})
 
+    if save_dir:
+        # ⚠️ **必须存盘**：不然训好的策略丢了 ⟹ 后面要"读出 `B` 矩阵"（v2 实验计划 D6）、
+        # 要"同策略在扰动环境里重评"（H 敏感性）全都做不了。§103.5 就是这么发现缺口的。
+        # 连同**重建网络要的全部元信息**一起存（`n_chargers` / `with_value` / 配置），
+        # 否则拿到 `.pt` 也重建不出同构的网。
+        p = Path(save_dir) / f"{arm}_s{seed}.pt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+                    "arm": arm, "seed": seed, "steps": steps, "n": n,
+                    "dt_events": dt_events, "device_trained_on": device,
+                    "n_chargers": len(spec.layout.chargers),
+                    "with_value": arm in ("A", "A2"),
+                    "tau": spec.cfg.tau}, p)
+        rec({"kind": "saved", "arm": arm, "seed": seed, "path": str(p)})
+
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Q1：扁平链两臂（设计 §12.2–§12.4）")
@@ -183,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="torch 线程数（默认 1）。⚠️ 实测 §99：24 线程比 1 线程慢 2.7×")
     ap.add_argument("--workers", type=int, default=0,
                     help="多进程并行采链的进程数（0 = 顺序档）。仅 CPU；每进程 1 线程")
+    ap.add_argument("--save-dir", default="",
+                    help="存训练好的策略（.pt）；空 = 不存。⚠️ 不存就无法做 D6/H")
     ap.add_argument("--out", default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
@@ -227,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
-                        device=a.device, workers=a.workers)
+                        device=a.device, workers=a.workers, save_dir=a.save_dir)
     print(f"\n写出：{out}", file=sys.stderr)
     return 0
 
