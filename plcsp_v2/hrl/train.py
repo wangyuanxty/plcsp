@@ -297,20 +297,41 @@ def segment_from(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int, *
     return Branch(counters=counters, decisions=inner.rec.decisions)
 
 
-def _run_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int,
-                  jobs: list[tuple[tuple[int, int, int], int, bool]], *,
-                  dt_events: int, pool) -> list[Branch]:
-    """跑 `Z_j` 上的一批段 —— `pool=None` 就地跑，给了就用 `SegmentPool` 并行。
+def _run_all_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy,
+                      plan: list[tuple[int, list[tuple[tuple[int, int, int], int, bool]]]], *,
+                      dt_events: int, pool) -> list[list[Branch]]:
+    """跑**整个阶段**的全部段 → 按 `plan` 的边界分组返回。
 
-    `jobs = [(goal, seed, greedy), ...]`。**两条路产出同形的 `Branch`**。
-    ⚠️ 并行档在**子进程**里跑仿真与采样，**loss 仍在父进程算**（那要梯度）。
+    `plan = [(j, [(goal, seed, greedy), ...]), ...]`。
+
+    ⚠️ **必须是"一次池调用"，不是每个顶层点一次**（2026-10-09 修）：
+    `SegmentPool.segments()` 每次调用都要把 `state_dict`（约 2.4 MB）发给**每个** worker 一次；
+    若每顶层点调一次，`train_step` 每步会调 `2 × n_top` 次（B 阶段 n_top 次 + A 阶段 n_top 次）
+    ⟹ **序列化量 = `2 × n_top × n_workers × 2.4 MB`**。
+    实测 `dt_events=10`（`n_top=38`、16 进程）：**每步 ~2.9 GB**，把成本曲线压成次线性
+    （段数降 2.2× 而成本只降 1.4×）。合成一次后序列化量降到 `2 × n_workers × 2.4 MB`。
+
+    ⚠️ 段与段**互相独立且确定**（给定 `(前缀, j, goal, seed, greedy)`）⟹ **合并调用不改读数**，
+    只改谁在哪个 worker 上跑。（`test_segment_pool_matches_the_sequential_path` 钉住同一条。）
     """
     if pool is None:
-        return [segment_from(net, spec, base, j, goal=g, seed=sd, greedy=gr,
-                             dt_events=dt_events) for g, sd, gr in jobs]
-    prefix, _ = _prefix_to(base.rec.decisions, j)
-    out = pool.segments([(prefix, j, g, sd, gr) for g, sd, gr in jobs])
-    return [Branch(counters=c, decisions=d) for c, d in out]
+        return [[segment_from(net, spec, base, j, goal=g, seed=sd, greedy=gr,
+                              dt_events=dt_events) for g, sd, gr in jobs]
+                for j, jobs in plan]
+    flat: list[tuple] = []
+    for j, jobs in plan:
+        prefix, _ = _prefix_to(base.rec.decisions, j)
+        flat.extend((prefix, j, g, sd, gr) for g, sd, gr in jobs)
+    out = pool.segments(flat)
+    branches = [Branch(counters=c, decisions=d) for c, d in out]
+    res: list[list[Branch]] = []
+    k = 0
+    for _j, jobs in plan:
+        res.append(branches[k:k + len(jobs)])
+        k += len(jobs)
+    if k != len(branches):                       # 不许静默错位
+        raise RuntimeError(f"段回填错位：切出 {k} 条，拿到 {len(branches)} 条")
+    return res
 
 
 # ══════════════════ 两个阶段 ══════════════════
@@ -324,12 +345,13 @@ def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
     n_top = sum(1 for d in base.rec.decisions if d.kind == "MA")
     loss = torch.zeros((), requires_grad=True)
     rows = []
+    # ⚠️ 先把**全部**顶层点的段列出来，再**一次**交给池（见 `_run_all_segments`）
+    plan_b = [(j, [(_prefix_to(base.rec.decisions, j)[1], seed * 1000 + m, False)
+                   for m in range(M)]) for j in range(n_top)]
+    all_b = _run_all_segments(net, spec, base, plan_b, dt_events=dt_events, pool=pool)
     for j in range(n_top):
-        _prefix, goal = _prefix_to(base.rec.decisions, j)
         before = base.ma_counters[j]
-        runs = _run_segments(net, spec, base, j,
-                             [(goal, seed * 1000 + m, False) for m in range(M)],
-                             dt_events=dt_events, pool=pool)
+        runs = all_b[j]
         segs = [segment_return(before, br.counters) for br in runs]
         adv = group_advantage([_scalar(sg, spec.w) for sg in segs])
         for a, sg in zip(adv, segs):
@@ -351,13 +373,17 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
     n_top = sum(1 for d in base.rec.decisions if d.kind == "MA")
     loss = torch.zeros((), requires_grad=True)
     seg_std = []
+    goals_by_j = []
+    for j in range(n_top):
+        gen = torch.Generator().manual_seed(seed * 1000 + j)
+        goals_by_j.append([tuple(int(x) for x in torch.randint(0, G_BINS, (G_DIM,), generator=gen))
+                           for _ in range(G)])
+    plan_a = [(j, [(g, 0, True) for g in goals_by_j[j]]) for j in range(n_top)]
+    all_a = _run_all_segments(net, spec, base, plan_a, dt_events=dt_events, pool=pool)
     for j in range(n_top):
         before = base.ma_counters[j]
-        gen = torch.Generator().manual_seed(seed * 1000 + j)
-        goals = [tuple(int(x) for x in torch.randint(0, G_BINS, (G_DIM,), generator=gen))
-                 for _ in range(G)]
-        runs = _run_segments(net, spec, base, j, [(g, 0, True) for g in goals],
-                             dt_events=dt_events, pool=pool)
+        goals = goals_by_j[j]
+        runs = all_a[j]
         rewards = [_scalar(segment_return(before, br.counters), spec.w) for br in runs]
         adv = group_advantage(rewards)
         seg_std.append(float(np.std(rewards)))
