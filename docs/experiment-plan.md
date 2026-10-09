@@ -1,5 +1,14 @@
 # 实验计划（2026-10-05 整理）
 
+> ⛔ **这份是 v1（`plcsp/`）的实验计划。v2 的在 `docs/v2/experiment-plan.md`。**
+>
+> **判据**：本文件里每一个键名 —— `joint_chain_step` · `m13_train_a` · `route_k` ·
+> `route_zones` · `geom_bias` · `pm_head` · `batch_head` · `recompute_chunk` · `--t3` ·
+> **十约束** —— **在 v2 里一个都不存在**（①②④⑤⑩ 已删、几何线整条砍、`algo/` 已删）。
+>
+> **⚠️ 尤其 §9 冻结清单对本文件有效、对 v2 全部作废。**
+> **不得跨版本引用。**（2026-10-09 补 —— 此前本文缺横幅，实测已因此误判过一次。）
+
 > **本文把散在四处的实验收成一张清单。**
 > 原有出处：`superpowers/specs/2026-10-02-plcsp-rebuild-design.md` **§6** ·
 > `INDEX.md` §5「高优先」 · `progress-log.md` §30.3 · `docs/mechanism-designs.md`。
