@@ -111,6 +111,23 @@ class AgvSpec:
     """
     id: int
     battery_kwh: float        # 电池容量 [kWh]（⑪ 充电用，保留）
+    soc0: float = 1.0
+    """**初始荷电率**（0–1）：`battery(0) = soc0 × battery_kwh`。
+
+    ⚠️ **`assumed`，且默认 1.0 = 满电出发 ⟹ 与既有读数逐位不变。**
+
+    **为什么需要它**：满电出发时，⑪ 只在"单局用电 ≥ 容量 × (1 − `battery_low`) = 80%"
+    的实例上才咬人 —— 实测 MK01–MK07 一局只耗容量的 **14%**（§111），
+    所以 ⑪ 在那些实例上**永远不触发**。
+    起始不满电把"需要的用电量"从 80% 降到 `(soc0 − battery_low)`，**不动容量、不动阈值、不动功率**。
+
+    **真实场景支撑**：班次开始时 AGV **未必满电**（上一班用剩的）—— 这是常见且合理的假设。
+
+    ⚠️ **影响范围有限**：只影响**第一次充电之前**。充一次后电量到 `battery_high × cap`，
+    之后与 `soc0=1.0` 的轨迹一致。
+    ⚠️ **`soc0 < battery_low` 是无意义的**：那等于"开机就在阈值下"，会在 t≈0 就充电，
+    不是"约束咬人"。构造时会显式报错。
+    """
 
 
 @dataclass
@@ -183,7 +200,8 @@ def sample_layout(n_machines: int, seed: int = 0, *, cell_w: float = 3.0,
     # 车队规格。⚠️ 抽样放在**最后**——机台/充电桩的抽样序列才不会被扰动。
     # ⚠️ **v2（⑩ 去后）**：只剩电池容量（⑪ 充电要用）；速度与载量不再逐车不同。
     agvs = [AgvSpec(id=a,
-                    battery_kwh=float(rng.uniform(2.0, 4.0)))        # assumed
+                    battery_kwh=float(rng.uniform(2.0, 4.0)),       # assumed
+                    soc0=1.0)                        # 满电出发（默认）
             for a in range(n_agv)]
 
     return Layout(grid=spec, machines=machines, chargers=chargers,

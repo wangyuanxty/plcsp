@@ -763,7 +763,15 @@ class AgvSim:
         # 载量恒 1（`capacity` 字段整个去掉），速度取 `cfg.agv_speed_mps`（无倍率）。
         self.speed = cfg.agv_speed_mps
         self.battery_cap = spec.battery_kwh
-        self.battery = spec.battery_kwh     # [kWh]，只在 ⑪ 开启时增减
+        # ⚠️ **初始荷电率**（`AgvSpec.soc0`，默认 1.0 = 满电 ⟹ 逐位不变）。
+        # ⚠️ **`soc0 < battery_low` 显式报错**：那等于"开机就在阈值下"，会在 t≈0 就充电，
+        # 不是"低电约束咬人"。静默接受会把一条无意义的配置伪装成有效实验。
+        if not (cfg.battery_low <= spec.soc0 <= 1.0):
+            raise ValueError(
+                f"AGV {spec.id} 的 soc0={spec.soc0} 不在 [{cfg.battery_low}, 1.0] 内——"
+                f"低于 battery_low({cfg.battery_low}) 等于开机即充电，不是有效配置；"
+                "高于 1.0 超过容量。")
+        self.battery = spec.soc0 * spec.battery_kwh   # [kWh]，只在 ⑪ 开启时增减
         self.chargers, self.charger_res = list(chargers), list(charger_res)
         # ⑨ 故障：**每台车一条独立随机流**——否则关掉 AGV 故障会移位机台故障流（消融不干净）
         self.rng = rng
