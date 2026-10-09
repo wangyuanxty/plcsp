@@ -373,24 +373,36 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
 
 def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer | None,
                *, M: int = 8, G: int = 8, seed: int = 0, dt_events: int = 20,
-               lr: float = 1e-4, pool=None) -> dict:
+               lr: float = 1e-4, pool=None, loss_threads: int = 8) -> dict:
     """一次**交替**：**先 B 后 A**（顺序的理由见模块 docstring）。
 
     每阶段各自：跑组 → 算优势 → **只对那一层**带梯度重算 → 反传 → 走一步。
     """
     if optim is None:
         optim = torch.optim.Adam(net.parameters(), lr=lr)
+    # ⚠️ **两种负载要两种线程数**（实测 §106.7）：
+    #   · `base_chain` = **每次一条决策的串行链** —— 1 线程最快（24 线程慢 2.7×，§99.2）；
+    #   · `logp 前向 + backward` = **一大批矩阵运算** —— 8 线程快 2.9×。
+    # 同一个进程里混着这两种负载，所以要**按阶段切**，不能全局设一个值。
+    # ⚠️ 只在**带池**时切：`pool=None` 时段也在父进程跑（= 串行链那类），
+    # 换成多线程反而更慢 —— 那条路保持调用方的设置不变。
+    prev = torch.get_num_threads()
+    torch.set_num_threads(1)
     base = base_chain(net, spec, greedy=False, seed=seed, dt_events=dt_events)
     out: dict = {"base_makespan": float(base.metrics["makespan"])}   # type: ignore[attr-defined]
-    for name, fn, kw in (("B", phase_b, {"M": M}), ("A", phase_a, {"G": G})):
-        optim.zero_grad(set_to_none=True)
-        res = fn(net, spec, base, seed=seed, dt_events=dt_events, pool=pool, **kw)
-        res["loss"].backward()
-        grad = _grad_norm(net, name)
-        optim.step()
-        out[name] = {k: v for k, v in res.items() if k != "loss"}
-        out[name]["loss"] = float(res["loss"].detach())
-        out[name]["grad_norm"] = grad
+    torch.set_num_threads(max(1, loss_threads) if pool is not None else prev)
+    try:
+        for name, fn, kw in (("B", phase_b, {"M": M}), ("A", phase_a, {"G": G})):
+            optim.zero_grad(set_to_none=True)
+            res = fn(net, spec, base, seed=seed, dt_events=dt_events, pool=pool, **kw)
+            res["loss"].backward()
+            grad = _grad_norm(net, name)
+            optim.step()
+            out[name] = {k: v for k, v in res.items() if k != "loss"}
+            out[name]["loss"] = float(res["loss"].detach())
+            out[name]["grad_norm"] = grad
+    finally:
+        torch.set_num_threads(prev)
     return out
 
 
