@@ -5,6 +5,7 @@
 ```
 python -m plcsp_v3.summarize q1.jsonl d5.jsonl b.jsonl c.jsonl
 python -m plcsp_v3.summarize --final-only q1.jsonl        # 只看 final
+python -m plcsp_v3.summarize --curves --baseline 76.338 a.jsonl   # 峰值/最终/不动点
 ```
 
 ══ ⚠️ 本工具**只做算术，不做判断** ══
@@ -106,14 +107,91 @@ def summarize(path: str, rows: list[dict], *, final_only: bool = False) -> None:
             print(f"    {arm:<12} {txt}")
 
 
+def _pct(x: float, base: float) -> str:
+    """`x` 相对 `base` 的百分比（**三目标越小越好** ⟹ 正数 = 输给对照）。"""
+    if base <= 0:
+        return "n/a（对照 ≤ 0）"
+    return f"{(x - base) / base * 100:+.1f}%"
+
+
+def curves(path: str, rows: list[dict], *, baseline: float | None = None) -> None:
+    """**整条曲线**（每 `eval_every` 步的 greedy 评测）→ 峰值 / 最终值 / 不动点数。
+
+    ⚠️ **这就是 `experiment-plan.md` §A 的判据**：**峰值**赢规则 ⟹ 能力够；
+    **最终值**赢规则 ⟹ 收敛稳。**两个必须分开报** ——
+    v2 的教训是只看最终值会把"学到又丢掉"误读成"学不会"。
+
+    `baseline`：对照。**实验 A 的对照是 76.338**
+    （36 条固定规则里最好那条，= `EAJ+EAM + LATEST_IN_TIME`，见 `progress-log.md` §14.1）。
+    给了就一并报百分比。
+
+    ⚠️ **不动点数** = 曲线里**不同取值**的个数（§E：越少越像塌缩）。
+    """
+    evs = [r for r in rows if r.get("kind") == "eval"]
+    if not evs:
+        print(f"\n═══ {path} ═══  ⚠️ 没有 `eval` 记录")
+        return
+    by: dict[tuple[str, int], list[dict]] = {}
+    for r in evs:
+        by.setdefault((str(r["arm"]), int(r["seed"])), []).append(r)
+
+    print(f"\n═══ {path} ═══  曲线（{len(by)} 条）")
+    if baseline is not None:
+        print(f"  对照（36 条固定规则里最好那条）= {baseline:.3f}")
+    per_arm: dict[str, list[tuple[float, float]]] = {}
+    for (arm, seed), rs in sorted(by.items()):
+        rs.sort(key=lambda r: int(r["step"]))
+        steps = [int(r["step"]) for r in rs]
+        ms = [float(r["makespan"]) for r in rs]
+        pk, ls = min(ms), ms[-1]
+        per_arm.setdefault(arm, []).append((pk, ls))
+        tail = ("" if baseline is None else
+                f"  vs 对照：峰值 {_pct(pk, baseline)} · 最终 {_pct(ls, baseline)}")
+        n_uniq = len({round(x, 6) for x in ms})
+        print(f"  {arm:<6} seed{seed}  峰值 {pk:7.2f}（step {steps[ms.index(pk)]}）"
+              f" · 最终 {ls:7.2f} · 不动点 {n_uniq}/{len(ms)}{tail}")
+        print(f"                 {[round(x, 2) for x in ms]}")
+
+    print("  ── 跨种子 ──")
+    for arm, v in sorted(per_arm.items()):
+        pks = [a for a, _ in v]
+        lss = [b for _, b in v]
+        line = (f"    {arm:<6} 峰值 min={min(pks):7.2f} · "
+                f"最终 mean={sum(lss) / len(lss):7.2f}（{len(v)} 个种子）")
+        if baseline is not None:
+            line += f"  vs 对照：峰值 {_pct(min(pks), baseline)}"
+        print(line)
+
+    # ⚠️ 两层的**空转**（§12.3 / §15）：阶段 B 里优势全为 0 的顶层点占比
+    tr = [r for r in rows if r.get("kind") == "train" and r.get("n_top")]
+    if tr:
+        print("  ── 阶段 B 空转（`idle_top` / `n_top`）──")
+        by2: dict[tuple[str, int], list[tuple[int, int]]] = {}
+        for r in tr:
+            by2.setdefault((str(r["arm"]), int(r["seed"])), []).append(
+                (int(r["idle_top"]), int(r["n_top"])))
+        for key in sorted(by2):
+            v2 = by2[key]
+            ti, tn = sum(x for x, _ in v2), sum(y for _, y in v2)
+            print(f"    {key[0]:<6} seed{key[1]}  {ti}/{tn} = "
+                  f"{ti / max(tn, 1) * 100:.0f}%（{len(v2)} 步）")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="跑数器输出汇总（只做算术）")
     ap.add_argument("jsonl", nargs="+", help="一个或多个跑数器输出")
     ap.add_argument("--final-only", action="store_true",
-                    help="只报 final（默认也是只报 final；此开关保留给将来的曲线汇总）")
+                    help="只报 final（默认也是只报 final）")
+    ap.add_argument("--curves", action="store_true",
+                    help="改报**整条曲线** —— 峰值 / 最终值 / 不动点数（§A 的判据）")
+    ap.add_argument("--baseline", type=float, default=None,
+                    help="对照值（实验 A = 76.338，见 §14.1）。给了就报百分比")
     a = ap.parse_args(argv)
     for path, rows in _load(a.jsonl).items():
-        summarize(path, rows, final_only=a.final_only)
+        if a.curves:
+            curves(path, rows, baseline=a.baseline)
+        else:
+            summarize(path, rows, final_only=a.final_only)
     return 0
 
 
