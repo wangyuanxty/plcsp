@@ -70,7 +70,7 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
           instance: str = "mk01", pm_interval: float | None = None,
           target_failures: float | None = None, agv_n_failures: int = 0,
           finite_buffer: bool = True, constraints: ConstraintConfig | None = None,
-          sim_overrides: dict | None = None):
+          sim_overrides: dict | None = None, layout_seed: int | None = None):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
@@ -85,6 +85,21 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     - `target_failures`：⑨ 按**每局期望故障次数**反推 `agv_mtbf`（`scaled_agv_mtbf`）。
       **对位论文 Shi 2025 就是按次数注入（每实例 1–8 次），不设 MTBF** ⟹ 比固定 480 min 有依据。
     ⚠️ **2026-10-10：⑪ 充电机制删除 ⟹ `soc0` 开关一并删**（车队无电量）。
+
+    ══ ⭐ `layout_seed`：把「布局」与「训练」两件事拆开（2026-10-10 夜）══
+
+    `None`（默认）= 用 `seed` ⟹ **与改动前逐位相同**。
+    给定 ⟹ **布局由 `layout_seed` 决定，训练随机性仍由 `seed` 决定**
+    （`torch.manual_seed(seed)` + 采链的种子都跟着 `seed`）。
+
+    **为什么需要它**：`sample_layout(seed=seed)` 意味着**每个"训练种子"换了一整套车间**
+    （输入缓冲容量、机台故障率、几何全变，实测三套）。后果是
+    **报出的标准误里混的是「布局之间」的方差，不是「训练之间」的方差** ——
+    消融实验的机制效应（几个百分点）被布局方差（几十个百分点）盖住，
+    **三个种子分辨不出任何东西**（§130.3 实测）。
+
+    **用法**：消融实验**固定 `layout_seed`、只变 `seed`** ⟹ 方差小一个量级；
+    「跨布局泛化」另做一组（固定 `seed`、变 `layout_seed`）—— **那本来也该是单独一节**。
     """
     torch.manual_seed(seed)
     inst = load_mk(instance)
@@ -119,7 +134,9 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
         over["agv_n_failures"] = int(agv_n_failures)
     if over:
         cfg = dataclasses.replace(cfg, **over)
-    lay = layout_mod.sample_layout(inst.n_machines, seed=seed, n_agv=cfg.n_agv)
+    lay = layout_mod.sample_layout(inst.n_machines,
+                                   seed=seed if layout_seed is None else int(layout_seed),
+                                   n_agv=cfg.n_agv)
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
     # ② 有限缓冲：**约束对象要同时给仿真与特征层**（两份不同源 = 假信号）。
@@ -347,6 +364,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--save-dir", default="",
                     help="存训练好的策略（.pt）；空 = 不存。⚠️ 不存就无法做 D6/H")
     # ── ⚠️ 让约束真的触发（§110–§112）──
+    ap.add_argument("--layout-seed", type=int, default=None,
+                    help="⭐ 布局种子。None = 用训练 seed（旧行为）。"
+                         "**消融实验应当固定它** —— 否则标准误里混的是布局方差（§130.3）")
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None,
                     help="交期 τ；None = 查逐实例标定表（10/10 可用）")
@@ -404,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         device=a.device, workers=a.workers, save_dir=a.save_dir,
-                        env={"instance": a.instance, "tau": a.tau,
+                        env={"instance": a.instance, "layout_seed": a.layout_seed, "tau": a.tau,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
                              "agv_n_failures": a.agv_n_failures,

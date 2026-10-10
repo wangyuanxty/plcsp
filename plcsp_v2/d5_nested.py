@@ -152,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
                          "⚠️ 实测：与 `--lr` 同时（1e-4），阶段 A 只有 5% 的步活着；"
                          "给 1e-2（×100）则有 77%。**不设这个，两层训练的顶层从来没启动过。**")
     ap.add_argument("--save-dir", default="")
+    ap.add_argument("--layout-seed", type=int, default=None,
+                    help="⭐ 布局种子。None = 用训练 seed（旧行为）")
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
     ap.add_argument("--pm-interval", type=float, default=None, help="⑫ 保养间隔（dev 档 30）")
@@ -193,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         workers=a.workers, save_dir=a.save_dir, lr=a.lr,
                         b_lr=a.b_lr,
-                        env={"instance": a.instance, "tau": a.tau,
+                        env={"instance": a.instance, "layout_seed": a.layout_seed, "tau": a.tau,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
                              "agv_n_failures": a.agv_n_failures,

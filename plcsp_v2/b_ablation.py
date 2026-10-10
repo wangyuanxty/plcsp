@@ -144,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--threads", type=int, default=1, help="父进程 torch 线程数")
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--save-dir", default="")
+    ap.add_argument("--layout-seed", type=int, default=None,
+                    help="⭐ 布局种子。**消融必须固定它**（§130.3）")
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None, help="交期 τ；None = 查标定表")
     ap.add_argument("--pm-interval", type=float, default=None, help="⑫ 保养间隔（dev 档 30）")
@@ -193,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_one(arm, seed, steps=a.steps, n=a.n, dt_events=a.dt_events,
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         workers=a.workers, save_dir=a.save_dir, lr=a.lr,
-                        env={"instance": a.instance, "tau": a.tau,
+                        env={"instance": a.instance, "layout_seed": a.layout_seed, "tau": a.tau,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
                              "agv_n_failures": a.agv_n_failures})
