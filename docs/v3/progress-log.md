@@ -772,7 +772,7 @@ for name, fn, kw in (("A", phase_a, {"G": G}), ("B", phase_b, {"M": M})):
 
 **⟹ `plcsp_v3/tests/test_train.py` 里那句已改。**
 
-### 12.6 `σ` 取值：**建议 1.0**（待裁定）
+### 12.6 ✅ `σ` 取值：**1.0**（2026-10-10 裁定）
 
 | `σ` | `σ_M > 0` | 备注 |
 |---|---|---|
@@ -780,9 +780,17 @@ for name, fn, kw in (("A", phase_a, {"G": G}), ("B", phase_b, {"M": M})):
 | **1.0** | **8 / 14** | —— |
 | **2.0** | 8 / 14 | **无额外收益**；且 `j=5` 的段内完工从 3 掉到 1 |
 
-**⟹ 0.5 太低、2.0 无收益。建议 `σ = 1.0`。**
-**⚠️ 未裁定** —— 它改的是 `experiment-plan.md` §2 的冻结口径。
-（`design.md` §10 与 `experiment-plan.md` §2 两处已标注。）
+**⟹ 0.5 太低、2.0 无收益。**
+
+**✅ 2026-10-10 裁定：`σ = 1.0`。** 已落到三处：
+- `hrl/rules.py` 的 `SIGMA_DEFAULT`（`NetPolicy` 与 `_one_logp` 都从它取）；
+- `experiment-plan.md` §2 的冻结口径；
+- `design.md` §10 的"未定"表。
+
+⚠️ **`σ` 目前仍不是运行参数** —— 改它要动 `SIGMA_DEFAULT`。
+**实验 D（σ 敏感性）开工前需要先把 `σ` 贯通成 `train_step` 的参数**
+（`segment_from` / `_run_all_segments` / `SegmentPool.segments` 的 job 元组都要带上它）。
+**⟹ 已登记为待办。**
 
 ### 12.7 ⚠️ 这只是**起点**读数
 
