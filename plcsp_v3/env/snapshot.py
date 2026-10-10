@@ -1,0 +1,134 @@
+# -*- coding: utf-8 -*-
+"""仿真状态快照（spec §5.3.1）——特征层的**唯一**原料。
+
+设计：`SimWorld.snapshot()` 把当时的活状态**拷成纯数据**（frozen dataclass），
+网络代码只读它、不碰 SimPy 对象。这样：
+- 特征层可脱离仿真单测（手搓 Snapshot 即可）；
+- 决策日志能只存快照（仿真继续跑，快照不跟着变）。
+
+⚠️ **本模块不含任何归一化**——归一化在 `nn/state_emb.py`（Task 2），
+因为归一化需要实例静态量（总工时/M_ref），那是特征层的依赖而非仿真层的。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class MachineState:
+    backlog_min: float      # 输入队列内各工序加工时长之和 [min]
+    in_q_len: int
+    out_q_len: int
+    # 是否持有加工槽。⚠️ 与 `remaining_min > 0` **不互为充要**：两者可同时成立
+    # （持有槽但未在制切削/已触底），**Task 2 / Task 8 都不得把"busy ⟹ remaining>0"
+    # 当作不变式**（返工中间态、换型段、故障修复长停都会打出 `busy=True, remaining=0`）。
+    busy: bool
+    # 在制工序的**标称**剩余 [min]：上机时刻 + 工序时长 − now，随仿真时间递减、触底为 0。
+    # ⚠️ 不含换型/故障修复的墙钟延长（故长停机时可能已触底而工件仍在机台上）；无在制 = 0。
+    remaining_min: float
+    pm_used_min: float      # 距上次保养已累计的主轴工时（⑫）
+    fail_rate: float        # ③
+    in_cap: int | None = None
+    """**输入缓冲容量**（② 有限缓冲）；`None` = **无界**（② 关闭，默认）。
+
+    ⚠️ 为什么放进快照而不是由特征层从 `NormContext` 取：**两个消费者要同一个真相**——
+    1. `nn/state_emb.machine_features` 的 `in_queue` 维要用它做分母（`in_q_len / in_cap`），
+       否则该维报的是"队列长度占作业数"，**看不出满没满**；
+    2. `env/rule_views.build_pa_view` 要用它**把已满的机台从 `alts` 里滤掉**（清单第 1 条）。
+    快照本就是"特征层的唯一原料"，两处各算一遍必然漂。
+
+    ⚠️ **`None` 不是哨兵，是"无容量约束"的真值** —— ② 关闭时缓冲真的无界，
+    `in_q_len < in_cap` 这个判断**不存在**（不是"容量为 0"）。用 0 表示无界会让每台机
+    恒判为满，是静默错误。
+    """
+    # ⚠️ **v2：⑤ 换型的 `prev_job` 已删**（2026-10-08）—— 换型约束去掉后，机台不再需要
+    # 记上一件加工的是谁。特征层相应少一维（`nn/state_emb.machine_features`）。
+
+
+@dataclass(frozen=True)
+class JobState:
+    done_ops: int
+    total_ops: int
+    remaining_min: float    # 剩余工序的**标称**加工时长之和
+    finished: bool
+    # ⑧ 交期 `d_j`（`des.compute_due_dates` → TF/RDD 口径：`LB·τ·(1+R(2ρ_j−1))`）——**逐作业**，
+    # 不再锚在参考调度上（旧口径 `τ·M_ref` 已废）。冻结表的 R 下限 0.20 保证 **10/10 实例**的
+    # d_j 互不相同 ⟹ `job_features` 的 due_margin 维在任意实例上都有作业间区分度。
+    # 0.0 = 该快照无交期（约束关闭，或参考运行内 `_MREF_BUSY` 短路——两种情形都不该有值）。
+    due: float
+    # 该作业当前**落在哪台机**（在制件优先）；-1 = 未开始或已派车离台。
+    # ⚠️ **同一机台号可被多件命中**：在制那件 + 输出缓冲里等搬运的几件都记同一机台号。
+    # ⚠️ **回站后不再指向末道机台**（P4-B Task 2b：末工序后还有**回站任务**——transporter
+    # 派车时把 `job_loc` 置 -1，`LuStation` 到站时再置一次）。旧行为（回站任务之前）才是
+    # "完工后仍停在末道机台"。
+    at_machine: int
+    in_transit: bool        # 见下：表示"当前是否被某车持有"，**退回即清零**
+    # 当前持有该件的车；-1 = 无。⚠️ 语义是**当前是否被某车持有**（不是"是否在运输流程里"）：
+    # 退回队列即清零，故**与重试史相关**——同为"在车里排队"的物理状态，经历过退回的
+    # 取 `in_transit=False`，未经历过的（transporter 已派车、还没发车的）取 `True`。
+    on_agv: int
+    # ⚠️ **v2：④ 返工的 `rework_cnt` 已删**（2026-10-08）—— 返工约束去掉后，作业不再有"重做"。
+    # 特征层相应少一维（`F_B` 9 → 8，见 `nn/features.py`）。
+
+
+@dataclass(frozen=True)
+class VehicleState:
+    status: int             # 0 空闲 / 1 空载行驶 / 2 负载行驶 / 3 故障停机
+    node: int               # 当前所在通道节点
+    queued: int             # 本车待办任务数
+    # ⚠️ **2026-10-10：⑪ 去后 `battery_frac` 已删**（车队无电量，`AgvSpec` 只剩 `id`）。
+    # ⚠️ **v2：⑩ 去后，`capacity`（载量）与 `speed_factor`（速度倍率）已删**
+    # （2026-10-08）—— 车队同构、单车单载，这两个量对每台车都相同，无信息。
+    # ⚠️ **v2：① 拥堵去后 `zone_wait` 已删**（2026-10-08）—— 无区段，不存在等待
+    busy_min: float = 0.0
+    """累计**行驶**工时 [min]（步 3；LA 的 `MINU` 规则的自变量）。
+
+    口径 = `stats["agv_busy_min"][aid]`，即**空载段 + 负载段**的时长之和（不含待命、
+    不含充电）。⚠️ 默认 0.0 是为**手搓夹具**（老测试直接构造 `VehicleState`）保持兼容——
+    缺省不是哨兵，是"这辆车确实一分钟都没跑过"的真值。"""
+
+
+# ⚠️ **2026-10-10：⑪ 去后 `ChargerState`（充电桩占用）整类删除** —— 无充电桩。
+# 原类报 `occupied` / `waiting` / `capacity` 三个量，是 C 头"选哪根桩"的候选特征原料。
+
+
+@dataclass(frozen=True)
+class QueuedTask:
+    """队列里**一件待取任务的身份**（⑩ 拼批头的硬前置，2026-10-05）。
+
+    为什么需要它：`VehicleState.queued` 只有**长度**，而"这趟带哪几件"必须看得到
+    **是哪些**任务（作业号 / 取货点 / 卸货点 / 目标工序号）。没有它，候选批次**无从枚举**
+    （`method-transfer-candidates.md` §6.6 记的硬前置）。
+
+    ⚠️ 口径**沿用** `des._transporter` 封的 `task = (frm, to, item, _path)`、`item = (job, oi,
+    op, is_last)`——本类只留身份四个字段，**不另造**第二个任务表示。
+    ⚠️ `veh` 是**队列形状**的标记：`bound=True`（每车一 Store）时 = 该车号；FIFO（单个共享
+    Store）时 = **-1**（未绑定车）。两种形状都进同一张表，故 ⑩ 的候选枚举两端同源。
+    """
+    veh: int        # 该任务当前挂在哪台车的队列；-1 = 共享 FIFO 队列（未绑定车）
+    job: int        # 作业号
+    frm: int        # 取货端点（机台号 0..m-1；= n_machines 时是装卸站）
+    to: int         # 卸货端点（同上）
+    oi: int         # 目标工序序号（`item[1]` 口径：投放 = 0、流转 = 目标工序号、回站 = 末工序号+1）
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    now: float
+    machines: tuple[MachineState, ...]
+    jobs: tuple[JobState, ...]
+    vehicles: tuple[VehicleState, ...]
+    n_done: int             # 已完成作业数
+    # 全线在途运输任务数 = **各队列里待取** + **车上正在运送**（两种队列形状都算；
+    # 已装车的批次已离开队列，故必须单列"车上"那部分，否则 bound 路径会漏计）。
+    in_flight: int
+    # ⚠️ **v2：① 拥堵去后，`zone_holder` 与 `zone_wait`（逐区段）两个字段已删**
+    # （2026-10-08）—— 无区段机制，R 头（路线决策）也不在 v2 里。
+    # ⚠️ **2026-10-10：⑪ 去后字段序改为 `... in_flight, queued_tasks`** ——
+    # 原 `chargers: tuple[ChargerState, ...] = ()` 在此位置，随机制一并删。
+    # ⑩ 拼批头的原料：**队列内容**（逐件任务身份，队列序），两种队列形状都进这一张表
+    # （`bound` = 每车一 Store，逐车的表；FIFO = 单个共享 Store，`veh = -1`）。
+    # 空元组 = 队列为空（**不是哨兵**：没有待取任务就是没有）。
+    # ⚠️ 与 `VehicleState.queued`（长度）同源但**不同用途**：那个是"本车还有多少待办"，
+    # 这个是"待办的是哪些件"——缺了它，候选批次无法枚举（见 `QueuedTask`）。
+    queued_tasks: tuple[QueuedTask, ...] = ()

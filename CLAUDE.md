@@ -9,7 +9,7 @@
 2. **文件名一律英文**（kebab-case）。中文只出现在文件内容里。
 3. **不自创术语。** 描述已有概念，用文献承认的词，并给完整引用（题名 + 期刊 + 卷期页 + 年）。命名自己的方法，须首次定义。详见 `docs/progress-log.md` §12。
 4. **搁置的线索必须登记。** 写进**当前线**的进展记录：**v2 → `docs/v2/progress-log.md`**（v1 → `docs/progress-log.md`，已封笔）。不能只在对话里提一句。
-5. **进展记录分两条线，`§NN` 按号找文件。** `N ≤ 68` → `docs/progress-log.md`（v1）；`N ≥ 69` → `docs/v2/progress-log.md`（v2）。**不得跨版本引用**（v1 = 六头联合链 + 十条约束；v2 = 目标条件化两层 + 五条约束）。
+5. **进展记录分三条线，`§NN` 按号找文件。** `N ≤ 68` → `docs/progress-log.md`（v1）；`69–148` → `docs/v2/progress-log.md`（v2）；**v3 从 §1 起** → `docs/v3/progress-log.md`。**不得跨版本引用**（v1 = 六头联合链 + 十条约束；v2 = 目标条件化两层 + 五条约束；**v3 = 规则参数化两层 + 五条约束**）。
 
 ## 2. 回复语言：ASD-STE100
 
@@ -32,7 +32,9 @@
 - **GPU 解释器**：`D:/anaconda/envs/py312/python.exe`（torch 2.13.0+cu126，RTX 4060 Laptop，8 GB）。
   CUDA 图 / worker 设备档 / 任何要 GPU 的测量走这个。**它不可用于门禁**——默认档必须保持 CPU-only。
 - 命令前缀 `PYTHONIOENCODING=utf-8`。
-- 门禁 = `plcsp/tests/` **与** `plcsp_v2/tests/` 全绿，且 `ruff check plcsp/ plcsp_v2/` 干净。
+- 门禁 = `plcsp/tests/` · `plcsp_v2/tests/` **与** `plcsp_v3/tests/` 全绿，
+  且 `ruff check plcsp/ plcsp_v2/ plcsp_v3/` 干净。
+  ⚠️ **三条线的测试都留** —— `plcsp_v2/` 虽已封笔，**它的读数仍要能复算**。
   （`plcsp_v2/` 是 2026-10-08 起的新线，见其 `__init__.py` 与设计记录；
   旧线保持可跑，只作对照，不再改。）
 - **跑墙钟读数前先确认机器独占**（`Get-Process python`）。并发下的数字不能采信（§22.5）。
