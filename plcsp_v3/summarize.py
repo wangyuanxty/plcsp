@@ -185,7 +185,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--curves", action="store_true",
                     help="改报**整条曲线** —— 峰值 / 最终值 / 不动点数（§A 的判据）")
     ap.add_argument("--baseline", type=float, default=None,
-                    help="对照值（实验 A = 76.338，见 §14.1）。给了就报百分比")
+                    help="对照值（实验 A = 80.652 —— 跨 seed_chain 0/1/2 的平均，"
+                         "见 §17.2。⚠️ 单场景的 76.338 与跨场景评测**不可比**）")
     a = ap.parse_args(argv)
     for path, rows in _load(a.jsonl).items():
         if a.curves:
