@@ -1446,15 +1446,17 @@ class SimWorld:
     def _energy_report(self, stats: dict, makespan: float) -> dict:
         """三态时长 → M2 能耗（spec §3.4，引证 GFJSPT-MMRS）。
 
-        **占用时长的口径**（关键，防"状态统计漏一段"）：
-        - 机床：只有 `proc_min`（切削）与 `setup_min`（换型，Task 4 接入）是**显式**累计的，
-          其余全部归入 `idle_min`，由**闭合恒等式**给出：`makespan − proc − setup`。
-          这样**三个状态之和恒等于在场时长**，不留残差。故障修复期、缓冲满阻塞期、
-          等待期都自动落在空闲态——物理上也都对（机床通电但主轴不切削）。
-        - AGV：`empty_min` / `loaded_min` 显式累计，`idle_min = makespan × 车数 − 两者之和`。
-          待命、等待取货、缓冲区满让步、区段争用等待一并归入空闲态（车辆静止即待机功率）。
+        **占用时长的口径**（⚠️ **2026-10-10 改，见下方那段详细说明**）：
+        - 机床：`proc_min`（切削）与 `setup_min`（换型）是**显式**累计的；
+          `idle_min` = **该机台自己的最后活动时刻 `L_m` − proc − setup**（**不是 `makespan`**）。
+          ⚠️ **`L_m` 由 `stats["machine_last_min"]` 给**（`MachineSim._process` 在每次工序完工时写）。
+          **三态之和不再等于 `makespan`** —— 它等于**该机台自身的在场时长**。
+          故障修复期、缓冲满阻塞期、等待期都自动落在空闲态（机床通电但主轴不切削）。
+        - AGV：`empty_min` / `loaded_min` 显式累计；
+          `idle_min` = **逐车** `LA_v − 该车的行驶工时`（**不是 `makespan × 车数`**）。
+          `LA_v` 由 `stats["agv_last_min"]` 给（`AgvSim._drive` 每段末写）。
 
-        `horizon_hit` 时 makespan 可能小于某台机的加工结束时刻，故 `idle` 取 `max(0, ·)` 兜底。
+        `horizon_hit` 时某台机可能在停表前还没完工，故 `idle` 取 `max(0, ·)` 兜底。
 
         **分项导出（2026-10-06，只加键）**：`machine_states_kwh` / `agv_states_kwh` 给出三态各自
         的 [kWh]。动机是 `energy / makespan` 近乎恒定（`progress-log.md` §52.9.3 的前沿退化），

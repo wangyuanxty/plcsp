@@ -272,6 +272,31 @@ def test_energy_model_is_linear_in_time_and_additive():
 
 
 @pytest.mark.unit
+def test_energy_golden_after_the_idle_endpoint_fix():
+    """⚠️ **能耗黄金值** —— 2026-10-10 随待机口径修正而变（见 §137 与 `_energy_report` 的说明）。
+
+    口径：**待机算到「该资源自己的最后活动时刻」**（照 COR2025 的 `L_k` / `LA_v`），
+    **不是 `makespan`**。旧口径下 `E_total` 是另一个数。
+
+    **为什么要有这条**：`test_idle_energy_stops_at_each_resource_last_activity` 只守**不变式**
+    （`idle ≤ makespan − proc`），**改错了数值它不会红**。这条钉住**具体数值**。
+
+    ⚠️ 用 `approx`（默认相对容差 1e-6）而不是 `==`：这些是聚合浮点，逐位相等不是契约；
+    **任何真实的改动都会远大于 1e-6**，所以它照样能抓住回归。
+    """
+    inst = _inst("mk01")
+    m = rollout(inst, seed_layout=0, seed_chain=0)
+    b = m["energy_breakdown"]
+    assert m["energy"] == pytest.approx(4.33808)
+    assert b["machine_kwh"] == pytest.approx(3.3640466666666664)
+    assert b["agv_kwh"] == pytest.approx(0.4873)
+    assert b["shop_kwh"] == pytest.approx(0.4867333333333333)       # = 0.4 × makespan / 60
+    # 待机总时长：**这个数是口径的直接体现** —— 旧口径（算到 makespan）会是 **438 min**
+    # （6 台 × 73.01），现口径是 173.14 ⟹ 降到 **39.5%**。
+    assert sum(b["machine_states_min"]["idle"]) == pytest.approx(173.14)
+
+
+@pytest.mark.unit
 def test_idle_energy_stops_at_each_resource_last_activity():
     """⚠️ **待机的终点是「该资源自己的最后活动时刻」，不是 `makespan`**（2026-10-10 改，§137）。
 
