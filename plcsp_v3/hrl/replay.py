@@ -166,7 +166,11 @@ def run_branch(world: SimWorld, prefix_actions: Sequence[int], net: NetPolicy,
     w = SimWorld(world.inst, world.layout, world.m_dm, world.cfg,
                  graph=world.g, constraints=world.constraints)
     pol = BranchPolicy(ScriptedPolicy(prefix_actions), switch_after_ma, net)
-    m = w.run_gated(seed_chain=0, policy_pa=pol.policy_pa, policy_l=pol.policy_l,
+    # ⚠️ **`seed_chain` 从 `net.seed_chain` 取，不写死 0** ——
+    # "回放前缀必然回到同一个 `Z_t`"**只在同一个场景里成立**。
+    # 场景一换，前缀就回不到那个 `Z_t`，分段全错。
+    m = w.run_gated(seed_chain=net.seed_chain, policy_pa=pol.policy_pa,
+                    policy_l=pol.policy_l,
                     policy_ma=pol.policy_ma, dt_events=net.dt_events,
                     stop_after_ma=stop_after_ma,
                     # ⚠️ 同 `base_chain`：按**该世界的**约束档撤回调（2026-10-10）

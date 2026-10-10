@@ -71,23 +71,29 @@ CV_DEFAULT = 0.5
 
 def flat_rollout(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
                  dt_events: int, greedy: bool = False,
-                 pool: "ChainPool | None" = None) -> list[Chain]:
+                 pool: "ChainPool | None" = None, seed_chain: int = 0) -> list[Chain]:
     """采 `n` 条**完整链**（全层一起采、不冻结、不重放）→ `Chain` 列表。
 
     ⚠️ 复用 `train.base_chain` —— 它本来就是"一条完整链、全层 live"。
     **扁平链不是另一套策略，是同一套策略的另一种分组方式。**
 
     `greedy=True` 用于**评测**（确定性、可复现）；训练一律 `False`（要探索）。
+
+    ⚠️ **`seed_chain` = 「场景」那条随机流**（机障 ③ / AGV 故障 ⑨ 的实现），
+    与 `seed`（策略的采样流）**不是一回事**。**`n` 条链共用它** ——
+    组内只该变执行（GRPO 的前提）。**跨场景**要由调用方循环（见 `q1_flat.evaluate`）。
+    默认 `0` = 与改动前逐位相同。
     `pool`（`hrl/pool.py`）：给了就**多进程并行**跑这 `n` 条链（每进程 1 线程）。
     ⚠️ **并行档只支持 `greedy=False` 且 CPU** —— 评测要确定性，且一个 GPU 开多上下文只会互抢。
     """
     if pool is not None:
         if greedy:
             raise ValueError("并行档不支持 `greedy=True`（评测要确定性、且要 GPU 单档）")
-        return pool.rollout(n, seed)
+        return pool.rollout(n, seed, seed_chain)
     out: list[Chain] = []
     for i in range(n):
-        p = base_chain(net, spec, greedy=greedy, seed=seed * 1000 + i, dt_events=dt_events)
+        p = base_chain(net, spec, greedy=greedy, seed=seed * 1000 + i,
+                       dt_events=dt_events, seed_chain=seed_chain)
         f = objective_vector(p.metrics)                      # type: ignore[attr-defined]
         # ⚠️ `spec.bounds=None`（默认）⟹ `scalar_reward` 用原始量纲，**逐位等于今日**。
         out.append(Chain(scalar_reward(f, spec.w, bounds=spec.bounds),
@@ -114,7 +120,8 @@ def grad_norm(net: HierarchicalPolicy) -> dict:
 def flat_step(net: HierarchicalPolicy, spec: Spec,
               optim: torch.optim.Optimizer | None = None, *, arm: str = "B",
               n: int = 8, seed: int = 0, dt_events: int = 20, lr: float = 1e-4,
-              cv: float = CV_DEFAULT, pool: "ChainPool | None" = None) -> dict:
+              cv: float = CV_DEFAULT, pool: "ChainPool | None" = None,
+              chain_seed: int = 0) -> dict:
     """**一步扁平组更新**（臂 A 或 B）。返回读数 + 梯度分布。
 
     两臂共用：采链 → 算优势 → `−Σ Â·logp` → 反传 → 走一步。
@@ -130,7 +137,8 @@ def flat_step(net: HierarchicalPolicy, spec: Spec,
         raise ValueError(f"臂 {arm} 需要 critic 头 —— 构造时须给 `HierarchicalPolicy(with_value=True)`")
     if optim is None:
         optim = torch.optim.Adam(net.parameters(), lr=lr)
-    runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events, pool=pool)
+    runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events, pool=pool,
+                        seed_chain=chain_seed)
     z = group_advantage([ch.R for ch in runs])
 
     optim.zero_grad(set_to_none=True)

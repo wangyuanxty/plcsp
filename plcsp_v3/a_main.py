@@ -62,8 +62,25 @@ from .q1_flat import DEFAULT_OUT, build, constraint_counts, evaluate
 ARMS: tuple[str, ...] = ("flat", "hrl")
 """`flat` = 不分层（一条链一个组）· `hrl` = 两层（按层切两个组、交替更新）。"""
 
+CHAIN_SEED_BASE = 100_000
+"""训练用的场景起点 —— **与评测的 `seed_chain` 隔开**（`evaluate` 用 `seed + i`，个位数量级）。
+
+⚠️ **为什么要隔开**：训练见过的世界不该拿来评测（那会让读数偏乐观）。
+⚠️ **为什么要每步换**：`train_step` 的整步（base + 全部段）**必须同场景**
+（重放前缀要求如此），所以**场景多样性只能在步与步之间**（`docs/v3/progress-log.md` §15.3）。
+"""
+
 FLAT_ARM_INTERNAL = "B"
 """`flat` 臂内部用的优势口径 —— **`B`（组内 z 化）**，理由见模块 docstring。"""
+
+
+def _chain_seed(seed: int, step: int) -> int:
+    """第 `step` 步用的**场景**（机障 ③ / AGV 故障 ⑨ 的实现）。
+
+    ⚠️ 与 `train_step` 的 `seed`（策略的采样流）**不是一回事**。
+    ⚠️ 起点由 `CHAIN_SEED_BASE` 抬到评测之上 ⟹ 训练与评测的世界不重叠。
+    """
+    return CHAIN_SEED_BASE + int(seed) * 1000 + int(step)
 
 
 def stage_b_idle(segments: list[dict]) -> tuple[int, int]:
@@ -123,7 +140,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             if arm == "flat":
                 out = flat_step(net, spec, optim, arm=FLAT_ARM_INTERNAL, n=n,
                                 seed=seed * 10000 + step, dt_events=dt_events,
-                                pool=pool)
+                                pool=pool, chain_seed=_chain_seed(seed, step))
                 gn = out["grad_norm"]
                 row = {"loss": out["loss"] / n,          # ⚠️ `flat_step` 给的是**整组之和**
                        "r_mean": float(np.mean([r["R"] for r in out["runs"]])),
@@ -133,7 +150,7 @@ def run_one(arm: str, seed: int, *, steps: int, n: int, dt_events: int,
             else:
                 out = train_step(net, spec, optim, M=n, G=n,
                                  seed=seed * 10000 + step, dt_events=dt_events,
-                                 pool=pool)
+                                 pool=pool, chain_seed=_chain_seed(seed, step))
                 a, b = out["A"], out["B"]
                 idle, n_top = stage_b_idle(b["segments"])
                 row = {"loss_a": a["loss"], "loss_b": b["loss"],

@@ -105,13 +105,19 @@ class Spec(NamedTuple):
 
 
 def base_chain(net: HierarchicalPolicy, spec: Spec, *, greedy: bool = False,
-               seed: int = 0, dt_events: int = 20) -> NetPolicy:
-    """跑一条**完整**的 base 链（顶层在链内自采目标）——两阶段都从它取 `Z_j` 与前缀。"""
+               seed: int = 0, dt_events: int = 20, seed_chain: int = 0) -> NetPolicy:
+    """跑一条**完整**的 base 链（顶层在链内自采规则）——两阶段都从它取 `Z_j` 与前缀。
+
+    ⚠️ **`seed_chain` ≠ `seed`**：前者是「机障 ③ / AGV 故障 ⑨ 的实现」那条**场景**流，
+    后者只喂 `NetPolicy.gen`（策略的采样流）。
+    **默认 `0` = 与改动前逐位相同**（`docs/v3/progress-log.md` §15.3：写死 0 会让
+    所有链共享同一个世界）。
+    """
     p = NetPolicy(net, spec.inst, spec.layout, spec.ctx, greedy=greedy, seed=seed,
-                  dt_events=dt_events)
+                  dt_events=dt_events, seed_chain=seed_chain)
     p.world = spec.world()                                 # type: ignore[attr-defined]
     p.metrics = p.world.run_gated(                          # type: ignore[attr-defined]
-        seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
+        seed_chain=p.seed_chain, policy_pa=p.policy_pa, policy_l=p.policy_l,
         policy_ma=p.policy_ma, dt_events=dt_events,
         # ⚠️ **按约束档撤回调**（2026-10-10）：约束关掉 ⟹ 那个决策点不存在 ⟹
         # 传 `policy_m` 会被 `run_gated` 当场拒绝。约束消融踩过。见 `gated_by_constraints`。
@@ -352,7 +358,7 @@ class Branch(NamedTuple):
 
 def segment_from(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int, *,
                  rule: tuple[int, int, int], seed: int, greedy: bool,
-                 dt_events: int = 20) -> Branch:
+                 dt_events: int = 20, seed_chain: int = 0) -> Branch:
     """**从 `Z_j` 起、用固定 `rule` 跑一段**（到 `Z_{j+1}`）→ 该分支的读数与决策链。
 
     回放 `Z_j` 之前的决策序列（不调策略），再让 `net` + **冻结规则**接下去。
@@ -362,7 +368,8 @@ def segment_from(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int, *
     dec = base.rec.decisions
     prefix, _ = _prefix_to(dec, j)
     inner = NetPolicy(net, spec.inst, spec.layout, spec.ctx, rules=rules_dict(rule),
-                      greedy=greedy, seed=seed, dt_events=dt_events, freeze_rules=True)
+                      greedy=greedy, seed=seed, dt_events=dt_events, freeze_rules=True,
+                      seed_chain=seed_chain)
     _, counters = run_branch(spec.world(), prefix, inner,
                              switch_after_ma=j, stop_after_ma=j + 2)
     return Branch(counters=counters, decisions=inner.rec.decisions)
@@ -387,12 +394,13 @@ def _run_all_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy,
     """
     if pool is None:
         return [[segment_from(net, spec, base, j, rule=r, seed=sd, greedy=gr,
-                              dt_events=dt_events) for r, sd, gr in jobs]
+                              dt_events=dt_events, seed_chain=base.seed_chain)
+                 for r, sd, gr in jobs]
                 for j, jobs in plan]
     flat: list[tuple] = []
     for j, jobs in plan:
         prefix, _ = _prefix_to(base.rec.decisions, j)
-        flat.extend((prefix, j, r, sd, gr) for r, sd, gr in jobs)
+        flat.extend((prefix, j, r, sd, gr, base.seed_chain) for r, sd, gr in jobs)
     out = pool.segments(flat)
     branches = [Branch(counters=c, decisions=d) for c, d in out]
     res: list[list[Branch]] = []
@@ -473,7 +481,8 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
 
 def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer | None,
                *, M: int = 8, G: int = 8, seed: int = 0, dt_events: int = 20,
-               lr: float = 1e-4, pool=None, loss_threads: int = 8) -> dict:
+               lr: float = 1e-4, pool=None, loss_threads: int = 8,
+               chain_seed: int = 0) -> dict:
     """一次**交替**：**先 A 后 B**（= 设计 §6 的次序；见模块 docstring）。
 
     每阶段各自：跑组 → 算优势 → **只对那一层**带梯度重算 → 反传 → 走一步。
@@ -488,7 +497,10 @@ def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer
     # 换成多线程反而更慢 —— 那条路保持调用方的设置不变。
     prev = torch.get_num_threads()
     torch.set_num_threads(1)
-    base = base_chain(net, spec, greedy=False, seed=seed, dt_events=dt_events)
+    # ⚠️ **`chain_seed` = 这一步的世界**。整步（base + 全部段）**共用同一个场景** ——
+    # 重放前缀要求如此。**场景多样性在步与步之间**（由调用方每步换一个）。
+    base = base_chain(net, spec, greedy=False, seed=seed, dt_events=dt_events,
+                      seed_chain=chain_seed)
     out: dict = {"base_makespan": float(base.metrics["makespan"])}   # type: ignore[attr-defined]
     torch.set_num_threads(max(1, loss_threads) if pool is not None else prev)
     try:

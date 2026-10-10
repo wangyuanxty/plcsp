@@ -250,12 +250,27 @@ def missing_env_warning(ck: dict, env: dict) -> str | None:
 
 
 def evaluate(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
-             dt_events: int) -> dict:
-    """**greedy** 评测 `n` 条链 → 三目标的均值与标准误（越小越好）。"""
+             dt_events: int, spread_chains: bool = True) -> dict:
+    """**greedy** 评测 `n` 条链 → 三目标的均值与标准误（越小越好）。
+
+    ⚠️ **2026-10-10 修：`n` 条链现在跑 `n` 个**场景**（`spread_chains=True`）。**
+    此前 `flat_rollout(n, seed=...)` 把 `seed*1000+i` 只喂给 `NetPolicy.gen`，
+    而 **greedy 档下 `gen` 一次都不用**（`_categorical` 走 argmax、`_sample_param` 走 `u = μ`）
+    ⟹ **`n` 条链逐位相同**：`makespan_se` 恒为 0（假的），且评测**白花 `n` 倍时间**。
+
+    修法：第 `i` 条链的场景用 `seed + i`（**不同的 `seed_chain`** = 不同的机障/故障实现）
+    ⟹ **`se` 现在含场景方差**。
+
+    ⚠️ **`spread_chains=False` 退回旧口径**（全部 `seed_chain=0`）——
+    **v2 的历史读数就是这么跑的**（均值可比、`se` 不可比）。
+    """
     prev = net.training
     net.eval()                                   # 关 dropout/BN（若有）——评测要确定性
     try:
-        runs = flat_rollout(net, spec, n=n, seed=seed, dt_events=dt_events, greedy=True)
+        runs = []
+        for i in range(n):
+            runs += flat_rollout(net, spec, n=1, seed=seed * 1000 + i, dt_events=dt_events,
+                                 greedy=True, seed_chain=(seed + i) if spread_chains else 0)
     finally:
         net.train(prev)
     f = np.array([x.f for x in runs], dtype=np.float64)

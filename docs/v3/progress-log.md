@@ -1001,3 +1001,59 @@ p.world.run_gated(seed_chain=0, policy_pa=..., ...)      # ← 写死
 
 1. **定 15.5 的修法**（建议 1 + 3 —— 3 才是"训练多样"的根）；
 2. 再按 §A 跑全量。
+
+---
+
+## §16 ✅ 修法 1+3：`seed_chain` 贯通 + 评测跨场景（2026-10-11）
+
+### 16.1 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `hrl/rollout.py` | `NetPolicy` 加 `seed_chain`（**存在策略对象上** —— `run_branch` 要取它重放同一个世界） |
+| `hrl/train.py` | `base_chain(…, seed_chain=0)` · `segment_from(…, seed_chain=0)` · `train_step(…, chain_seed=0)` |
+| `hrl/replay.py` | `run_branch` **从 `net.seed_chain` 取**（不再写死 0） |
+| `hrl/pool.py` | `ChainPool.rollout(…, seed_chain=0)` · `SegmentPool` 的 job 加一个字段 |
+| `hrl/flat.py` | `flat_rollout(…, seed_chain=0)` · `flat_step(…, chain_seed=0)` |
+| `q1_flat.py` | `evaluate(…, spread_chains=True)` —— **改成跨场景** |
+| `a_main.py` | 每步换场景（`CHAIN_SEED_BASE + seed*1000 + step`） |
+
+**⚠️ 默认全部保持 `0`** ⟹ **门禁与既有测试一位不变**（加完新测试 150 passed）。
+
+### 16.2 两处口径不同（**别混**）
+
+| 处 | 要什么 | 为什么 |
+|---|---|---|
+| **训练** | **组内同场景**，**每步换场景** | 组内只变执行（GRPO 的前提）；**重放前缀要求整步同场景** ⟹ 多样性只能在**步间** |
+| **评测** | **`n` 条链 = `n` 个场景** | 标准误要含**场景方差**（§130 的同一类要求） |
+
+### 16.3 训练与评测的场景**不重叠**
+
+- 训练：`seed_chain = 100000 + seed*1000 + step`
+- 评测：`seed_chain = seed + i`
+
+**⟹ 不在训练见过的世界上评测。**
+
+### 16.4 ⚠️ 作废声明
+
+| 作废的 | 为什么 |
+|---|---|
+| **§15.1 的预跑读数** | 它跑在"每步同场景"的旧口径下 |
+| **既有读数里的 `se`**（v2 与 v3） | 旧口径下**恒为 0**（假的，§15.2） |
+| **跨口径比较** | 新口径的三目标**均值**也变了（场景不同）⟹ **v2 的均值与新读数不可直接比** |
+
+### 16.5 验收
+
+`pytest plcsp_v3/tests -q` ⟹ **150 passed**（+2）· `ruff check plcsp_v3/` 干净。
+
+**2 条新测试**：
+
+1. `test_train.py::test_seed_chain_changes_the_world_not_just_the_sampling_noise`
+   —— 两个 `seed_chain` 给出**不同**的三目标；同 `seed_chain` 逐位可复现；
+2. `test_q1_flat.py::test_evaluate_spreads_the_n_chains_across_scenarios`
+   —— 新口径 `se > 0`；**旧口径（`spread_chains=False`）`se == 0`**（把历史口径钉住）。
+
+### 16.6 下一步
+
+**按 `experiment-plan.md` §A 跑全量**（3 种子 × 200 步 × 2 臂）。
+**⟹ 新口径下的第一份正式读数。**

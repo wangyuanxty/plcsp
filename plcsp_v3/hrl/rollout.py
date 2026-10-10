@@ -114,12 +114,17 @@ class NetPolicy:
                  *, rules: dict[str, int] | None = None, greedy: bool = False,
                  seed: int = 0, record: bool = True, dt_events: int = 20,
                  freeze_rules: bool = False, sigma: float = SIGMA_DEFAULT,
-                 pm_interval: float = 120.0):
+                 pm_interval: float = 120.0, seed_chain: int = 0):
         self.net, self.inst, self.layout, self.ctx = net, inst, layout, ctx
         self.greedy = bool(greedy)
         # 顶层的定时器步长（§10②）。**存在策略对象上**：`run_gated` 与
         # `hrl.replay.run_branch` 都从它取，避免"两处各写一个 ΔT"。
         self.dt_events = int(dt_events)
+        # ⚠️ **仿真那条随机流的种子**（=「机障 ③ / AGV 故障 ⑨ 的实现」的**场景**）。
+        # **它不是 `seed`**：`seed` 只喂 `self.gen`（策略的采样流）。
+        # 存在策略对象上是为了让 `run_branch` 能**重放同一个世界**（见 `hrl/replay.py`）——
+        # **"回放前缀回到同一个 `Z_t`"只在同一个场景里成立**。
+        self.seed_chain = int(seed_chain)
         # ⚠️ **`freeze_rules`**：顶层**照常被触发**（`ma_decisions` 照增、`stop_after_ma` 照能用，
         # 因为停表靠的就是这个计数），**但不重新采规则** —— 冻结在构造时给的 `rules` 上。
         # 为什么需要它：设计 §6 阶段 B 的"条件在**固定的** `rule*`"要的是"顶层不再决策"，

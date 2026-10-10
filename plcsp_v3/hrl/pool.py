@@ -104,10 +104,11 @@ def _worker(job):
 
     ⚠️ 每任务都 `load_state_dict`：参数每步都在变，缓存网络结构、**不缓存权重**。
     """
-    state, spec, with_value, i, seed, dt_events = job
+    state, spec, with_value, i, seed, dt_events, seed_chain = job
     net = _get_net(spec, with_value)
     net.load_state_dict(state)
-    p = base_chain(net, spec, greedy=False, seed=seed * 1000 + i, dt_events=dt_events)
+    p = base_chain(net, spec, greedy=False, seed=seed * 1000 + i,
+                   dt_events=dt_events, seed_chain=seed_chain)
     f = objective_vector(p.metrics)                     # type: ignore[attr-defined]
     return scalar_reward(f, spec.w), tuple(f), p.rec.decisions
 
@@ -115,7 +116,7 @@ def _worker(job):
 def _seg_worker(chunk):
     """子进程入口：**一批段**（`chunk = (state, spec, with_value, jobs)`）。
 
-    `jobs = [(prefix, j, rule, seed, greedy, dt_events), ...]` —— 与
+    `jobs = [(prefix, j, rule, seed, greedy, dt_events, seed_chain), ...]` —— 与
     `train.segment_from` 同一件事，只是不在这里算 loss（那要梯度，回父进程做）。
 
     ⚠️ **`prefix` 是 `Decision` 序列、`rule` 是三元组**（v3：一次决策 = "(规则, 参数)"两样）。
@@ -127,10 +128,10 @@ def _seg_worker(chunk):
     net = _get_net(spec, with_value)
     net.load_state_dict(state)
     out = []
-    for prefix, j, rule, seed, greedy, dt_events in jobs:
+    for prefix, j, rule, seed, greedy, dt_events, seed_chain in jobs:
         inner = NetPolicy(net, spec.inst, spec.layout, spec.ctx, rules=rules_dict(rule),
                           greedy=greedy, seed=seed, dt_events=dt_events,
-                          freeze_rules=True)
+                          freeze_rules=True, seed_chain=seed_chain)
         _, counters = run_branch(spec.world(), prefix, inner,
                                  switch_after_ma=j, stop_after_ma=j + 2)
         out.append((counters, inner.rec.decisions))
@@ -175,14 +176,18 @@ class ChainPool:
         self._ctx = mp.get_context("spawn")
         self.ex = ProcessPoolExecutor(max_workers=self.n_workers, mp_context=self._ctx)
 
-    def rollout(self, n: int, seed: int) -> list[Chain]:
-        """采 `n` 条链（并行）。**返回值与顺序档同形**（`Chain` 列表，按下标序）。"""
+    def rollout(self, n: int, seed: int, seed_chain: int = 0) -> list[Chain]:
+        """采 `n` 条链（并行）。**返回值与顺序档同形**（`Chain` 列表，按下标序）。
+
+        ⚠️ `seed_chain` = **场景**那条随机流（机障 ③ / AGV 故障 ⑨），`n` 条链**共用**它。
+        """
         net = self.net
         if next(net.parameters()).type() != "torch.FloatTensor":
             raise ValueError("并行档只跑 CPU —— 先把 `net` 留在 CPU，或改用顺序档 + `--device cuda`")
         state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
         with_value = net.value_head is not None
-        jobs = [(state, self.spec, with_value, i, seed, self.dt_events) for i in range(n)]
+        jobs = [(state, self.spec, with_value, i, seed, self.dt_events, seed_chain)
+                for i in range(n)]
         out = list(self.ex.map(_worker, jobs))
         return [Chain(float(R), f, dec) for R, f, dec in out]
 
@@ -220,7 +225,8 @@ class SegmentPool:
         self.ex = ProcessPoolExecutor(max_workers=self.n_workers, mp_context=self._ctx)
 
     def segments(self, jobs: list[tuple]) -> list[tuple]:
-        """`jobs = [(prefix, j, rule, seed, greedy), ...]` → `[(StepCounters, decisions), ...]`。
+        """`jobs = [(prefix, j, rule, seed, greedy, seed_chain), ...]`
+        → `[(StepCounters, decisions), ...]`。
 
         **返回顺序与 `jobs` 一致**（分块是轮转的，回填时按原下标复位）。
         """
@@ -231,7 +237,7 @@ class SegmentPool:
             return []
         state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
         with_value = net.value_head is not None
-        full = [(p, j, g, s, gr, self.dt_events) for (p, j, g, s, gr) in jobs]
+        full = [(p, j, g, s, gr, self.dt_events, sc) for (p, j, g, s, gr, sc) in jobs]
         chunks = _chunk_round_robin(full, self.n_workers)
         payload = [(state, self.spec, with_value, c) for _idx, c in chunks]
         res = list(self.ex.map(_seg_worker, payload))

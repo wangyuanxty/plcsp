@@ -20,7 +20,8 @@ from plcsp_v3.env import layout as layout_mod                        # noqa: E40
 from plcsp_v3.env.corridors import build_corridor_graph, dock_distance_matrix  # noqa: E402
 from plcsp_v3.env.des import SimConfig, reference_makespan            # noqa: E402
 from plcsp_v3.env.instances import load_mk                            # noqa: E402
-from plcsp_v3.env.reward import ReferenceObjectives, reward_weights   # noqa: E402
+from plcsp_v3.env.reward import (ReferenceObjectives, objective_vector,  # noqa: E402
+                                 reward_weights)
 from plcsp_v3.hrl.agents import HierarchicalPolicy                    # noqa: E402
 from plcsp_v3.hrl.pool import SegmentPool                             # noqa: E402
 from plcsp_v3.hrl.train import (Spec, base_chain, group_advantage,    # noqa: E402
@@ -67,6 +68,26 @@ def test_reward_weights_refuse_a_zero_component():
     # 正分量照常可用
     w = reward_weights((75.9, 4.96, 240.0))
     assert abs(sum(w) - 1.0) < 1e-9
+
+
+@pytest.mark.slow
+def test_seed_chain_changes_the_world_not_just_the_sampling_noise():
+    """⚠️ **`seed_chain` 是「场景」那条随机流**（机障 ③ / AGV 故障 ⑨ 的实现）。
+
+    `docs/v3/progress-log.md` §15.3：它此前**写死 0** ⟹ 所有链共享同一个世界 ——
+    `--seeds 0 1 2` 只在**采样噪声**上不同，标准误**不含场景方差**（与 §130 同一类错）。
+
+    判据：同一个策略（`greedy=True` ⟹ 确定性）在两个 `seed_chain` 上跑出**不同**的读数。
+    """
+    spec, net = _spec()
+    a = base_chain(net, spec, greedy=True, seed=0, dt_events=50, seed_chain=0)
+    b = base_chain(net, spec, greedy=True, seed=0, dt_events=50, seed_chain=1)
+    fa, fb = a.metrics, b.metrics                     # type: ignore[attr-defined]
+    assert objective_vector(fa) != objective_vector(fb), \
+        "两个 `seed_chain` 给出逐位相同的三目标 ⟹ 它根本没接上"
+    # 同 `seed_chain` 必须逐位可复现（否则是别处漏了确定性）
+    c = base_chain(net, spec, greedy=True, seed=0, dt_events=50, seed_chain=1)
+    assert c.metrics["makespan"] == fb["makespan"]    # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
