@@ -222,17 +222,15 @@ def test_due_date_machinery():
 # ══════════════════ env/reward.py ══════════════════
 
 @pytest.mark.unit
-def test_reward_vector_weights_and_scalarisation():
+def test_reward_vector_and_scalarisation():
+    """⚠️ **`reward_weights`（`1/f^ref`）已删**（2026-10-11）—— 它让标称权重与实际驱动
+    严重不符（实测 `w = (0.055, 0.928, 0.017)`）。这里只留另两个函数的契约。"""
     f = reward.objective_vector({"makespan": 10.0, "energy": 2.0, "tardy_twt": 3.0})
     assert f == (10.0, 2.0, 3.0)
-    w = reward.reward_weights((10.0, 2.0, 3.0))
+    w = reward.EQUAL_WEIGHTS
     assert abs(sum(w) - 1.0) < 1e-12 and all(x > 0 for x in w)
-    # 逆量纲加权：分量越小权重越大
-    assert w[1] > w[0]
     assert reward.scalar_reward(f, w) == pytest.approx(-sum(a * b for a, b in zip(w, f)))
     assert reward.scalar_reward(f, w, prefs=(1.0, 0.0, 0.0)) == -10.0   # one-hot = 纯 makespan
-    with pytest.raises(ValueError):
-        reward.reward_weights((0.0, 2.0, 3.0))
 
 
 @pytest.mark.unit
@@ -242,7 +240,7 @@ def test_reference_objectives_are_pinned_to_the_instance_and_cfg():
     r = reward.ReferenceObjectives.of(inst, cfg)
     f = r.as_tuple()
     assert len(f) == 3 and f[0] > 0 and f[1] > 0
-    assert f[2] >= 0.0, 'mk01 无拖期 ⟹ TWT 可以是 0（正是 reward_weights 会报错的那种实例）'
+    assert f[2] >= 0.0, 'mk01 无拖期 ⟹ TWT 可以是 0'
     assert r.matches(inst, cfg)
     assert not r.matches(inst, dataclasses.replace(cfg, n_agv=cfg.n_agv + 1))
 

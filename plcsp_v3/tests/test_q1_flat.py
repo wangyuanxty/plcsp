@@ -10,7 +10,7 @@ from plcsp_v3.env import layout as layout_mod                        # noqa: E40
 from plcsp_v3.env.corridors import build_corridor_graph, dock_distance_matrix  # noqa: E402
 from plcsp_v3.env.des import SimConfig, reference_makespan            # noqa: E402
 from plcsp_v3.env.instances import load_mk                            # noqa: E402
-from plcsp_v3.env.reward import ReferenceObjectives, reward_weights   # noqa: E402
+from plcsp_v3.env.reward import EQUAL_WEIGHTS   # noqa: E402
 from plcsp_v3.hrl.agents import HierarchicalPolicy                    # noqa: E402
 from plcsp_v3.hrl.train import Spec                                   # noqa: E402
 from plcsp_v3.nn.features import norm_context                         # noqa: E402
@@ -27,8 +27,11 @@ def _spec():
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
-    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
-    return Spec(inst, lay, g, dm, cfg, ctx, w), HierarchicalPolicy()
+    # ⚠️ `1/f^ref` 已删（2026-10-11）⟹ 用等权 + 一个固定的 `bounds`
+    # （测试只关心「接口通不通」，不关心具体数值）
+    w = EQUAL_WEIGHTS
+    bounds = ((60.0, 4.0, 0.0), (140.0, 8.0, 300.0))
+    return Spec(inst, lay, g, dm, cfg, ctx, w, bounds=bounds), HierarchicalPolicy()
 
 
 @pytest.mark.slow

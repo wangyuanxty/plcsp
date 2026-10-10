@@ -83,15 +83,6 @@ def objective_vector(r: dict) -> tuple[float, float, float]:
     return (float(r["makespan"]), float(r["energy"]), float(r["tardy_twt"]))
 
 
-def reward_weights(f_ref: tuple[float, float, float]) -> tuple[float, float, float]:
-    """wᵢ = (1/fᵢ^ref) / Σ(1/fⱼ^ref)。fᵢ^ref ≤ 0 时显式报错（不得静默出 inf/负权重）。"""
-    if any(f <= 0.0 for f in f_ref):
-        raise ValueError(f"参考目标值必须为正，收到 {f_ref}——TWT=0 的实例须先调 τ")
-    inv = [1.0 / f for f in f_ref]
-    s = sum(inv)
-    return tuple(x / s for x in inv)
-
-
 EQUAL_WEIGHTS = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
 """min–max 口径下的默认权重（三目标等权）。
 

@@ -110,7 +110,10 @@ def _worker(job):
     p = base_chain(net, spec, greedy=False, seed=seed * 1000 + i,
                    dt_events=dt_events, seed_chain=seed_chain)
     f = objective_vector(p.metrics)                     # type: ignore[attr-defined]
-    return scalar_reward(f, spec.w), tuple(f), p.rec.decisions
+    # ⚠️ **`bounds` 必须传**（2026-10-11 修）—— 漏它 ⟹ 并行档**不做 min–max 归一化**，
+    # 而顺序档做 ⟹ 两档的 `R` 差一个量级（实测 `-0.212` vs `-77.478`）。
+    # 那是 `test_parallel_pool_matches_the_sequential_path` 抓到的。
+    return scalar_reward(f, spec.w, bounds=spec.bounds), tuple(f), p.rec.decisions
 
 
 def _seg_worker(chunk):

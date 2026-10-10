@@ -49,7 +49,7 @@ from .env.constraints import ConstraintConfig
 from .env.corridors import build_corridor_graph, dock_distance_matrix
 from .env.des import SimConfig, reference_makespan, scaled_agv_mtbf
 from .env.instances import load_mk
-from .env.reward import ReferenceObjectives, reward_weights
+from .env.reward import EQUAL_WEIGHTS
 from .hrl.agents import HierarchicalPolicy
 from .hrl.flat import flat_rollout, flat_step
 from .hrl.pool import ChainPool
@@ -76,14 +76,10 @@ def _reward_spec(inst, lay, g, dm, cfg, cons, reward_norm: str):
     ⚠️ **为什么要 minmax**：原始量纲下能耗只占 3%，而 `1/f^ref` 走到另一个极端
     （标称 89%、实际驱动 19%）—— 两条都让「三目标」名不副实。
     见 `progress-log.md` §147 与 `docs/v2/current-state.md`。
-    """
-    if reward_norm == "ref":
-        return reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple()), None
+    """
     if reward_norm != "minmax":
         raise ValueError(f"reward_norm 只接受 ref/minmax，收到 {reward_norm!r}")
-    from .env.des import SimWorld
-    from .env.reward import EQUAL_WEIGHTS
-    from .hrl.cdr import objective_bounds
+    from .env.des import SimWorld    from .hrl.cdr import objective_bounds
 
     def _wf():                   # ⚠️ 每条都要**新建**世界（`SimWorld` 持活对象）
         return SimWorld(inst, lay, dm, cfg, graph=g, constraints=cons)
@@ -98,7 +94,7 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
           target_failures: float | None = None, agv_n_failures: int = 0,
           finite_buffer: bool = True, constraints: ConstraintConfig | None = None,
           sim_overrides: dict | None = None, layout_seed: int | None = None,
-          reward_norm: str = "ref"):
+          reward_norm: str = "minmax"):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
@@ -410,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--layout-seed", type=int, default=None,
                     help="⭐ 布局种子。None = 用训练 seed（旧行为）。"
                          "**消融实验应当固定它** —— 否则标准误里混的是布局方差（§130.3）")
-    ap.add_argument("--reward-norm", default="ref", choices=("ref", "minmax"),
+    ap.add_argument("--reward-norm", default="minmax", choices=("minmax",),
                     help="目标归一化口径。ref（默认）= 现行 1/f^ref，逐位不变；"
                          "minmax = 每目标按 36 条规则的可达范围归一 + 等权"
                          "（照 Shi et al., AEI 65:103195 (2025) 式 51/53）。"

@@ -23,7 +23,7 @@ from plcsp_v3.env import layout as layout_mod                        # noqa: E40
 from plcsp_v3.env.corridors import build_corridor_graph, dock_distance_matrix  # noqa: E402
 from plcsp_v3.env.des import SimConfig, reference_makespan            # noqa: E402
 from plcsp_v3.env.instances import load_mk                            # noqa: E402
-from plcsp_v3.env.reward import ReferenceObjectives, reward_weights   # noqa: E402
+from plcsp_v3.env.reward import EQUAL_WEIGHTS   # noqa: E402
 from plcsp_v3.hrl.agents import HierarchicalPolicy                    # noqa: E402
 from plcsp_v3.hrl.flat import (ALL_KINDS, flat_rollout, flat_step)    # noqa: E402
 from plcsp_v3.hrl.pool import ChainPool                              # noqa: E402
@@ -43,8 +43,11 @@ def _spec(tau: float = 1.0):
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
-    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
-    return Spec(inst, lay, g, dm, cfg, ctx, w)
+    # ⚠️ `1/f^ref` 已删（2026-10-11）⟹ 用等权 + 一个固定的 `bounds`
+    # （测试只关心「接口通不通」，不关心具体数值）
+    w = EQUAL_WEIGHTS
+    bounds = ((60.0, 4.0, 0.0), (140.0, 8.0, 300.0))
+    return Spec(inst, lay, g, dm, cfg, ctx, w, bounds=bounds)
 
 
 @pytest.mark.unit
@@ -128,8 +131,16 @@ def test_a2_pulls_the_advantage_scale_back_to_b():
     b = flat_step(copy.deepcopy(net), spec, arm="B", n=2, seed=0, dt_events=DT)
     ra = a["grad_norm"]["heads"] / b["grad_norm"]["heads"]
     ra2 = a2["grad_norm"]["heads"] / b["grad_norm"]["heads"]
-    assert ra > 10.0, f"未归一化的 critic 尺度该比 B 大一个量级，实测只差 {ra:.1f}×"
-    assert ra2 < 5.0, f"A2 归一化后该回到 B 的量级，实测仍差 {ra2:.1f}×"
+    # ⚠️ **2026-10-11：口径换了，旧的数量门槛失效。**
+    # 原断言是 `ra > 10.0`（"未归一化的 critic 尺度该比 `B` 大一个量级"）——
+    # 那是 `docs/v2/progress-log.md` §98.3 在**旧口径**下量的（`1/f^ref`，`R ≈ −15`）。
+    # 现在 `R ∈ [−1, 0]`（min–max 归一化 + 等权）⟹ `A` 的尺度 ≈ 1，与 `B` **同量级**。
+    # ⟹ **只钉住"两个 critic 臂的尺度确实不同、且 A2 把它拉回 B 附近"**，
+    # 不再钉那个由旧 `R` 尺度决定的具体倍数。
+    assert ra != ra2, f"`A` 与 `A2` 的尺度应当不同（实测 {ra:.3f} vs {ra2:.3f}）"
+    assert abs(ra2 - 1.0) < abs(ra - 1.0), (
+        f"A2 的归一化应当把尺度拉**回** `B` 附近：实测 |ra−1|={abs(ra - 1.0):.3f} "
+        f"vs |ra2−1|={abs(ra2 - 1.0):.3f}")
 
 
 @pytest.mark.unit
