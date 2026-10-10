@@ -802,3 +802,70 @@ for name, fn, kw in (("A", phase_a, {"G": G}), ("B", phase_b, {"M": M})):
 
 1. **定 `σ`**（建议 1.0）；
 2. 跑**实验 A**（`experiment-plan.md` §A），**逐顶层点记录是否空转**。
+
+---
+
+## §13 ✅ 实验 A 的跑数器 `a_main.py`（2026-10-10）
+
+### 13.1 ⚠️ 先更正一处：`design.md` §13 的步表**漏了一步**
+
+`experiment-plan.md` §A 要"扁平 vs 两层"两个臂，而 `design.md` §13.1 的步 6 只写了
+"`q1_flat.py` 的 `build()`" —— **那只有扁平臂**。`train_step` 是原语，**没有 CLI 入口**。
+
+**⟹ 补了 `plcsp_v3/a_main.py`（252 行 CRLF）。** 命名对齐 `experiment-plan.md` 的 §A
+（同 `b_ablation.py` / `c_mechanism.py` / `h_sensitivity.py` 的惯例）。
+
+### 13.2 两个臂
+
+| 臂 | 训练 | 池 | 优势 |
+|---|---|---|---|
+| **`flat`** | `flat_step(arm="B")` | `ChainPool` | **组内 z 化**，**无 critic** |
+| **`hrl`** | `train_step`（**A 先 B 后**） | `SegmentPool` | 两个阶段各一次组内 z 化 |
+
+**⚠️ 扁平臂用 `B`，不用 `A`/`A2`**：实验 A 问的是"**分层有没有用**"，
+两臂只该差**这一个**变量。`B` 的优势与两层用的 `train.group_advantage` **同源**；
+用 `A`（critic）会引入**第二个**变量 ⟹ 读出的差异分不清是哪个起的作用。
+**已用 `tests/test_a_main.py` 钉住。**
+
+**评测复用 `q1_flat.evaluate()`** —— 它走 `flat_rollout(greedy=True)` → `base_chain`，
+而 `base_chain` 本来就是"全层 live" ⟹ **对两个臂都成立** ✓
+
+### 13.3 每步记"空转"（把 §12.3 的读数带进日志）
+
+`idle_top` = 阶段 B 里**组内优势全为 0** 的顶层点数（= 那些点**不产生梯度**）。
+**扁平臂记 `null`**（不分层 ⟹ 无此概念，**不是 0**）。
+
+### 13.4 冒烟（2 步 · `n=2` · `dt_events=50` · 无池）
+
+| 臂 | 每步 | 备注 |
+|---|---|---|
+| `flat` | **1.32 s** | —— |
+| `hrl` | **3.2 s** | = flat 的 **2.4×** |
+
+**⚠️ 分层贵约 2×** —— 与设计 §6.0 ① 的预期吻合（每步 `n_top×(G+M)` 条段 vs `n` 条完整链）。
+
+`idle_top` 实测 **7/11** 与 **8/12** —— 与 §12 的 4/14 同量级 ✓
+
+### 13.5 成本重估（真实档：`dt_events=20` · `n=8` · `n_top=14`）
+
+每步 `14 × (8+8) = 224` 条段；由冒烟反推每段 ≈ 0.073 s ⟹ **`hrl` 每步 ≈ 16 s**（串行）。
+
+| | 串行 | **8 进程池** |
+|---|---|---|
+| `hrl` 3 种子 × 200 步 | ~2.7 h | **~40 min** |
+| `flat` 3 种子 × 200 步 | ~13 min | ~5 min |
+
+**⟹ 必须上池**（`--workers 8`）。**顺序档跑不完 200 步**（脚本自己会在启动时警告）。
+
+### 13.6 下一步
+
+1. **复算对照**：36 条固定规则里最好那条。v2 §2.1 记的是 **76.34**
+   （同配置同布局）。**规则本身没变**（`λ=0` 与 v2 逐位相同）⟹ 那个数可直接用，
+   **但要复算确认**。
+2. **等机器独占**（`CLAUDE.md` §3：跑长跑前查 `Get-Process python`），然后：
+
+```
+python -m plcsp_v3.a_main --arms flat hrl --seeds 0 1 2 --steps 200 \
+    --dt-events 20 --n 8 --workers 8 --layout-seed 0 \
+    --pm-interval 30 --target-failures 4 --save-dir <目录> --out <jsonl>
+```
