@@ -591,6 +591,10 @@ class MachineSim:
                     t += seg
             self.stats["process_time"] += op.time
             self.stats["proc_min"][self.pad.id] += op.time   # M2 能耗：按机位计的切削时长
+            # ⚠️ **该机台的「最后活动时刻」**（= 末道工序完工）——照 COR2025 的 `L_k`
+            # （*"Shutdown time of machine k"*）。**能耗的待机终点用它，不再用 makespan**
+            # ——见 `_energy_report` 顶部那处说明（§137）。
+            self.stats["machine_last_min"][self.pad.id] = float(self.env.now)
             # ⑫ 预防性维护：主轴工时到点 → 计划停机（占机台槽，工件在外面等着）
             if self.con.maintenance:
                 self.pm_clock += op.time
@@ -1033,6 +1037,7 @@ class AgvSim:
             self.stats["travel_time"] += spent
             self.stats[f"agv_{leg}_min"] += spent
             self.stats["agv_busy_min"][self.aid] += spent
+            self.stats["agv_last_min"][self.aid] = float(self.env.now)   # `LA_v`（见 `_energy_report`）
             # ⚠️ **被打断 = 本段没跑完** ⟹ 从未走完的那部分要单独记（`moves` 不计这一次）。
             self.stats["agv_interrupted_min"] = (
                 self.stats.get("agv_interrupted_min", 0.0) + (seg - spent))
@@ -1055,6 +1060,7 @@ class AgvSim:
         # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量）。与上面两个车队合计
         # 键**同处写**——分两处记会有"合计说跑了、逐车说没跑"的失同步口子。
         self.stats["agv_busy_min"][self.aid] += seg
+        self.stats["agv_last_min"][self.aid] = float(self.env.now)       # `LA_v`（见 `_energy_report`）
         self.stats["moves"] += 1
         return True, dst
 
@@ -1452,16 +1458,42 @@ class SimWorld:
 
         **分项导出（2026-10-06，只加键）**：`machine_states_kwh` / `agv_states_kwh` 给出三态各自
         的 [kWh]。动机是 `energy / makespan` 近乎恒定（`progress-log.md` §52.9.3 的前沿退化），
-        需要知道**哪一项**随 makespan 走。上面所有旧键的表达式一字未动 ⟹ `total_kwh`（=奖励里的
-        `energy`）**逐位不变**，有 `tests/test_energy.py` 的黄金值测试钉死。
+        需要知道**哪一项**随 makespan 走。
+        ⚠️ **2026-10-10：本函数已改待机口径**（见上方那段），故当时那句
+        「`total_kwh` 逐位不变，有 `tests/test_energy.py` 的黄金值测试钉死」**两点都已不成立**：
+        ① `total_kwh` **变了**；② `test_energy.py` 在 **v1**（`plcsp/tests/`）、
+        **v2 没有对应文件** —— 两个包的 `des.py` 是各自独立的。
         """
         proc, setup = stats["proc_min"], stats["setup_min"]
+        # ⚠️⚠️ **2026-10-10：待机的终点由 `makespan` 改成「**该资源自己的最后活动时刻**」（口径修正）
+        #
+        # **问题**（§133.1 实测）：原口径是「闭合恒等式」`idle = makespan − proc − setup`，
+        # 三态之和恒等于在场时长。代价是**每台机一路"待机"到全车间结束**，
+        # 包括它**末道工序完工之后**的那一大段 —— 而那一大段**只跟 makespan 有关，
+        # 跟任何调度决策都无关**。⟹ 待机占能耗 **79.3%**、`ρ(能耗, makespan) = +0.995`
+        # ⟹ **能耗不是独立目标，是 makespan 的代理**（"三目标"实际只有两个方向）。
+        #
+        # **修法照 COR2025**（`references/COR2025_EnergySaving_FJSP_MultiAGV_DRL.pdf`）：
+        # 其 Eq.(2)(3)(4) 的记号表把待机终点定为
+        # **`L_k` = "Shutdown time of machine k"**、**`LA_v` = "Ending time of AGV v"** ——
+        # **每台资源自己的结束时刻**，而不是车间结束时刻：
+        #     `IE = Σ_k ( L_k − Σ pt_ijk ) · P_k^idle`
+        #
+        # **改后 `idle` 的含义**：该资源**内部的空档总和** —— 那才是**调度真的能改进**的东西，
+        # 而且**不随 makespan 增长**。
+        #
+        # ⚠️ **代价**：`total_kwh` 会变 ⟹ 奖励变 ⟹ 既有读数作废；黄金值测试已同步。
+        # ⚠️ **验证办法**：改完量 `ρ(energy, makespan)` —— 从 0.995 掉下来即成立。
+        # ⚠️ **回退值必须是 `makespan`（旧口径），不能是 `0.0`**：手搓 `stats` 的测试夹具与
+        # `_cold_start` **不带**这两个新键，回退成 0 会把 `idle` **静默清零** ⟹ 能耗少算一大截
+        # 且零报错。回退成 `makespan` 则退回**改动前**的口径（三态之和 = 在场时长）。
+        last_m = stats.get("machine_last_min") or [makespan] * len(proc)
         per_machine = []
         machine_states_kwh = {"proc": 0.0, "idle": 0.0, "setup": 0.0}
         idle_by_machine = []
         for m in range(len(proc)):
             p = machine_params_for(m, len(proc))
-            idle = max(0.0, makespan - proc[m] - setup[m])
+            idle = max(0.0, last_m[m] - proc[m] - setup[m])
             idle_by_machine.append(idle)
             per_machine.append(machine_energy_kwh(proc[m], idle, setup[m],
                                                   idle_kw=p["idle_kw"], proc_kw=p["proc_kw"],
@@ -1472,8 +1504,11 @@ class SimWorld:
             for state, kwh in by_state.items():
                 machine_states_kwh[state] += kwh
         machine_kwh = float(sum(per_machine))
-        agv_idle = max(0.0, makespan * self.cfg.n_agv
-                       - stats["agv_empty_min"] - stats["agv_loaded_min"])
+        # AGV 侧同理：**逐车**算到它自己最后一趟结束（旧口径是 `makespan × 车数 − …`）。
+        agv_last = stats.get("agv_last_min") or [makespan] * self.cfg.n_agv   # 回退同上（旧口径）
+        agv_busy = stats.get("agv_busy_min") or [0.0] * self.cfg.n_agv
+        agv_idle = float(sum(max(0.0, agv_last[a] - agv_busy[a])
+                             for a in range(self.cfg.n_agv)))
         agv_kwh = agv_energy_kwh(agv_idle, stats["agv_empty_min"], stats["agv_loaded_min"])
         return {"machine_kwh": machine_kwh, "agv_kwh": agv_kwh,
                 "shop_kwh": total_energy_kwh(0.0, 0.0, makespan),   # 仅车间固定项
@@ -1634,6 +1669,9 @@ class SimWorld:
                  # M2 能耗的三态时长（P1b Task 2）：机床按机位计，AGV 按车队合计
                  "proc_min": [0.0] * self.inst.n_machines,
                  "setup_min": [0.0] * self.inst.n_machines,
+                 # ⚠️ 待机终点（COR2025 的 `L_k` / `LA_v`，§137）—— 见 `_energy_report`
+                 "machine_last_min": [0.0] * self.inst.n_machines,
+                 "agv_last_min": [0.0] * self.cfg.n_agv,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量；快照逐车报出）
                  "agv_busy_min": [0.0] * self.cfg.n_agv,
@@ -1891,6 +1929,9 @@ class SimWorld:
                  # M2 能耗的三态时长（P1b Task 2）：机床按机位计，AGV 按车队合计
                  "proc_min": [0.0] * self.inst.n_machines,
                  "setup_min": [0.0] * self.inst.n_machines,
+                 # ⚠️ 待机终点（COR2025 的 `L_k` / `LA_v`，§137）—— 见 `_energy_report`
+                 "machine_last_min": [0.0] * self.inst.n_machines,
+                 "agv_last_min": [0.0] * self.cfg.n_agv,
                  "agv_empty_min": 0.0, "agv_loaded_min": 0.0,
                  # 步 3：**逐车**累计行驶工时（LA 的 `MINU` 规则的自变量；快照逐车报出）
                  "agv_busy_min": [0.0] * self.cfg.n_agv,

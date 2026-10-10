@@ -271,6 +271,33 @@ def test_energy_model_is_linear_in_time_and_additive():
         m + a + energy.SHOP_FIXED_KW * 100.0 / 60.0)
 
 
+@pytest.mark.unit
+def test_idle_energy_stops_at_each_resource_last_activity():
+    """⚠️ **待机的终点是「该资源自己的最后活动时刻」，不是 `makespan`**（2026-10-10 改，§137）。
+
+    口径照 **COR2025**（`references/COR2025_EnergySaving_FJSP_MultiAGV_DRL.pdf`）Eq.(2)(3)(4)：
+    `IE = Σ_k (L_k − Σpt)·P_k^idle`，记号表把 `L_k` 定为 *"Shutdown time of machine k"*。
+
+    **为什么必须钉住**：旧口径（`idle = makespan − proc − setup`）把**末道工序完工之后**
+    那一大段也算成待机 —— 而那一大段**只跟 makespan 有关、跟调度决策无关**，
+    于是待机占能耗 ~79%、`ρ(能耗, makespan) = +0.995` ⟹ **能耗不是独立目标**。
+    改成关机时刻后实测 ρ 降到 **+0.806**，且 ms 最优点与 E 最优点**分开**。
+
+    本测试守两条**不变式**（不钉具体数值 ⟹ 换实例/换参数都不脆）：
+    1. 每台机的 `idle ≤ makespan − proc − setup`（**取等 ⟺ 该机台最后完工**）；
+    2. **至少有一台机严格小于**（否则说明口径退回了旧的）。
+    """
+    inst = _inst("mk01")
+    m = rollout(inst, seed_layout=0, seed_chain=0)
+    ms = float(m["makespan"])
+    st = m["energy_breakdown"]["machine_states_min"]
+    slack = [ms - p - s - i for p, s, i in zip(st["proc"], st["setup"], st["idle"])]
+    assert all(x >= -1e-9 for x in slack), f"待机不能超过 makespan 减干活时间：{slack}"
+    assert any(x > 1e-9 for x in slack), (
+        "**所有机台都恰好最后完工** ⟹ 待机口径退回成 `makespan − proc` 了 —— "
+        "本断言就是防那个退回的")
+
+
 # ══════════════════ env/des.py ══════════════════
 
 @pytest.mark.unit
