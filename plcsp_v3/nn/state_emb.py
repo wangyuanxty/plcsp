@@ -135,8 +135,13 @@ def job_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
     """
     out = np.zeros((ctx.n_jobs, F_B), dtype=np.float32)
     for j, js in enumerate(snap.jobs):
+        # 0 completion_rate —— ⚠️ **用「已分配」不是「已完成」**（2026-10-11）。
+        # 两者差在「已派未完工」那一段；那一整段里 `done_ops` 不动
+        # ⟹ 同一批连派 5 次，这个特征**逐位相同** ⟹ 模型分不出「该派谁」。
+        # 口径同 **Shi et al., AEI 65 (2025) 103195** 的 `CRJ_i(t) = OP_i(t)/(J_i+1)`。
+        _n_assigned = (js.assigned_ops if js.assigned_ops >= 0 else js.done_ops)
         out[j] = (
-            js.done_ops / max(js.total_ops, 1),                     # 0 progress
+            _n_assigned / max(js.total_ops, 1),                     # 0 completion_rate
             js.remaining_min / ctx.total_work_min,                  # 1 remaining_work
             # 2 due_margin = (due_j − now)/M_ref（spec §5.3.1，交期 `due` 见 `JobState`）。
             # ⚠️ **不再是共同交期形状**（2026-10-03 ⑧ 重设计后）：交期改为**逐作业**的 TF/RDD

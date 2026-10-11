@@ -151,7 +151,8 @@ def test_transport_caliber_geometry_and_matrix():
 def test_snapshot_dataclasses_are_frozen_and_carry_documented_fields():
     ms = MachineState(backlog_min=1.0, in_q_len=1, out_q_len=0, busy=True,
                       remaining_min=2.0, pm_used_min=0.0, fail_rate=0.01)
-    js = JobState(done_ops=1, total_ops=3, remaining_min=4.0, finished=False, due=10.0,
+    js = JobState(done_ops=1, total_ops=3, assigned_ops=1, remaining_min=4.0,
+                  finished=False, due=10.0,
                   at_machine=0, in_transit=False, on_agv=-1)
     vs = VehicleState(status=2, node=5, queued=1)
     qt = QueuedTask(veh=0, job=1, frm=2, to=3, oi=1)

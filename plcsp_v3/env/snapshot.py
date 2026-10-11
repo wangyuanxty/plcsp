@@ -49,6 +49,16 @@ class MachineState:
 class JobState:
     done_ops: int
     total_ops: int
+    assigned_ops: int
+    """**已分配**工序数 `OP_j(t)` —— 照 Shi et al., *Advanced Engineering Informatics* 65 (2025) 103195 的 `OP_i(t)`。
+
+    ⚠️ **与 `done_ops` 不是一回事**：被 PA 派过、但还没完工的那一段只算在这里。
+    实测 MK01 有 **18/55 = 33%** 的派工时刻存在「已预留、尚未入目标机台缓冲」的件
+    （`rule_views.build_pa_view` 的注释），那段时间里 `done_ops` **完全不变**。
+
+    `-1` = **不知道**（离线档 / 没有 PA 的路径）—— 调用方须回退 `done_ops`，**不得猜 0**。
+    """
+
     remaining_min: float    # 剩余工序的**标称**加工时长之和
     finished: bool
     # ⑧ 交期 `d_j`（`des.compute_due_dates` → TF/RDD 口径：`LB·τ·(1+R(2ρ_j−1))`）——**逐作业**，

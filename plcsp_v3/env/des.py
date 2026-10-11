@@ -1564,10 +1564,17 @@ class SimWorld:
         # 查询，无墙钟开销）；参考运行自身运行时返回 {}（0.0 哨兵）。
         due = self._due_map()
         rem = self._remaining_min()          # 预计算表（见 `_remaining_min`）：每快照省 32 µs
+        pa_plans = getattr(self, "_pa_plans", None)
         for j, job_ops in enumerate(self.inst.jobs):
             done = self._job_progress[j]
+            # ⚠️ **已分配工序数 `OP_j(t)`**（Shi 2025 的 `CRJ_i` 用它）—— `plans` 是 PA 的
+            # **预留表**，`None` = 尚未派。**没有 PA 档时给 -1**（调用方回退 `done_ops`），
+            # **不猜**。`plan` 的 docstring 明写"决策前不得读它"—— 这里只在决策**之后**的
+            # 快照里读，与 `build_pa_view` 同一时点。
+            row = pa_plans.get(j) if pa_plans is not None else None
+            assigned = (sum(1 for p in row if p is not None) if row is not None else -1)
             js.append(JobState(
-                done_ops=done, total_ops=len(job_ops),
+                done_ops=done, total_ops=len(job_ops), assigned_ops=int(assigned),
                 remaining_min=float(rem[j][done]),
                 finished=done >= len(job_ops), due=float(due.get(j, 0.0)),
                 at_machine=int(self._job_loc[j]),
@@ -1712,6 +1719,11 @@ class SimWorld:
         # 供 horizon 用（求和顺序与旧式 `sum(t for ops in plans.values() for _, t in ops)`
         # 逐位相同，见 P2 Task 5 的 A/B 对拍）。
         plans = {}
+        # ⚠️ **挂到 self 上**（2026-10-11）：`snapshot()` 要读它，才能报出
+        # `assigned_ops`（= 已分配工序数，Shi 2025 的 `OP_i(t)`）。
+        # **仅在线 PA 档**——离线档 `plans` 是"预填满"的，那种"已分配"没有意义。
+        if policy_pa is not None:
+            self._pa_plans = plans
         chosen_times: list[float] = []
         for j, job_ops in enumerate(inst.jobs):
             plan = op_choices[j] if (op_choices and j < len(op_choices) and op_choices[j]) else [
@@ -1970,6 +1982,8 @@ class SimWorld:
         # 计划表：job -> [机台号]。离线 = 预填（同 run()）；在线 = 空 **决策日志**，
         # 由 `_pick_machine` 决策后写入（`None` = 尚未决策，决策前读它即 bug）。
         plans: dict[int, list] = {}
+        if policy_pa is not None:          # ⚠️ 同上：只有 PA 档的 `plans` 才有意义
+            self._pa_plans = plans
         for j, job_ops in enumerate(inst.jobs):
             if online_s or policy_pa is not None:
                 # 在线 S 层：`plans` 是**决策日志**（`_pick_machine` 决策后写入）。
