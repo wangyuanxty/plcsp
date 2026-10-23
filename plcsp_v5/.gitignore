@@ -1,0 +1,25 @@
+# Training artifacts
+trained_model/
+wandb/
+results/
+trajectory/
+
+# Data and model weights
+*.pkl
+*.pth
+*.pt
+
+# Run logs
+training_log*.txt
+testing_log*.txt
+*_run.log
+*.log
+
+# Caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Vendored package build metadata
+graph-jsp-env/src/*.egg-info/
