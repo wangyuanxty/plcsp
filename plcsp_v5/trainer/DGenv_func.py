@@ -54,9 +54,19 @@ def find_max_arrivaTime_for_currentNode(G, taskid, edge_init_weight, configs):
 
     inedge_list = list(G.in_edges(taskid))  # 找到所有入边, 返回list中存有n个元组（起始节点，taskID节点）
     max_list = []
+    overrides = getattr(G, "graph", {}).get("transport_override", None)
     for i in range(len(inedge_list)):  # 遍历所有入边！
         prev_nodeid, _ = inedge_list[i]  # 入边的节点id
         transport_t = edge_init_weight[G.nodes[prev_nodeid]['machine'], G.nodes[taskid]['machine']]  # 计算入边节点到当前节点的运输时间t
+
+        # [v5] Use the AGV loaded travel time when this step has an override.
+        # The table value also contains the fixed cross-workshop delay; the
+        # wait override below adds that delay once. Using both would charge
+        # the delay twice.
+        if isinstance(overrides, dict):
+            override = overrides.get((int(prev_nodeid), int(taskid)))
+            if override is not None:
+                transport_t = float(override)
 
         if G.nodes[prev_nodeid]['machine'] < 0:  # 排除src的节点，m_id=-1
             transport_t = 0  # 此时没有运输时间！！！

@@ -50,8 +50,8 @@ import torch.nn as nn
 
 from ..nn.encoder import LayoutEncoder
 from ..nn.features import F_MAX
-from .rules import (LA_RULE_NAMES, N_LA_RULES, N_PA_RULES, N_PM_RULES,
-                    PA_JOB_RULES, PA_MACHINE_RULES, PM_RULE_NAMES)
+from .candidates import LA_CAND_DIM, PA_CAND_DIM, RA_FEAT_DIM
+from .rules import (N_LA_RULES, N_PA_RULES, N_PM_RULES, PA_MACHINE_RULES)
 
 # `g` 的表示（设计 §10④）：**每维 4 档 ⟹ 4³ = 64 个组合**。分档 logp 简单、好调试。
 G_DIM = 3                # [θ_wip, θ_otr, θ_agv]
@@ -76,7 +76,7 @@ def g_to_vec(bins: torch.Tensor, n_bins: int = G_BINS) -> torch.Tensor:
 
 
 class PolicyOut(NamedTuple):
-    """一次前向的全部输出（**v3**）—— 见 `docs/v3/design.md` §3 / §4.6。"""
+    """一次前向的全部输出（**v3 top-K 架构**）—— 见 `docs/v3/topk-rerank-spec.md`。"""
 
     rule_logits: dict[str, torch.Tensor]
     """`{"PA": (B,12), "LA": (B,3), "RA": (B,3)}` —— 三个**独立**分类头的 logits。
@@ -84,25 +84,11 @@ class PolicyOut(NamedTuple):
     ⚠️ **三个独立**，不是一个联合分类 —— 与 v2 的 `MAHead`（3 个 4 档分档）同构。
     """
     rule_sel: dict[str, torch.Tensor]
-    """`(B,)` —— 各头选中的规则**下标**（`hard=True` 时 argmax，否则采样）。
-
-    ⚠️ `PA` 的下标是 `PA_RULE_NAMES` 的（`0..11`）；拆成"作业 / 机台"用
-    `split_pa_rule`（**与 `rules.apply_pa_rule` 的拆法逐字同源**）。
-    """
-    param_mu: dict[str, torch.Tensor]
-    """下层的**连续参数 μ**（**无界**）：`{"PA": (B,3), "LA": (B,1), "RA": (B,1)}`。
-
-    ⚠️ **是 μ，不是参数本身** —— `param = lo + (hi−lo)·sigmoid(u)` 由调用方做，
-    且 **`logp` 算在 `u` 上**（设计 §6.1）：**`u` 才是被采样的动作**。
-
-    ⚠️ **硬路由**：进入 `param_mu[k]` 的只有**各行自己选中的**那个 head 的输出
-    （未选中的行不进 gather ⟹ **梯度只落在被选中的 head 上**）。
-    """
+    """`(B,)` —— 各头选中的规则**下标**（`hard=True` 时 argmax，否则采样）。"""
+    z: torch.Tensor
+    """`(B, N, d_model)` —— 编码器的逐 token 隐向量。打分头按候选行号 gather 它。"""
     value: torch.Tensor | None = None
-    """(B, 1) —— **critic 的 `V(s)`**。仅在 `HierarchicalPolicy(with_value=True)` 时非空。
-
-    ⚠️ **两层路径不建这个头**（默认 `with_value=False` ⟹ 连模块都不创建 ⟹
-    `net.parameters()` 一位不变）。它只服务 **Q1 的臂 A**（`docs/v2/design.md` §12.2）。"""
+    """(B, 1) —— **critic 的 `V(s)`**。仅在 `HierarchicalPolicy(with_value=True)` 时非空。"""
 
 
 def split_pa_rule(idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -113,34 +99,6 @@ def split_pa_rule(idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     n_m = len(PA_MACHINE_RULES)
     return idx // n_m, idx % n_m
-
-
-N_PA_JOB_PARAMS = 2
-"""PA **作业侧****每条规则**的参数个数（设计 §4.2）。"""
-N_PA_MACH_PARAMS = 1
-"""PA **机台侧****每条规则**的参数个数 —— **只有 1 个**（设计 §4.3：机台侧唯一的无量纲量是
-`util`，跟另两个（分钟）不能直接相加；为省一个参数引外部尺度不值）。"""
-N_LA_PARAMS = 1
-"""LA **每条规则**的参数个数（设计 §4.4）。"""
-N_RA_PARAMS = 1
-"""RA **每条规则**的参数个数（设计 §4.5 —— 都是役龄阈值）。"""
-PA_PARAM_TOTAL = N_PA_JOB_PARAMS + N_PA_MACH_PARAMS
-"""PA 的**动作向量**宽度 = 被选中的作业 head 的 + 被选中的机台 head 的 = **3**。
-
-⚠️ **不是 4×2 + 3×1 = 11** —— 每条规则只出**自己**那几个参数（硬路由）。
-"""
-
-
-def _route(heads: RuleParamHeads, ctx: torch.Tensor, sel: torch.Tensor,
-           ctx_feat: torch.Tensor | None = None) -> torch.Tensor:
-    """**按行硬路由**：从 `(B, K, P)` 里取每行自己选中的那个 head → `(B, P)`。
-
-    ⚠️ 前向**算全部 head**（批内每行的选择可能不同），**但未选中的不进 gather**
-    ⟹ **它们的梯度仍是 0** —— 这就是硬路由在批下的实现（设计 §3）。
-    """
-    all_out = heads.forward_all(ctx, ctx_feat)
-    idx = sel.view(-1, 1, 1).expand(-1, 1, all_out.shape[-1])
-    return all_out.gather(1, idx).squeeze(1)
 
 
 # ══════════ v3：上层三个分类头 + 下层每规则一个参数头 ══════════
@@ -165,82 +123,164 @@ class RuleSelectHeads(nn.Module):
     `12`（`PA_RULE_NAMES` 的下标）。拆开会改动作空间的语义。
     """
 
-    def __init__(self, d_model: int, n_rules: dict[str, int], hidden: int | None = None):
+    def __init__(self, d_model: int, n_rules: dict[str, int], hidden: int | None = None,
+                 in_dim: int | None = None):
         super().__init__()
         if not n_rules:
             raise ValueError("n_rules 为空 —— 上层的动作空间不能是空的")
         h = hidden or max(32, d_model // 2)
         self.keys = tuple(n_rules)
-        self.trunk = nn.Sequential(nn.Linear(d_model, h), nn.GELU())
+        # ⚠️ **2026-10-19**：MA 的输入不再是全 token 均值（`encoder.py` 的 `pooled`），
+        # 而是 **M/B/V/G 四段均值拼接**（`4*d_model`）。均值池化会让不同状态给出
+        # 几乎相同的向量（`encoder.py:78`、progress-log §35）⟹ MA 的输出与状态无关。
+        self.in_dim = int(in_dim or d_model)
+        self.trunk = nn.Sequential(nn.Linear(self.in_dim, h), nn.GELU())
         self.heads = nn.ModuleDict({k: nn.Linear(h, int(n)) for k, n in n_rules.items()})
 
-    def forward(self, pooled: torch.Tensor) -> dict[str, torch.Tensor]:
-        """`(B, d)` → `{键: (B, n_rules[键])}` 的 logits。"""
+    def forward(self, pooled: torch.Tensor,
+                rules: dict[str, torch.Tensor] | None = None,
+                hard: bool = True) -> dict[str, torch.Tensor]:
+        """`(B, d)` → `{键: (B, n_rules[键])}` 的 logits。
+
+        `rules` / `hard` 只为与顺序条件版共用接口；独立头忽略它们。
+        """
         feat = self.trunk(pooled)
         return {k: self.heads[k](feat) for k in self.keys}
 
 
-class RuleParamHeads(nn.Module):
-    """**下层**：**每条规则一个 head** → 它自己的那几个**连续**参数（μ）。
+class SequentialRuleSelectHeads(nn.Module):
+    """**顺序条件 MA**（PA → LA；RA 先保留但不条件）。
 
-    ⚠️ **硬路由**（设计 §3）：`forward` 收**规则名**，**只算那一个 head** ——
-    没被选的 head **根本不进计算** ⟹ 上层不可替代（下层无法"学会忽略" one-hot）。
+    与 `RuleSelectHeads` 的区别：
+    - LA 头的输入 = `trunk(sel_in)` **拼接 PA 规则 embedding**；
+    - RA 头保持独立（先不加 RA）。
 
-    ⚠️ **每条规则的参数个数可以不同**（设计 §4.2 / §4.4 / §4.5）——
-    故 `n_params` 是一个 `{规则名: 个数}` 的字典，不是一个整数。
-
-    ⚠️ **输出的是 μ（无界的动作 `u`），不是参数本身**。
-    `param = lo + (hi − lo)·sigmoid(u)` 由调用方做；`logp` **在 `u` 上算**（设计 §6.1）。
-
-    ⚠️ `ctx_dim`（如 LA 的"这一趟运什么"）**拼在池化向量后面**，不进 token —— 口径同
-    `_MaskedScoreHead`。
+    这样策略能表达：
+    `PA=EAJ+EAM` 时 LA 选 `LATEST`；`PA=EAJ+SMPT` 时 LA 选 `MINCOST`。
     """
 
-    def __init__(self, d_model: int, n_params: dict[str, int], hidden: int | None = None,
-                 ctx_dim: int = 0):
+    def __init__(self, d_model: int, n_rules: dict[str, int], hidden: int | None = None,
+                 in_dim: int | None = None, rule_emb_dim: int = 8):
         super().__init__()
-        if not n_params:
-            raise ValueError("n_params 为空 —— 下层不能没有规则")
+        # ⚠️ 默认值写 8（= 下方 `RULE_EMB_DIM`）；顺序头定义在常量之前，不能直接引用。
+        if not n_rules:
+            raise ValueError("n_rules 为空 —— 上层的动作空间不能是空的")
         h = hidden or max(32, d_model // 2)
-        self.keys = tuple(n_params)
+        self.in_dim = int(in_dim or d_model)
+        self.trunk = nn.Sequential(nn.Linear(self.in_dim, h), nn.GELU())
+        self.rule_emb_pa = nn.Embedding(int(n_rules["PA"]), int(rule_emb_dim))
+        self.rule_emb_la = nn.Embedding(int(n_rules["LA"]), int(rule_emb_dim))
+        self.heads = nn.ModuleDict({
+            "PA": nn.Linear(h, int(n_rules["PA"])),
+            "LA": nn.Linear(h + int(rule_emb_dim), int(n_rules["LA"])),
+            "RA": nn.Linear(h, int(n_rules["RA"])),
+        })
+        self.keys = tuple(n_rules)
+
+    def forward(self, pooled: torch.Tensor,
+                rules: dict[str, torch.Tensor] | None = None,
+                hard: bool = True) -> dict[str, torch.Tensor]:
+        """`(B,d)` + 可选的**逐行**规则 → `{PA, LA, RA}` logits。
+
+        `rules` 给定时，LA 的 logits **按每行自己的 PA** 条件；
+        不给定时用 PA 的 argmax 作为条件（只用于诊断/初始化）。
+        """
+        feat = self.trunk(pooled)
+        pa_logits = self.heads["PA"](feat)
+        if rules is not None and "PA" in rules:
+            pa = rules["PA"].to(feat.device).long()
+        else:
+            pa = pa_logits.argmax(dim=-1)
+        la_logits = self.heads["LA"](
+            torch.cat([feat, self.rule_emb_pa(pa)], dim=-1))
+        return {"PA": pa_logits, "LA": la_logits,
+                "RA": self.heads["RA"](feat)}
+
+
+RULE_EMB_DIM = 8
+"""规则身份 embedding 的宽度（PA 12 路 / LA 3 路 / RA 3 路共用这个宽度）。"""
+
+MIN_Z_NORM_K = 3
+"""候选集至少这么大才做**组内 z 化**。
+
+`K_eff == 2` 时 z 化会把 logit 差钉成 ±1，抹掉"有多确定" ⟹ 保留原始尺度。
+`K_eff == 1` 时 `std` 无定义 ⟹ 跳过。
+"""
+
+
+def _norm_logits(s: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """组内 z 化 + 掩码 → logits。**采样与重算共用这一处**。
+
+    `s (…, K)`、`mask (…, K)` bool。z 化只在 `mask` 内做；被掩掉的位置置 `-inf`。
+    ⚠️ z 化是**单调仿射**变换 ⟹ **不改变排序**，只改训练时的采样分布。
+    """
+    mask = mask.bool()
+    valid = mask.to(s.dtype)
+    n = valid.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    mean = (s * valid).sum(dim=-1, keepdim=True) / n
+    var = (((s - mean) ** 2) * valid).sum(dim=-1, keepdim=True) / n
+    # ⚠️ **`sqrt(var + eps)` 而不是 `sqrt(var) + eps`**：候选分数全相等时 `var = 0`，
+    # `sqrt` 在 0 点的导数是无穷 ⟹ `0 * inf = nan`，整条反传被污染（LA 在 t=0 常见：
+    # 所有车同构、特征相同、打分逐位相等）。加在**根号内**让导数有限。
+    normed = (s - mean) / (torch.sqrt(var + 1e-6) + 1e-6)
+    out = torch.where(n >= float(MIN_Z_NORM_K), normed, s)
+    return out.masked_fill(~mask, float("-inf"))
+
+
+class PairScoreHead(nn.Module):
+    """PA 的打分头：两个实体向量 + 候选特征 + 规则 embedding → **每候选 1 个 logit**。"""
+
+    def __init__(self, d_model: int, cand_dim: int, n_rules: int,
+                 hidden: int = 128, rule_emb_dim: int = RULE_EMB_DIM):
+        super().__init__()
+        self.rule_emb = nn.Embedding(int(n_rules), int(rule_emb_dim))
+        self.trunk = nn.Sequential(
+            nn.Linear(2 * d_model + int(cand_dim) + int(rule_emb_dim), int(hidden)),
+            nn.GELU(),
+            nn.Linear(int(hidden), 1),
+        )
+
+    def forward(self, z_a: torch.Tensor, z_b: torch.Tensor,
+                feats: torch.Tensor, rule: torch.Tensor) -> torch.Tensor:
+        """`(B,K,d)`, `(B,K,d)`, `(B,K,C)`, `(B,)` → `(B,K)`。"""
+        b, k, _ = z_a.shape
+        e = self.rule_emb(rule).unsqueeze(1).expand(b, k, -1)
+        x = torch.cat([z_a, z_b, feats, e], dim=-1)
+        return self.trunk(x).squeeze(-1)
+
+
+class SingleScoreHead(nn.Module):
+    """LA / RA 的打分头：一个实体向量（+ 可选逐决策上下文）+ 候选特征 + 规则 embedding。"""
+
+    def __init__(self, d_model: int, cand_dim: int, n_rules: int,
+                 hidden: int = 64, n_out: int = 1, ctx_dim: int = 0,
+                 rule_emb_dim: int = RULE_EMB_DIM):
+        super().__init__()
         self.ctx_dim = int(ctx_dim)
-        self.trunk = nn.Sequential(nn.Linear(d_model + self.ctx_dim, h), nn.GELU())
-        self.heads = nn.ModuleDict({k: nn.Linear(h, int(n))
-                                    for k, n in n_params.items()})
+        self.n_out = int(n_out)
+        self.rule_emb = nn.Embedding(int(n_rules), int(rule_emb_dim))
+        self.trunk = nn.Sequential(
+            nn.Linear(d_model + self.ctx_dim + int(cand_dim) + int(rule_emb_dim),
+                      int(hidden)),
+            nn.GELU(),
+            nn.Linear(int(hidden), self.n_out),
+        )
 
-    def forward(self, pooled: torch.Tensor, rule: str,
-                ctx_feat: torch.Tensor | None = None) -> torch.Tensor:
-        """`(B, d)` + 规则名 → `(B, n_params[rule])` 的 **μ**。
-
-        ⚠️ **`rule` 必须在 `n_params` 里** —— 否则显式报错（不静默退回"随便挑一个"）。
-        ⚠️ **`ctx_dim > 0` 时必须给 `ctx_feat`** —— 静默补 0 会让"这个头没接上"
-        变成无声的坏策略（口径同 `_MaskedScoreHead`）。
-        """
-        if rule not in self.heads:
-            raise ValueError(f"未知的规则 {rule!r}；可选={self.keys}")
-        return self.heads[rule](self.trunk(self._with_ctx(pooled, ctx_feat)))
-
-    def _with_ctx(self, pooled: torch.Tensor,
-                  ctx_feat: torch.Tensor | None) -> torch.Tensor:
-        """拼逐决策上下文（`ctx_dim > 0` 时**必须**给，否则显式报错）。"""
-        if not self.ctx_dim:
-            return pooled
-        if ctx_feat is None:
-            raise ValueError(
-                f"本头声明了 ctx_dim={self.ctx_dim} 的逐决策上下文，但没给——"
-                "静默补 0 会让『这个头没接上』变成无声的坏策略")
-        return torch.cat([pooled, ctx_feat], dim=-1)
-
-    def forward_all(self, pooled: torch.Tensor,
-                    ctx_feat: torch.Tensor | None = None) -> torch.Tensor:
-        """**全部 head 一次算完** → `(B, K, n_params)`（`K = len(self.keys)`）。
-
-        ⚠️ **为什么要它**：硬路由在**批**下要**按行分派**（每行选中的规则可能不同）
-        ⟹ 前向**必须算全部 head**，再按行 gather。
-        **这不削弱硬路由** —— 未选中的 head **不进 gather**，**它们的梯度仍是 0**。
-        """
-        feature = self.trunk(self._with_ctx(pooled, ctx_feat))
-        return torch.stack([self.heads[k](feature) for k in self.keys], dim=1)
+    def forward(self, z_a: torch.Tensor, feats: torch.Tensor,
+                rule: torch.Tensor, ctx: torch.Tensor | None = None) -> torch.Tensor:
+        """`(B,K,d)`, `(B,K,C)`, `(B,)` → `(B,K)`（`n_out=1`）或 `(B,n_out)`（RA）。"""
+        b, k, _ = z_a.shape
+        parts = [z_a]
+        if self.ctx_dim:
+            if ctx is None:
+                raise ValueError(
+                    f"本头声明了 ctx_dim={self.ctx_dim} 的逐决策上下文，但没给——"
+                    "静默补 0 会让『这个头没接上』变成无声的坏策略")
+            parts.append(ctx.unsqueeze(1).expand(b, k, -1))
+        parts.append(feats)
+        parts.append(self.rule_emb(rule).unsqueeze(1).expand(b, k, -1))
+        out = self.trunk(torch.cat(parts, dim=-1))
+        return out.squeeze(-1) if self.n_out == 1 else out.squeeze(1)
 
 
 class HierarchicalPolicy(nn.Module):
@@ -252,25 +292,34 @@ class HierarchicalPolicy(nn.Module):
 
     def __init__(self, d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 4, feat_dim: int = F_MAX,
-                 la_ctx_dim: int = LA_CTX_DIM, with_value: bool = False):
+                 la_ctx_dim: int = LA_CTX_DIM, with_value: bool = False,
+                 seq_ma: bool = False):
         super().__init__()
+        self.seq_ma = bool(seq_ma)
         self.enc = LayoutEncoder(d_model=d_model, n_heads=n_heads, n_layers=n_layers,
                                  feat_dim=feat_dim)
         # ── 上层（MA）：**三个独立**分类头（设计 §2 / §4.6）──
-        self.select = RuleSelectHeads(d_model, {"PA": N_PA_RULES, "LA": N_LA_RULES,
-                                                "RA": N_PM_RULES})
-        # ── 下层：**每条规则一个 head**，**硬路由**（设计 §3 / §4.6）──
-        self.pa_job = RuleParamHeads(d_model, {r: N_PA_JOB_PARAMS for r in PA_JOB_RULES})
-        self.pa_mach = RuleParamHeads(d_model,
-                                      {r: N_PA_MACH_PARAMS for r in PA_MACHINE_RULES})
-        self.la = RuleParamHeads(d_model, {r: N_LA_PARAMS for r in LA_RULE_NAMES},
-                                 ctx_dim=la_ctx_dim)
-        self.ra = RuleParamHeads(d_model, {r: N_RA_PARAMS for r in PM_RULE_NAMES})
+        # ⚠️ **2026-10-19：输入是 M/B/V/G 四段均值拼接**（`4*d_model`），不是全 token 均值。
+        n_rules = {"PA": N_PA_RULES, "LA": N_LA_RULES, "RA": N_PM_RULES}
+        if self.seq_ma:
+            # 顺序条件：PA → LA；RA 先保留但不条件。
+            self.select = SequentialRuleSelectHeads(
+                d_model, n_rules, in_dim=4 * d_model)
+        else:
+            self.select = RuleSelectHeads(
+                d_model, n_rules, in_dim=4 * d_model)
+        # ── 下层：**每个 agent 一个打分头**，在规则筛出的候选集内排序 ──
+        #    ⚠️ 不是"每条规则一个头"：规则身份走 embedding，候选集本身由规则决定。
+        self.scorer_pa = PairScoreHead(d_model, PA_CAND_DIM, N_PA_RULES, hidden=128)
+        self.scorer_la = SingleScoreHead(d_model, LA_CAND_DIM, N_LA_RULES,
+                                         hidden=64, ctx_dim=la_ctx_dim)
+        self.scorer_ra = SingleScoreHead(d_model, RA_FEAT_DIM, N_PM_RULES,
+                                         hidden=64, n_out=2)
         self.la_ctx_dim = int(la_ctx_dim)
         # **critic 的 `V(s)`**（只服务 Q1 的臂 A）。
         # ⚠️ **v3 起不再拼 `g`**（`g` 删了）⟹ 输入就是池化向量。
         # ⚠️ **默认不建**：`with_value=False` 时本属性是 `None` ⟹ 不产生参数。
-        self.value_head = (nn.Sequential(nn.Linear(d_model, d_model), nn.GELU(),
+        self.value_head = (nn.Sequential(nn.Linear(4 * d_model, d_model), nn.GELU(),
                                          nn.Linear(d_model, 1))
                            if with_value else None)
 
@@ -285,10 +334,12 @@ class HierarchicalPolicy(nn.Module):
         n_m, n_jobs, n_agv = (int(seg[0]), int(seg[1]), int(seg[2]))
         v_lo = n_m + n_jobs
         c_lo = v_lo + n_agv
+        n_total = c_lo + 1
         return {
             "M": (0, n_m),
             "B": (n_m, v_lo),
             "V": (v_lo, c_lo),
+            "G": (n_total - 1, n_total),
             "PA": (0, v_lo),                                      # M ∪ B
             "LA": (v_lo, c_lo),                                   # V（+ 任务上下文，见 `ctx_dim`）
             "RA_maint": (0, n_m),                                 # M
@@ -311,10 +362,9 @@ class HierarchicalPolicy(nn.Module):
 
     def forward(self, tok: torch.Tensor, seg: tuple[int, ...], *,
                 rules: dict[str, torch.Tensor] | None = None,
-                la_ctx: torch.Tensor | None = None,
                 bias: torch.Tensor | None = None,
                 hard: bool = True) -> PolicyOut:
-        """`tok (B,N,F)` + `seg` → `PolicyOut`（**v3**）。
+        """`tok (B,N,F)` + `seg` → `PolicyOut`（**v3 top-K 架构**）。
 
         `rules` 给定 ⟹ **规则冻结**（阶段 B / 执行）；`None` ⟹ 顶层现采一组
         （阶段 A / 训练时）。`hard=True`（默认）取 argmax，否则按 logits 采样。
@@ -323,18 +373,18 @@ class HierarchicalPolicy(nn.Module):
         （`torch.distributions.Categorical(logits).sample()`）—— **不受调用方的
         `torch.Generator` 控制**。**要可复现就自己传 `rules=`，或按 logits 自己采**
         （`NetPolicy._categorical` 就是这么做的）。
-        这条是实测踩过的坑：`NetPolicy._forward` 曾按 `greedy` 传 `hard`，
-        ⟹ 每次前向都推进全局随机流 ⟹ 同 seed 的两条链不一样。
-        **这两项只影响 `rule_sel`；`param_mu` 永远是 μ** —— 下层的采样由调用方做
-        （设计 §6.1：**`u` 才是被采样的动作**）。
 
-        ⚠️ **`la_ctx=None` ⟹ `param_mu["LA"]` 也是 `None`**（LA 头不算）—— 口径同 v2：
-        LA 的规则自变量含这一趟的任务，**没有任务就无从打分**。补 0 等于报出一个
-        "每趟任务都一样"的分布（`RuleParamHeads` 会为此显式报错）。
-        好处附带：一个决策点只用得着一个头。
+        ⚠️ 下层不再由本方法算 —— 候选集来自 `hrl.candidates`，打分走
+        `score_pa` / `score_la` / `score_ra`。本方法只出顶层 logits 与编码器 `z`。
         """
-        z, pooled = self.enc(tok, seg, bias)          # (B,N,d), (B,d)
-        logits = self.select(pooled)                  # {PA, LA, RA}
+        z, _ = self.enc(tok, seg, bias)               # (B,N,d)；均值 `pooled` 不再给 MA
+        mk = self.masks(seg)
+        # ⚠️ **2026-10-19：MA 的输入 = 四段均值拼接**（固定宽度、保留 M/B/V/G 的状态差异）。
+        sel_in = torch.cat([self._pool(z, mk["M"], "M"),
+                            self._pool(z, mk["B"], "B"),
+                            self._pool(z, mk["V"], "V"),
+                            self._pool(z, mk["G"], "G")], dim=-1)
+        logits = self.select(sel_in, rules=rules, hard=hard)                  # {PA, LA, RA}
         sel: dict[str, torch.Tensor] = {}
         for k, lg in logits.items():
             given = None if rules is None else rules.get(k)
@@ -344,20 +394,74 @@ class HierarchicalPolicy(nn.Module):
                 sel[k] = lg.argmax(dim=-1)
             else:
                 sel[k] = torch.distributions.Categorical(logits=lg).sample()
-        mk = self.masks(seg)
-        c_pa = self._pool(z, mk["PA"], "PA")
-        c_la = self._pool(z, mk["LA"], "LA")
-        c_ra = self._pool(z, mk["RA_maint"], "RA_maint")
-        ji, mi = split_pa_rule(sel["PA"])
-        mu_pa = torch.cat([_route(self.pa_job, c_pa, ji),
-                           _route(self.pa_mach, c_pa, mi)], dim=-1)
         return PolicyOut(
-            rule_logits=logits, rule_sel=sel,
-            param_mu={
-                "PA": mu_pa,
-                "LA": (None if la_ctx is None
-                       else _route(self.la, c_la, sel["LA"], la_ctx)),
-                "RA": _route(self.ra, c_ra, sel["RA"]),
-            },
-            value=(None if self.value_head is None else self.value_head(pooled)),
+            rule_logits=logits, rule_sel=sel, z=z,
+            value=(None if self.value_head is None else self.value_head(sel_in)),
         )
+
+    # ── 下层打分：候选行号 → `z` 行 gather → 打分头 → 组内 z 化 ──
+    @staticmethod
+    def _gather(z: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+        """`z (B,N,d)` + `rows (B,K)` → `(B,K,d)`。"""
+        rows = rows.to(z.device).long()
+        idx = rows.unsqueeze(-1).expand(-1, -1, z.shape[-1])
+        return z.gather(1, idx)
+
+    def score_pa(self, z: torch.Tensor, rows_a: torch.Tensor,
+                 rows_b: torch.Tensor, feats: torch.Tensor,
+                 rule: torch.Tensor,
+                 mask: torch.Tensor | None = None) -> torch.Tensor:
+        """PA 候选打分：`(B,N,d)` + 行号 + 特征 → **`(B,K)` logits**（组内 z 化）。
+
+        `rows_a` = 作业 token 行（`n_m + job`）；`rows_b` = 机台 token 行。
+        """
+        za = self._gather(z, rows_a)
+        zb = self._gather(z, rows_b)
+        feats = feats.to(device=z.device, dtype=z.dtype)
+        rule = rule.to(device=z.device).long()
+        s = self.scorer_pa(za, zb, feats, rule)
+        if mask is None:
+            mask = torch.ones_like(s, dtype=torch.bool)
+        else:
+            mask = mask.to(device=z.device).bool()
+        if not bool(mask.any(dim=-1).all()):
+            raise ValueError("PA 候选集为空 —— 打分头不能对空集出分布")
+        return _norm_logits(s, mask)
+
+    def score_la(self, z: torch.Tensor, rows_a: torch.Tensor,
+                 feats: torch.Tensor, rule: torch.Tensor,
+                 la_ctx: torch.Tensor | None,
+                 mask: torch.Tensor | None = None) -> torch.Tensor:
+        """LA 候选打分：`(B,N,d)` + 车行号 + 特征 + 任务上下文 → **`(B,K)` logits**。"""
+        if la_ctx is None:
+            raise ValueError(
+                "LA 打分缺 `la_ctx`（这一趟运什么）——没有任务就无从打分；"
+                "静默补 0 会报出『每趟任务都一样』的分布")
+        za = self._gather(z, rows_a)
+        feats = feats.to(device=z.device, dtype=z.dtype)
+        rule = rule.to(device=z.device).long()
+        s = self.scorer_la(za, feats, rule, la_ctx.to(device=z.device, dtype=z.dtype))
+        if mask is None:
+            mask = torch.ones_like(s, dtype=torch.bool)
+        else:
+            mask = mask.to(device=z.device).bool()
+        if not bool(mask.any(dim=-1).all()):
+            raise ValueError("LA 候选集为空 —— 打分头不能对空集出分布")
+        return _norm_logits(s, mask)
+
+    def score_ra(self, z: torch.Tensor, row: torch.Tensor,
+                 feats: torch.Tensor, rule: torch.Tensor,
+                 mask: torch.Tensor) -> torch.Tensor:
+        """RA 二元打分：`(B,N,d)` + 机台行 + 特征 → **`(B,2)` logits**（**不 z 化**）。
+
+        ⚠️ 只有两个动作，z 化会把 logit 差钉死成 ±1，抹掉"有多确定"。
+        允许集外的动作置 `-inf`。
+        """
+        za = self._gather(z, row)
+        feats = feats.to(device=z.device, dtype=z.dtype)
+        rule = rule.to(device=z.device).long()
+        s = self.scorer_ra(za, feats, rule)
+        mask = mask.to(device=z.device).bool()
+        if not bool(mask.any(dim=-1).all()):
+            raise ValueError("RA 允许集为空 —— 规则过滤后一个动作都不剩")
+        return s.masked_fill(~mask, float("-inf"))

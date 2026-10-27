@@ -50,6 +50,21 @@ PA_TIE_SEED = 2000
 "连扰动流都换了"。独立子流使"平局开/关"成为一次**干净的消融**。
 """
 
+LA_TIE_SEED = 2100
+"""**LA** 规则**平局**随机源的子种子（2026-10-15 加）——`default_rng([seed_chain, 本值])`。
+
+⚠️ **为什么要有它**：`la_rule_policy` 此前**没有**平局随机源，平局按**车号升序**打破。
+而车队**完全同构**（`AgvSpec` 只剩 `id`）且全部在 L/U 起步 ⟹ **车号是任意标签**
+⟹ 那是**任意偏置**，不是打破平局。实测代价：`MINCOST` 的 MS 差 **16%**（585.6 → 489.2）、
+t=0 的 **16 次**投放全给 V0。见 `rule_views.LAView.tie_rng` 与 `open-question-nhdrl.md` §4.28。
+
+⚠️ **口径与 `PA_TIE_SEED` 对称** —— 本文件里 PA 那条逐字写着
+*"照 AEI2025 的**随机平局**"*。**LA 层此前漏了 —— 这是遗漏，不是设计。**
+
+⚠️ **必须独立成流，且不得借 `PA_TIE_SEED`**：借它会把 PA 的平局抽签**整体移位**
+⟹ "只修了 LA" 就变成"连 PA 也换了"。
+"""
+
 # ⚠️ **AEI2025 式(48) 的成本常数**（`uc = 0.5`、`c = 7`，见其 §5.1 参数设置）。
 # 只用于 `metrics["logistics_cost"]` 这个**报告桥**——我们的目标函数里**没有**成本项。
 # 名字带来源，避免被误读成"我们自己的参数"。
@@ -70,6 +85,21 @@ class StepCounters(NamedTuple):
     done_jobs: int
     energy_kwh: float
     twt: float
+    ms_committed: float = 0.0
+    """**已排程部分的 makespan** = `max(now + max_m(remaining_min(m) + backlog_min(m)),
+    max_v ACT_v)`。
+
+    口径照 **Shi et al., *Advanced Engineering Informatics* 65:103195 (2025)** 的 `MS`
+    —— 原文定义 *"Makespan for all jobs in **the schedule**"*，而它的**逐决策点奖励**是
+    *"the difference in MS before and after state transition"*（§4.2.2 / Eq. 50–51）。
+
+    ⚠️ **2026-10-18 加 AGV 计划完工**（用户裁定的 A 组修正）。只读机台账本会漏掉
+    「已派给车、还没卸下」的活；复现实测逐步奖励与最终 MS 的 rank corr 从 **−0.433**
+    翻到 **+0.683**（`open-question-nhdrl.md` §4.47）。
+    ⚠️ **与 `now` 的区别**：`now` 是**时钟**（最后一件已发生的事），本项是**已排定工作的
+    最晚完工时刻**（含机上在做 + 队列里等着的 + 已派运输任务）。Shi 用的是后者。
+    ⚠️ **默认 `0.0`** 只为兼容既有构造；`_step_counters` 一律填真值。
+    """
 
 
 AGV_FAIL_N_SEED = 3000
@@ -79,12 +109,52 @@ AGV_FAIL_N_SEED = 3000
 车队消费 `[seed_chain, 1000+a]`、PA 平局消费 `[seed_chain, PA_TIE_SEED]`。
 借任何一条都会把它**整体移位** ——"只改了故障注入方式"就变成"顺手改了别的流"。"""
 
+AGV_REPAIR_SEED = 5100
+"""⑨ **逐次修复时长**的独立子流：`default_rng([seed_chain, AGV_REPAIR_SEED, aid])`。
+
+⚠️ **必须独立**（2026-10-14 加）：借 `AgvSim.rng`（泊松故障**时刻**用的那条）会把它的
+抽签序列整体移位 —— 同 `AGV_FAIL_N_SEED` 那条纪律。"""
+
 DISTURBANCE_MACHINE = -2
 """**机障 ③** 的扰动哨兵。设计 §10⑤：顶层 MA 的触发 = **定时器 + 机障 ③ + AGV 故障 ⑨** ——
 ⑨ 的哨兵是 `DISTURBANCE`，③ 的在这里。两者都只是"开一个决策点/顶层决策点"，不产生件。"""
 
 AEI2025_AGV_ACTIVATION_COST = 7.0      # c：启用一台 AGV 的费用
 AEI2025_UNIT_TRANSPORT_COST = 0.5      # uc：单位运输时间成本
+
+
+AGV_HANDLING_SEED = 2700
+"""**装卸时间随机抽取**的独立子流（2026-10-17 加）—— `[seed_chain, 本值, 车号]`。
+
+⚠️ **不得并进 `AgvSim.rng`**（那是 ⑨ 故障流）：借了会把它整体移位，消融不干净
+（同 `PA_TIE_SEED` / `MACHINE_CAP_SEED` 那条纪律）。
+"""
+
+
+def n_agv_activated(stats: dict, n_agv: int) -> int:
+    """**当前调度里被激活的 AGV 数** —— AEI2025 Eq.(2) 的 `Σ_v y_v`。
+
+    ⚠️ **原文记号表逐字**：
+
+    > `y_v`: *"Binary variable; **1 if AGV v is activated in current schedule**, and 0 otherwise"*
+
+    **⟹ 它是**变量**，由调度决定。**
+
+    ⚠️ **2026-10-16 修**：此前 `logistics_cost` 里这一项**写死 `n_agv`**，注释理由为
+    *"本仓车队固定、全部常开（⑩ 异构车队删后无启用决策）"*。
+    **那与原文的写法不符** —— 原文是 0/1 变量，不是常数。
+
+    **判据取「该车**动过**」（`agv_busy_min[v] > 0`）**：车被派过任务 ⟹ 它至少跑过一段
+    （空载或负载）⟹ 它被激活。⚠️ **不用 `agv_del > 0`**（交付计数）
+    —— 被 `requeue` 退回的趟**没交付但它确实被激活过**。
+
+    ⚠️ **实测（`Exp(16/140)`）：27 条 CDR 全部用到 6 台车**（分布 `{6: 27}`）
+    ⟹ `Σy_v ≡ 6` ⟹ **本次修复在该实例上**不改变任何读数**（逐位不变）**；
+    它把**写死的常数**换成**可审计的量**。**对任务少到用不满车队的实例会真的变。**
+    """
+    busy = list(stats.get("agv_busy_min") or [])
+    return int(sum(1 for a in range(int(n_agv))
+                   if a < len(busy) and float(busy[a]) > 0.0))
 
 
 def rollout(inst: Instance, layout_type: str = "line", seed_layout: int = 0, seed_chain: int = 0,
@@ -141,6 +211,92 @@ class SimConfig:
     # （spec §3.4 表："AGV 3 台，0.5 m/s"）；1.0 是无出处的拍脑袋值，且使运输被低估一倍。
     # 文献区间：0.3–0.6（IEJ 随机批量运输 FJSP）、1.2（FlexSim 车间级案例）。车速是扫描轴之一。
     agv_speed_mps: float = 0.5
+    # ⚠️ **装卸时间**（2026-10-14 加）—— 原文 **Shi et al. 2025（AEI 65:103195）的假设 (3)**：
+    #   *"The time for loading and unloading jobs on AGVs is **included in transport time**."*
+    #
+    # ⚠️ **本仓此前不含** ⟹ 运输工时被低估。实测（`Exp(16/140)` · `EAJ+SMPT` · 场景 100000）：
+    #   ```
+    #   agv_states_min = idle 708.68 · empty 35.70 · loaded 53.93   ⟹ 运输 89.6 min · MS 150.5
+    #   机台两两行驶时长：中位 0.43 min（≈13 m @0.5 m/s）· 最大 1.01
+    #   ⟹ 车间只有 ~30 米见方；原文推算 transport ≈ 776 min、MS ≈ 310（Fig. 6）
+    #   ```
+    #   **`transport / MS`：本仓 0.60 vs 原文 2.5 —— 差 4.2 倍。**
+    #
+    # ⚠️ **原文没给数的值** —— 只能由「运输/MS 比」标定。**登记在案**（见 progress-log §37.50）。
+    # ⚠️ **默认 0 = v3 原行为**（2026-10-14）：Shi 口径（0.75/0.75）由**复现层显式传**，
+    #    不得做进全局默认 —— 那会污染 v3 主线。
+    agv_load_min: float = 0.0
+    agv_unload_min: float = 0.0
+    # ⚠️ **随机装卸时间**（2026-10-17 加，用户指定 1–3 分钟）——
+    #    原文假设 (3)：*"The time for loading and unloading jobs on AGVs is **included in
+    #    transport time**."* ⟹ 装卸**并进 tt**，没有单独数值。
+    #    `hi > 0` 时，**每次装载 / 每次卸载**各抽 `U{lo..hi}`；`hi == 0`（默认）⟹ 不用此项，
+    #    走上面两个**固定**的 `agv_load_min` / `agv_unload_min`（旧行为，逐位不变）。
+    #    ⚠️ **独立子流**（`AGV_HANDLING_SEED`，逐车）：不得借 `AgvSim.rng`（那是 ⑨ 故障流）。
+    agv_handling_lo: float = 0.0
+    agv_handling_hi: float = 0.0
+    # ⚠️ **LA 平局随机源**（2026-10-15 加）：`True` ⟹ `LAView.tie_rng` 填上独立子流
+    #    `[seed_chain, LA_TIE_SEED]` ⟹ 平局**随机**打破。
+    #    ⚠️ **2026-10-18 默认改 `True`**（用户裁定：A 组修正进 v3 主线）。
+    #    旧默认 `False`（车号最小）制造任意偏置：车号是标签，车队同构。
+    #    复现实测 `MINCOST` 的 MS 差 16%（§4.28）⟹ **旧 v3 读数作废**。
+    #    见 `LA_TIE_SEED` 与 `open-question-nhdrl.md` §4.28。
+    la_tie_random: bool = True
+    # ⚠️ **`agv_plan_pos`（2026-10-16 加）**：LA 的距离项改用**已派任务之后的预计位置**。
+    #
+    # **依据（原文逐字）**：AEI2025 的 LA 状态特征 f37–f39 是
+    # *"已启用 AGV 完成**所分配**物流任务全部阶段所需时间"* `TV_v(t) + tt_{l'l}`，
+    # 而 `TV_v(t) = tt_{l''l'}`，**`l''` = AGV v「**完成上一任务后的位置**」**
+    # （`docs/citation-cards.md:1556`）。⟹ **原文读的是「已派任务的目的地」，不是车此刻在哪。**
+    #
+    # **本仓此前读 `AgvSim.pos_node`（物理当前位置）**，而它**直到货真卸下才更新**
+    # （`_drive` 的负载段结束）⟹ 车「已接活、还没跑」的那段时间里，LA 以为它还在老地方。
+    # 后果：排不出「让车跟着活走」的结构 —— 实测空载段 **360–420 min**，
+    # 而同口径的构造式调度只要 **50.7 min**（差 8 倍）。见 `open-question-nhdrl.md` §4.37。
+    #
+    # ⚠️ **2026-10-18 默认改 `True`**（用户裁定：A 组修正进 v3 主线）。
+    #    旧默认 `False`（物理位置）使「已接活、还没跑」的车看起来仍在老地方 ⟹ 状态别名。
+    #    复现实测空载段 420.0 → 318.7 min（§4.37.1）⟹ **旧 v3 读数作废**。
+    agv_plan_pos: bool = True
+    # ⚠️ **`agv_act_book`（2026-10-16 加）**：`agv_act` 改在**派车那一刻**推进。
+    #
+    # **原文（逐字）**：`ACT_v(t)` = *"the completion time of the last task **assigned**
+    # to AGV v"*（`docs/citation-cards.md:1535`）—— **"assigned"，不是"发出"。**
+    #
+    # ⚠️ **本仓的 `LAVehicle.free_at` docstring 早就写着它 ≡ `ACT_v(t)`，但实现不是**：
+    # 进位点在 `_emit_task`（任务**真的发进队列**时），推的是
+    # `max(act, now) + 负载段` —— **不含空载段、不含 `ready_at`、也不含更早的预订**。
+    #
+    # **后果**：LA 在派工点算出「这车啥时候空」之后，账本**不动** ⟹
+    # **同一台车会在若干个派工点上被重复订走**，每个后来的决策都以为它还闲着。
+    # 实测空载段 320 min（同口径构造式 50.7 min）。见 `open-question-nhdrl.md` §4.37。
+    #
+    # ⚠️ **2026-10-18 默认改 `True`**（用户裁定：A 组修正进 v3 主线）。
+    #    旧默认 `False` 让同一台车在多个派工点被反复订走 ⟹ **旧 v3 读数作废**。
+    agv_act_book: bool = True
+    # ⚠️ **`pa_blind`（2026-10-17 加，用户提出的**泄露检验**）**：把 PA 的**计划账本**清零。
+    #
+    # **背景**：`EAJ+MINU+MINCOST` 在 27 条里**同时是 MS 最小和 TC 最小**（前沿塌成一个点，
+    # 见 `v3_rule_rank.py`）。用户问：**它是不是用了不该看到的信息？**
+    #
+    # **已查**：三个分量都只用「已派任务账本（`pa_mct` ≡ 原文 `MCT_k`）」与「当前位置」，
+    # **没有未来信息**。但 `EAJ` 与 `MINU` **共用同一个账本** —— 若账本偏乐观，
+    # 规则会系统性地把活送到「**计划上**最闲」的机器。
+    #
+    # **本开关 = 盲化**：`_pa_dispatch` 传**全 0** 的 `pa_mct` / `pa_assigned_min`。
+    # ⟹ `EAJ` 退化成「都用 now」、`MINU` 退化成「全并列」（平局随机）、`EAM` 同理。
+    # **若盲化后那条规则**仍然支配** ⟹ 优势不来自账本。**
+    #
+    # ⚠️ **默认 `False` ⟹ v3 主线与既有读数逐位不变。**
+    pa_blind: bool = False
+    # ⚠️ **分层盲化**（2026-10-17，用户要求「切一层，分开看 EAJ 和 MINU」）：
+    #   `pa_blind_eaj`  ⟹ 只把 `ready_at` / `transportable_at` 里的 `pa_mct` 清零
+    #                     （**不动** `PAMachine.avail_at` ⟹ `EAM` 与 `MINU` 分母不受影响）
+    #   `pa_blind_minu` ⟹ 只把 `PAMachine.assigned_min` 清零
+    #                     ⟹ `MINU = 0/den` 恒 0 ⟹ 退化成「全并列 → 平局随机」
+    #   **默认都 `False` ⟹ 逐位不变。**
+    pa_blind_eaj: bool = False
+    pa_blind_minu: bool = False
     # ⚠️ **v2：① 去后 `zone_granularity` / `zone_wait_limit` 已删**（2026-10-08）。
     # `zone_hold` **保留**——它是通用退避时长，另有三处在用（⑨ failover 重试、
     # 负载段失败后退避、待命轮询），与区段无关。
@@ -155,7 +311,21 @@ class SimConfig:
     # ⚠️ **v2：⑩ 已删**（2026-10-08）—— `max_agv_capacity`（车队载量上限）与
     # `multi_drop`（多卸货点行程模型）两个参数一并去掉。车队同构单车单载。
     agv_mtbf: float = 480.0       # ⑨ AGV 平均无故障时间 [min]（8 h）
-    agv_mttr: float = 10.0        # ⑨ AGV 平均修复时间 [min]
+    # ⚠️ **逐次修复时间的区间**（2026-10-14 加）—— 原文逐字：
+    #   *"The repair time for each breakdown was randomly determined **between 5 and 10**."*
+    #   ⚠️ 本仓此前**固定 10**（= 区间上界）⟹ 修复时长被高估。
+    #   ⚠️ **必须用独立子流**（`AGV_REPAIR_SEED`）：借 `AgvSim.rng` 会把
+    #   泊松流的抽签序列整体移位（同 `PA_TIE_SEED` 那条纪律）。
+    # ⚠️ **默认 10/10 = v3 原来的固定值 10**（2026-10-14）：Shi 口径（5–10）由**复现层
+    #    显式传**。区间压成一点 ⟹ 逐位等于原来的固定 `agv_mttr`。
+    agv_mttr_lo: float = 10.0
+    agv_mttr_hi: float = 10.0
+    # ⚠️ **单位运输成本 `uc`**（Eq.2 的系数；原文明文 *"set as 0.5"*）。
+    #    **它是纯报告口径 —— 不进任何仿真动力学** ⟹ 改它**只改 TC 的读数，MS 一动不动**。
+    #    ⟹ 这是唯一一个 **ΔMS = 0** 的旋钮（真正的轴平行）。
+    #    默认 0.5 = 原文值，v3 主线逐位不变。
+    uc: float = AEI2025_UNIT_TRANSPORT_COST
+    c_activate: float = AEI2025_AGV_ACTIVATION_COST
     # ⑨ **按次数注入**（0 = 关，用上面的 `agv_mtbf` 泊松流）。
     # ⚠️ **口径照 Shi et al. 2025**（AEI 65:103195）：该文**不设 MTBF**，而是
     #   "实例中每个实例的**故障次数在 1–8 之间随机**；故障在**最短调度周期**内随机发生
@@ -214,6 +384,13 @@ class SimConfig:
     # ⚠️ **2026-10-10**：本项原来举的例子是**充电桩**（桩在格点外、矩阵不覆盖）。⑪ 删后
     # 桩不存在了，但**本项保留** —— 它是"矩阵覆盖不全"的通用守卫，与具体有哪些端点无关。
     transport_unmapped: str = UNMAPPED_RAISE
+    # ⚠️ **同机台相邻工序省略搬运**（2026-10-17，照原文 Fig. 1(b)(c)(d)）：
+    #    起终点重合时**不生成搬运任务**，件直接放回同一台机台的输入缓冲；
+    #    同时**不调用 LA 订车**（否则 `agv_act` 账本会多推一段）。
+    # ⚠️ **2026-10-18 默认改 `True`**（用户裁定：A 组修正进 v3 主线）。
+    #    起终点重合时不生成搬运任务、不订车。旧默认 `False` 会为同机台相邻工序
+    #    生成一次零距离搬运并占用车辆 ⟹ **旧 v3 读数作废**。
+    skip_same_machine_move: bool = True
 
     @property
     def eff_speed(self) -> float:
@@ -765,7 +942,9 @@ class AgvSim:
                  tasks_in, machines: list, graph, constraints, spec, rng,
                  track: SimTrack, bound: bool = False,
                  fleet: list | None = None, events_q=None,
-                 fail_times: tuple[float, ...] = ()):
+                 fail_times: tuple[float, ...] = (),
+                 repair_rng: np.random.Generator | None = None,
+                 handling_rng: np.random.Generator | None = None):
         self.env, self.aid, self.m_dm, self.cfg = env, aid, m_dm, cfg
         self.transport = transport          # 行程时间口径（P4-B：跟随实例，不是全局开关）
         self.stats, self.tasks_in, self.machines = stats, tasks_in, machines
@@ -775,6 +954,8 @@ class AgvSim:
         self.bound = bound          # True: 任务按 agv_phi 绑定（每车一个 Store = L 层决策载体）
         # ⚠️ **按次数注入**的预排时刻（空 = 用 `agv_mtbf` 泊松流）。见 `SimConfig.agv_n_failures`。
         self.fail_times = tuple(float(t) for t in fail_times)
+        # ⚠️ **逐次修复时长的独立子流**（2026-10-14）；缺省回落到本车流（旧行为）。
+        self.repair_rng = repair_rng if repair_rng is not None else rng
         # ⚠️ **v2：⑩ 的 `multi_drop` 与拼批头（B）回调已删**（2026-10-08）
 
         # ⚠️ **v2：① 去后路线头（R）与 `route` 回调已删**（2026-10-08）—— `_drive` 恒走最短路。
@@ -793,6 +974,9 @@ class AgvSim:
         # `spec` 参数**保留**（调用点按位传参；`AgvSpec` 仍按车号区分身份）。
         # ⑨ 故障：**每台车一条独立随机流**——否则关掉 AGV 故障会移位机台故障流（消融不干净）
         self.rng = rng
+        # ⚠️ **装卸时间的独立子流**（`agv_handling_lo/hi`，2026-10-17）——
+        #    不得借 `self.rng`（那是 ⑨ 故障流，借了会把它整体移位，消融不干净）。
+        self.handling_rng = handling_rng
         self.down = False
         self.up = simpy.Event(env)
         self.up.succeed()                   # 初始可用
@@ -859,7 +1043,7 @@ class AgvSim:
     # 它的两个调用点（`_drive` 的中断补记与段末记账）同步删除。
 
     def _failures(self):
-        """⑨ AGV 故障：按泊松流停机 `agv_mttr`，期间不接活。
+        """⑨ AGV 故障：按泊松流停机 `U{agv_mttr_lo, agv_mttr_hi}`，期间不接活。
 
         **段间检出**：故障不打断正在进行的行驶，在下一段行驶开始前的**段间**生效。
         这是简化，但 MTBF(480 min) 远大于单段行驶时长，误差可忽略。
@@ -869,9 +1053,22 @@ class AgvSim:
         时点**不变**——仍只在段间、且车不持任何区段锁（持锁停机 = 同区段的车永久等待 = 死锁）。
         默认关时本函数**逐字**是今日行为（只设 down/up）。
         """
-        if self.fail_times:
+        if self.cfg.agv_n_failures > 0:
             # ⚠️ **按次数注入**（`SimConfig.agv_n_failures`，口径照 Shi et al. 2025）：
             # 时刻由 `SimWorld` 一次性抽好并指派到车，本车只负责到点触发。
+            #
+            # ⚠️⚠️ **判据是 `cfg.agv_n_failures`，不是 `self.fail_times`**（2026-10-14 修**真 bug**）。
+            #   原判据 `if self.fail_times:` —— 而 `fail_times` 是**逐车**分的
+            #   （`SimWorld._build_entities` 的 `per_agv.get(a, ())`）。
+            #   **`N < 车数` 时，没分到时刻的车拿到空元组 ⟹ 掉进下面的泊松流
+            #   ⟹ 该车无限故障 ⟹ 全队次数远超 N。**
+            #
+            #   **实测**（`Exp(16/140)` · 6 车 · `EAJ+SMPT` · 场景 100000）：
+            #   ```
+            #   N=0（泊松）→ 22 次   N=1 → **19** 次（应 ≈1）   N=2 → **17**（应 ≈2）
+            #   N=4 → **10**（应 ≈4）   N=8 → **8**（✓ —— 只有 N ≥ 车数时才正常）
+            #   ```
+            #   **⟹ 修前「按次数注入」这个档整个是坏的**，「1–8 次」（原文规格）根本做不到。
             for t in self.fail_times:
                 yield self.env.timeout(max(0.0, t - self.env.now))
                 yield from self._do_failure()
@@ -899,7 +1096,12 @@ class AgvSim:
         # 盲目打断会把 Interrupt 抛到无关的等待里。
         if self.stage != "idle" and self._main is not None:
             self._main.interrupt(("agv_breakdown", self.stage))
-        yield self.env.timeout(self.cfg.agv_mttr)
+        # ⚠️ **逐次抽**（2026-10-14）：原文 *"repair time for each breakdown …
+        #   randomly determined between 5 and 10"*。此前**固定 10**。
+        _rep = float(self.repair_rng.uniform(self.cfg.agv_mttr_lo,
+                                             self.cfg.agv_mttr_hi))
+        self.stats["agv_repair_min"] = self.stats.get("agv_repair_min", 0.0) + _rep
+        yield self.env.timeout(_rep)
         self.down = False
         self.up.succeed()
 
@@ -1124,6 +1326,15 @@ class AgvSim:
             for (_f0, _t0, _it0, _p0) in batch:
                 self.track.job_agv[_it0[0]] = self.aid
             self.track.set_load(self.aid, len(batch))
+            # ⚠️ **装载时间**（2026-10-14）：原文假设 (3) —— 装卸**计入运输时间**。
+            _hl = self.cfg.agv_load_min
+            if self.cfg.agv_handling_hi > 0.0:
+                _hl = float(self.handling_rng.uniform(self.cfg.agv_handling_lo,
+                                                      self.cfg.agv_handling_hi))
+            if _hl > 0.0:
+                yield self.env.timeout(_hl)
+                self.stats["agv_handling_min"] = (
+                    self.stats.get("agv_handling_min", 0.0) + _hl)
             # ── 负载段：取货点 → 卸货点（整批一趟，**单卸货点**：逐位不变）──
             # 快照跟踪（P2 Task 1）：取货后负载行驶，本趟在运件数 = 批次大小（F5：in_flight 的"车上"部分）
             if self.failover and self.down:
@@ -1170,6 +1381,15 @@ class AgvSim:
                 self.track.job_agv[_item2[0]] = -1       # 快照跟踪（P2 Task 1）：投递完成，工件离车
                 self.stats["deliveries"] += 1
             self.track.set_load(self.aid, 0)             # 快照跟踪（P2 Task 1）：整批卸空
+            # ⚠️ **卸载时间**（2026-10-14）：原文假设 (3) —— 装卸**计入运输时间**。
+            _hu = self.cfg.agv_unload_min
+            if self.cfg.agv_handling_hi > 0.0:
+                _hu = float(self.handling_rng.uniform(self.cfg.agv_handling_lo,
+                                                      self.cfg.agv_handling_hi))
+            if _hu > 0.0:
+                yield self.env.timeout(_hu)
+                self.stats["agv_handling_min"] = (
+                    self.stats.get("agv_handling_min", 0.0) + _hu)
 
     # ⚠️ **2026-10-10：⑪ 去后 `_drain_idle`（待命耗电）已删** —— 车队无电量。
     # 它的调用点（`run` 里取完任务后按等待时长记账）同步删除。
@@ -1220,6 +1440,13 @@ class SimWorld:
         self._live_stats: dict = {}
         # 步 3：PA 平局随机源（每局在 `run`/`run_gated` 里重播，见 `PA_TIE_SEED`）。
         self._pa_tie_rng: np.random.Generator | None = None
+        # 2026-10-15：**LA 平局随机源**（同一条纪律；见 `LA_TIE_SEED`）。默认 `None` ⟹ 旧口径。
+        self._la_tie_rng: np.random.Generator | None = None
+        # ⚠️ **`ms_plan` 账本**（2026-10-18，对齐 Shi Eq.50–51 的 `MS`）：
+        #    所有**已 assign** 工序（含末工序之后的回站段）的预计完工最大值。
+        #    `d_ms = ms_plan_after − ms_plan_before` ⟹ 望远镜求和 = 最终 MS。
+        #    只由 `_pa_dispatch` + LA 订车那一段推进；离线路径保持 0（回退旧投影）。
+        self._ms_plan = 0.0
         self._cold_start()                  # t=0 快照骨架（P2 Task 1，run() 会整套换掉）
 
     def _fleet(self) -> list:
@@ -1303,7 +1530,11 @@ class SimWorld:
                                entities, self.g, self.constraints, specs[a],
                                np.random.default_rng([seed_chain, 1000 + a]),   # ⑨ 每车独立流
                                track, bound=bound, fleet=agvs,
-                               events_q=events_q, fail_times=tuple(per_agv.get(a, ()))))
+                               handling_rng=np.random.default_rng(
+                                   [seed_chain, AGV_HANDLING_SEED, a]),
+                               events_q=events_q, fail_times=tuple(per_agv.get(a, ())),
+                               repair_rng=np.random.default_rng(
+                                   [seed_chain, AGV_REPAIR_SEED, a])))
         # 活状态引用（P2 Task 1）：`snapshot()` 据此取**当时**的快照
         self.env = env
         self.completes = completes
@@ -1345,9 +1576,33 @@ class SimWorld:
         er = self._energy_report(stats, max(now, 1e-9))
         due = self._due_map()
         twt = self._tardy(dict.fromkeys(range(self.inst.n_jobs)), self.completes, due)[1]
+        # **已排程部分的 makespan** —— 口径照 Shi et al., AEI 65:103195 (2025) 的 `MS`
+        # （"Makespan for all jobs in the schedule"）：取各机台把**已排定的活**干完的时刻
+        # 的最大值 = `now + 机上剩余 + 队列积压`。空机台贡献 `now` 本身。
+        ms_old = now
+        for i, m in enumerate(self.machines):
+            cur = self._cur_op[i]
+            rem = max(0.0, cur[2] + cur[1] - now) if cur else 0.0
+            ms_old = max(ms_old, now + rem
+                         + float(sum(it[2].time for it in m.in_q.items)))
+        # ⚠️ **PA 路径用 `ms_plan` 账本**（已 assign 工序 + 回站段）；离线路径回退旧投影。
+        ms_c = (max(now, float(self._ms_plan)) if self._ms_plan > 0.0
+                else ms_old)
+        # ⚠️ **A 修正（2026-10-18）**：把 **AGV 计划完工**并进 `ms_committed`。
+        #
+        # 只读机台账本会漏掉「已派给车、还没卸下」的活 ⟹ 逐步奖励与最终 MS 可能**反相关**。
+        # 复现实测（`v3_reward_alignment_probe.py`）：旧口径 rank corr **−0.433**；
+        # 并入 `max(agv_act)` 后 **+0.683**。见 `open-question-nhdrl.md` §4.47。
+        #
+        # `agv_act_book=True`（现默认）下，`agv_act[v]` = 车 v **最后一趟已派任务**的完工时刻
+        # （`max(act, ready) + 空载 + 负载`）⟹ 它是「已排程部分」的**下界**，不是最终 MS。
+        act = stats.get("agv_act") or ()
+        if self._ms_plan <= 0.0 and act:
+            ms_c = max(ms_c, float(max(act)))
         return StepCounters(now=now, done_ops=int(stats.get("ops_done", 0)),
                             done_jobs=len(self.completes),
-                            energy_kwh=float(er.get("total_kwh", 0.0)), twt=float(twt))
+                            energy_kwh=float(er.get("total_kwh", 0.0)), twt=float(twt),
+                            ms_committed=float(ms_c))
 
     def _node_of(self, endpoint: int) -> int:
         """端点号 → 通道节点（机台 `0..m-1`、装卸站 = `m`）。"""
@@ -1362,20 +1617,32 @@ class SimWorld:
         Rule 3 塌陷成 Rule 1（§70.8）。现在 LA 与 PA **同一决策点**（原文的 PA→LA 顺序），
         `ready_at` 是**未来**时刻 ⟹ Rule 3 的"不晚于可运输时刻地最晚到达"有真实内容。
 
-        ⚠️ 逐车位置取**当前**节点：车若已有排队任务，其"完成后所在位置"是任务终点而非当前
-        节点——**未建模**（登记 §72.1）。逐车空闲时刻用账本 `stats["agv_act"]`。
+        ⚠️ 逐车位置：`cfg.agv_plan_pos=True`（2026-10-18 起默认）取**已派任务之后的目的地**
+        （`stats["agv_plan_pos"]`）—— 照原文 `l''` = *"AGV v 完成上一任务后的位置"*
+        （`citation-cards.md:1556`）。`False` 退回**当前**节点（旧口径，只作对照）。
+        旧口径下"车若已有排队任务，其完成后所在位置是任务终点而非当前节点"**未建模**（§72.1）。
+        逐车空闲时刻一律用账本 `stats["agv_act"]`。
         """
         from .rule_views import LAVehicle
         snap = self.snapshot()
         act = self._live_stats.get("agv_act") or []
+        planned = ((self._live_stats.get("agv_plan_pos") or [])
+                   if self.cfg.agv_plan_pos else [])
+
+        def _node(a: int, physical: int) -> int:
+            """该车**届时**所在的节点：已派任务有目的地就取它，否则取物理位置。"""
+            if a < len(planned) and int(planned[a]) >= 0:
+                return int(planned[a])
+            return int(physical)
+
         return LAView(
             now=float(snap.now), job=int(job), oi=int(oi),
             frm_node=self._node_of(frm), to_node=self._node_of(to),
             ready_at=float(ready_at),
-            vehicles=tuple(LAVehicle(node=int(v.node), busy_min=float(v.busy_min),
+            vehicles=tuple(LAVehicle(node=_node(a, v.node), busy_min=float(v.busy_min),
                                      free_at=float(act[a]) if a < len(act) else 0.0)
                            for a, v in enumerate(snap.vehicles)),
-            leg_min=self.leg_min, snap=snap)
+            leg_min=self.leg_min, snap=snap, tie_rng=self._la_tie_rng)
 
     def _cold_start(self) -> None:
         """建 t=0 的空世界：**只建对象，不启进程、不抽随机数**。
@@ -1607,12 +1874,22 @@ class SimWorld:
                 item = t[2]
                 qt.append(QueuedTask(veh=int(a), job=int(item[0]), frm=int(t[0]),
                                      to=int(t[1]), oi=int(item[1])))
+        # NHDRL 的四个账本（`pa_mct` / `pa_assigned_min` / `agv_act`）。`.get` 兜底成空元组
+        # ——「还没跑过」是真值，不是哨兵（同 `agv_busy` 的处置）。
+        led_asg = self._live_stats.get("pa_assigned_min") or ()
+        led_mct = self._live_stats.get("pa_mct") or ()
+        led_act = self._live_stats.get("agv_act") or ()
         return Snapshot(now=float(self.env.now), machines=tuple(ms), jobs=tuple(js),
                         vehicles=tuple(vs), n_done=len(self.completes),
                         in_flight=queued + sum(self._agv_load_n),
                         # ⚠️ **v2：① 去后 `zone_holder` / `zone_wait` 已删**（2026-10-08）
                         # ⚠️ **2026-10-10：⑪ 去后 `chargers=` 已删**（无充电桩，C 段 token 同批删）。
-                        queued_tasks=tuple(qt))
+                        queued_tasks=tuple(qt),
+                        # NHDRL 特征要的四个账本（见 `Snapshot` 的注释）。
+                        assigned_min=tuple(float(x) for x in led_asg),
+                        mct_assigned=tuple(float(x) for x in led_mct),
+                        agv_act=tuple(float(x) for x in led_act),
+                        ms_plan=float(self._ms_plan))
 
     # ⚠️ **v2：① 去后 `_zone_wait_max` 已删**（2026-10-08）
 
@@ -1638,7 +1915,7 @@ class SimWorld:
     def run(self, seed_chain: int = 0, op_choices: list[list[int]] | None = None,
             agv_phi: list[int] | None = None,
             seq_rank: list[list[int | None]] | None = None,
-            policy_pa=None) -> dict:
+            policy_pa=None, tie_seed: int | None = None) -> dict:
         """op_choices[job][op_idx] = 该工序选第几个候选；缺省=每工序取最短候选（v0 调度器）。
 
         agv_phi[task_i] = 第 task_i 个运输任务的 AGV id（L 层决策的载体；None=旧 FIFO 规则）。
@@ -1671,7 +1948,15 @@ class SimWorld:
         rng = np.random.default_rng(seed_chain)
         # 步 3：PA 平局随机源——**独立子流**，每局重播（见 `PA_TIE_SEED` 的注释；
         # 每次派工重建会让 55 次派工抽到同一串数，那是错的）。
-        self._pa_tie_rng = np.random.default_rng([seed_chain, PA_TIE_SEED])
+        # ⚠️ **`tie_seed`（2026-10-20）**：平局流与场景流**分开**。`None` ⟹ 用 `seed_chain`
+        #    （逐位等于改动前）。非 None ⟹ 同一场景跑多个平局流（评测精度用）。
+        ts = seed_chain if tie_seed is None else int(tie_seed)
+        self._pa_tie_rng = np.random.default_rng([ts, PA_TIE_SEED])
+        # ⚠️ **LA 平局随机源**（2026-10-15 加）：同一条纪律 —— **独立子流**、每局重播。
+        #    `la_tie_random=True`（2026-10-18 起默认）⟹ 平局随机打破。
+        #    旧默认 `False` 走车号最小 ⟹ 任意偏置。见 `LA_TIE_SEED` 与 §4.28。
+        self._la_tie_rng = (np.random.default_rng([ts, LA_TIE_SEED])
+                            if self.cfg.la_tie_random else None)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
                  "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv,
@@ -1838,6 +2123,11 @@ class SimWorld:
                                  "pa_assigns", "dist_events", "mf_dist_events",
                                  "ma_decisions")},
                 "travel_time_total": float(stats["travel_time"]),
+                # ⚠️ **装卸工时**（2026-10-14）：原文假设 (3) —— 装卸**计入运输时间**。
+                # 单列出来是为了让 `logistics_cost` 那条式子**可审计**（测试要对它）。
+                "agv_handling_min": float(stats.get("agv_handling_min", 0.0)),
+                # ⚠️ **AGV 修复工时合计**（2026-10-14）：逐次 `U{5,10}`，原文规格。
+                "agv_repair_min": float(stats.get("agv_repair_min", 0.0)),
                 # 物流成本（**借 AEI2025 式(48) 的成本模型**，只为让读数可与其表并列）：
                 #   `TC = c·Σ y_v + uc·(Σ(nct−nst+lct−lst) + at)`
                 # - `Σ y_v = n_agv`：本仓**车队固定、全部常开**（⑩ 异构车队删后无启用决策）；
@@ -1846,9 +2136,13 @@ class SimWorld:
                 # ⚠️ **这不是我们的目标函数**（我们的是 makespan + energy + TWT），
                 # 只是**报告桥**——不加它，任何"比较 TC"的说法都不成立。见 §77.4 第 2 行。
                 "logistics_cost": (
-                    AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
-                    + AEI2025_UNIT_TRANSPORT_COST * (float(stats["travel_time"])
-                                                     + float(stats.get("agv_at_min", 0.0)))),
+                    self.cfg.c_activate * n_agv_activated(stats, self.cfg.n_agv)
+                    + self.cfg.uc
+                    * (float(stats["travel_time"])
+                       # ⚠️ **装卸时间计入运输**（2026-10-14，原文假设 (3)）。
+                       # 不计它时本仓的 TC 被低估（实测 transport 89.6 vs 原文 ≈776，§37.50）。
+                       + float(stats.get("agv_handling_min", 0.0))
+                       + float(stats.get("agv_at_min", 0.0)))),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径**随结果自报**（P4-A Review Focus #1 同型）：两种口径的数并排放时靠这两行分辨
                 "transport": self.inst.transport,
@@ -1859,7 +2153,7 @@ class SimWorld:
                   policy_l=None, policy_s=None, online_s: bool = False,
                   policy_m=None, policy_pa=None,
                   policy_ma=None, dt_events: int = 0,
-                  stop_after_ma: int = 0) -> dict:
+                  stop_after_ma: int = 0, tie_seed: int | None = None) -> dict:
         """L 层门控式运行（真·事件驱动决策的同步实现）+ **在线 S 层**（P2 Task 5）+ 在线 R 层。
 
         SimPy 单线程确定性 ⇒ transporter 生成任务时**同步调用** L 层策略，并当场把**当时的**
@@ -1911,7 +2205,8 @@ class SimWorld:
         """
         if (policy_l is None and not online_s and policy_m is None
                 and policy_pa is None):
-            return self.run(seed_chain=seed_chain, op_choices=op_choices, policy_pa=policy_pa)
+            return self.run(seed_chain=seed_chain, op_choices=op_choices,
+                            policy_pa=policy_pa, tie_seed=tie_seed)
         if online_s and policy_s is None:
             raise ValueError("online_s=True 需要 policy_s 回调（S 层决策入口）")
         if online_s and op_choices is not None:
@@ -1936,7 +2231,15 @@ class SimWorld:
         rng = np.random.default_rng(seed_chain)
         # 步 3：PA 平局随机源——**独立子流**，每局重播（见 `PA_TIE_SEED` 的注释；
         # 每次派工重建会让 55 次派工抽到同一串数，那是错的）。
-        self._pa_tie_rng = np.random.default_rng([seed_chain, PA_TIE_SEED])
+        # ⚠️ **`tie_seed`（2026-10-20）**：平局流与场景流**分开**。`None` ⟹ 用 `seed_chain`
+        #    （逐位等于改动前）。非 None ⟹ 同一场景跑多个平局流（评测精度用）。
+        ts = seed_chain if tie_seed is None else int(tie_seed)
+        self._pa_tie_rng = np.random.default_rng([ts, PA_TIE_SEED])
+        # ⚠️ **LA 平局随机源**（2026-10-15 加）：同一条纪律 —— **独立子流**、每局重播。
+        #    `la_tie_random=True`（2026-10-18 起默认）⟹ 平局随机打破。
+        #    旧默认 `False` 走车号最小 ⟹ 任意偏置。见 `LA_TIE_SEED` 与 §4.28。
+        self._la_tie_rng = (np.random.default_rng([ts, LA_TIE_SEED])
+                            if self.cfg.la_tie_random else None)
         stats = {"fail_events": 0, "process_time": 0.0, "travel_time": 0.0,
                  "moves": 0, "deliveries": 0,
                  "agv_del": [0] * self.cfg.n_agv, "agv_pos": [-1] * self.cfg.n_agv,
@@ -2087,6 +2390,11 @@ class SimWorld:
                 "agv_interrupted_min": float(stats.get("agv_interrupted_min", 0.0)),
                 "task_flow": stats.get("task_flow", []),
                 "travel_time_total": float(stats["travel_time"]),
+                # ⚠️ **装卸工时**（2026-10-14）：原文假设 (3) —— 装卸**计入运输时间**。
+                # 单列出来是为了让 `logistics_cost` 那条式子**可审计**（测试要对它）。
+                "agv_handling_min": float(stats.get("agv_handling_min", 0.0)),
+                # ⚠️ **AGV 修复工时合计**（2026-10-14）：逐次 `U{5,10}`，原文规格。
+                "agv_repair_min": float(stats.get("agv_repair_min", 0.0)),
                 # 物流成本（**借 AEI2025 式(48) 的成本模型**，只为让读数可与其表并列）：
                 #   `TC = c·Σ y_v + uc·(Σ(nct−nst+lct−lst) + at)`
                 # - `Σ y_v = n_agv`：本仓**车队固定、全部常开**（⑩ 异构车队删后无启用决策）；
@@ -2095,9 +2403,13 @@ class SimWorld:
                 # ⚠️ **这不是我们的目标函数**（我们的是 makespan + energy + TWT），
                 # 只是**报告桥**——不加它，任何"比较 TC"的说法都不成立。见 §77.4 第 2 行。
                 "logistics_cost": (
-                    AEI2025_AGV_ACTIVATION_COST * self.cfg.n_agv
-                    + AEI2025_UNIT_TRANSPORT_COST * (float(stats["travel_time"])
-                                                     + float(stats.get("agv_at_min", 0.0)))),
+                    self.cfg.c_activate * n_agv_activated(stats, self.cfg.n_agv)
+                    + self.cfg.uc
+                    * (float(stats["travel_time"])
+                       # ⚠️ **装卸时间计入运输**（2026-10-14，原文假设 (3)）。
+                       # 不计它时本仓的 TC 被低估（实测 transport 89.6 vs 原文 ≈776，§37.50）。
+                       + float(stats.get("agv_handling_min", 0.0))
+                       + float(stats.get("agv_at_min", 0.0)))),
                 # ⚠️ **v2：① 去后 `zone_wait` / `n_zones` 已删**（2026-10-08）
                 # 口径随结果自报（同 run()）
                 "transport": self.inst.transport,
@@ -2212,9 +2524,22 @@ class SimWorld:
         led_mct = self._live_stats.setdefault("pa_mct", [0.0] * self.inst.n_machines)
         led_assigned = self._live_stats.setdefault("pa_assigned_min",
                                                    [0.0] * self.inst.n_machines)
+        if self.cfg.pa_blind:
+            # ⚠️ **盲化**（`cfg.pa_blind`，2026-10-17，用户提出的泄露检验）：
+            #    **只把「喂给规则视图」的那一份清零**，真账本仍按本来的口径推进
+            #    （下面推进时用 `led_mct[m]` 而不是 `view.machines[m].avail_at`）。
+            led_mct_view = [0.0] * self.inst.n_machines
+            led_assigned_view = [0.0] * self.inst.n_machines
+        else:
+            led_mct_view, led_assigned_view = led_mct, led_assigned
         if policy_pa is None:
             raise ValueError("_pa_dispatch 需要 policy_pa；离线路径不应调用它")
-        view = build_pa_view(self.snapshot(), self.inst, plans, led_mct, led_assigned)
+        view = build_pa_view(self.snapshot(), self.inst, plans,
+                             led_mct_view, led_assigned_view,
+                             self.layout, self.leg_min,
+                             # ⚠️ 分层盲化（`pa_blind` 时两者都为真 —— 见上面的整块清零）
+                             blind_eaj=bool(self.cfg.pa_blind_eaj or self.cfg.pa_blind),
+                             blind_minu=bool(self.cfg.pa_blind_minu or self.cfg.pa_blind))
         # 池 = 还有未分配工序的作业（`view.jobs[j].oi` 已是"最低未分配下标"，见 `PAJob.oi`）
         # ⚠️ **`and v.alts`（2026-10-10，清单第 2 条）**：② 开启时，候选机台**全满**的作业
         # 也**派不出去**（`build_pa_view` 已把满机台从 `alts` 滤掉 ⟹ `alts` 空）。
@@ -2240,12 +2565,24 @@ class SimWorld:
                 f"机台 {m}；候选={cand}")
         m = int(m)
         j, oi = pool[pi]
-        ready_at = float(view.jobs[j].ready_at)      # 该工序的**可运输时刻**（给 LA 的 f33）
+        # ⚠️ **给 LA 的是「可运输时刻」（`transportable_at`，= 原文 f33 / Rule 3 的
+        #    *"earliest transportable time"*），**不是** `ready_at`。**
+        #    **2026-10-15 修口径错位**：此前传的是 `ready_at` = `transportable_at + min leg`
+        #    = 「可**开工**」⟹ 偏晚一个运输段 ⟹ Rule 3 的第 0 级（"赶得上"）多触发。
+        #    见 `rule_views.transport_point` 与 `PAJob.transportable_at`。
+        ready_at = float(view.jobs[j].transportable_at)
         plans[j][oi] = m
         proc = next(t for mm, t in view.jobs[j].alts if mm == m)
         # 账本推进（AEI2025 的 MCT_k / Σλ·pt）
-        led_mct[m] = advance_avail(view.machines[m].avail_at, view.now, float(proc))
+        # ⚠️ **用 `led_mct[m]` 而不是 `view.machines[m].avail_at`**（2026-10-17）：
+        #    盲化时后者恒为 0，拿它推进会**抹掉真账本的历史**。
+        #    **非盲化时两者逐位相同**（`view.machines[m].avail_at` 就是 `led_mct[m]`）。
+        led_mct[m] = advance_avail(led_mct[m], view.now, float(proc))
         led_assigned[m] += float(proc)
+        # ⚠️ **给 `ms_plan` 账本留料**（2026-10-18）：`_pa_dispatch` 时 LA 还没定车，
+        #    真正的运输完成在调用方（`_transporter`）拿到 `agv3` 后才算得出来。
+        stats["_pa_before"] = (j, oi, m, ready_at, float(led_mct[m] - float(proc)),
+                               float(proc))
         stats["pa_assigns"] = stats.get("pa_assigns", 0) + 1
         return j, oi, m, ready_at
 
@@ -2286,6 +2623,7 @@ class SimWorld:
         ⚠️ 回站任务（`is_last`）的终点恒为装卸站 ⟹ **不参与机台选择**，也不在 PA 的池里
         （池只含"还没定机台的待加工工序"，回站不是工序）。
         """
+        self._ms_plan = 0.0
         task_i = 0
         # ═══ 统一事件流（2026-10-08 第二稿）═══
         # 三条驱动方式（**同一套流**，只换"谁定机台"）：
@@ -2300,18 +2638,23 @@ class SimWorld:
         while True:
             frm_idx, job, oi, op, is_last = yield events_q.get()
             stats["trans_evt"] = stats.get("trans_evt", 0) + 1
-            n_ops = len(self.inst.jobs[job]) if job >= 0 else 0
             if frm_idx < 0:
                 # ⚠️ **扰动事件**：`DISTURBANCE`（AGV 故障 ⑨）或 `DISTURBANCE_MACHINE`（机障 ③）。
                 # 它们**不产生件**、也不改 `pending`，只是让下层/顶层**在扰动那一刻再决策一次**。
                 # ⑨：原文的决策点定义含它（见 §77.4 第 5 行）；**LA 侧对"趴窝车已订任务的重订"
                 # 未实现**，登记 §77.5。③：设计 §10⑤ 把机障列为**顶层**的触发之一。
+                #
+                # ⚠️ **2026-10-19 修**：此前的 `n_ops = len(self.inst.jobs[job])` 写在
+                #    **分支之前**，而扰动哨兵的 `job` 是**机台 id / AGV id**（不是工件号）。
+                #    随机实例里只要哨兵 id ≥ 工件数（如 11 工件 × 13 机台）就 `IndexError`。
+                #    `n_ops` 只在 `is_last` 分支用 ⟹ 移进那个分支。
                 stats["dist_events"] = stats.get("dist_events", 0) + 1
                 if frm_idx == DISTURBANCE_MACHINE:
                     stats["mf_dist_events"] = stats.get("mf_dist_events", 0) + 1
             elif is_last:                                   # 末工序完工 → 回装卸站
                 # ⚠️ 回站**不由 PA 决定**（终点恒为装卸站）⟹ 不走决策点，直接发。
                 # 这是与原文的一处小差异：他们的 dummy 工序（`J_i+1`）也进 PA 的动作。
+                n_ops = len(self.inst.jobs[job])
                 yield entities[frm_idx].out_q.get()
                 yield from self._emit_task(tasks_in, entities, stats, frm_idx, lu_idx,
                                            (job, n_ops, op, True), job, policy_l,
@@ -2359,11 +2702,47 @@ class SimWorld:
                     # 车**先订下**，件到了（下面的冲账）才进它的队列。
                     j3, oi3, m3, ready3 = got
                     src3 = lu_idx if oi3 == 0 else int(plans[j3][oi3 - 1])
-                    cand3 = list(range(len(tasks_in)))
-                    agv3 = int(policy_l(self._la_view(j3, oi3, src3, m3, ready3), cand3))
-                    if agv3 not in cand3:
-                        raise ValueError(f"policy_l 派了不存在的车 {agv3}；候选={cand3}")
-                    booking[(j3, oi3)] = agv3
+                    # ⚠️ **同机台相邻工序省略搬运**（2026-10-17）：不生成任务 ⟹ **也不订车**。
+                    same3 = (self.cfg.skip_same_machine_move and oi3 > 0
+                             and int(plans[j3][oi3 - 1]) == int(m3))
+                    if not same3:
+                        cand3 = list(range(len(tasks_in)))
+                        view3 = self._la_view(j3, oi3, src3, m3, ready3)
+                        agv3 = int(policy_l(view3, cand3))
+                        if agv3 not in cand3:
+                            raise ValueError(f"policy_l 派了不存在的车 {agv3}；候选={cand3}")
+                        booking[(j3, oi3)] = agv3
+                        # ⚠️ **`cfg.agv_act_book`**：派车那一刻推进 `ACT_v` 账本（见原注释）。
+                        if self.cfg.agv_act_book:
+                            act3 = self._live_stats.setdefault(
+                                "agv_act", [0.0] * self.cfg.n_agv)
+                            act3[agv3] = (max(float(act3[agv3]), float(ready3))
+                                          + view3.empty_leg(agv3)
+                                          + view3.loaded_leg(agv3))
+                            if self.cfg.agv_plan_pos:
+                                self._live_stats.setdefault(
+                                    "agv_plan_pos",
+                                    [-1] * self.cfg.n_agv)[agv3] = view3.to_node
+                        if self.cfg.agv_act_book:
+                            lct3 = float(act3[agv3])
+                        else:
+                            lct3 = (max(float(view3.vehicles[agv3].free_at),
+                                        float(ready3))
+                                    + view3.empty_leg(agv3)
+                                    + view3.loaded_leg(agv3))
+                    else:
+                        lct3 = float(ready3)
+                    # ⚠️ **`ms_plan` 账本**（2026-10-18，对齐 Shi Eq.50–51）：
+                    #    本次 assign 的预计完工 = max(运输完成, 机台可用) + 加工时长。
+                    #    末工序**再加上回站段**（原文的 dummy 回站 op）。
+                    _pb = stats.get("_pa_before")
+                    if _pb is not None:
+                        _j4, _oi4, _m4, _r4, _mct4, _proc4 = _pb
+                        _ct4 = max(float(lct3), float(_mct4)) + float(_proc4)
+                        if _oi4 == len(self.inst.jobs[_j4]) - 1:
+                            _ct4 += self.leg_min(self._node_of(int(_m4)),
+                                                 self._node_of(int(lu_idx)))
+                        self._ms_plan = max(self._ms_plan, float(_ct4))
             elif online_s and job >= 0:
                 # 旧消融路径：S 层当场定机台（`_pick_machine` 把结果写进 `plans`）
                 self._pick_machine(job, oi + 1, policy_s, True, plans)
@@ -2376,6 +2755,14 @@ class SimWorld:
                 n2 = len(self.inst.jobs[j2])
                 t2 = next(t for mm, t in self.inst.jobs[j2][oi2] if mm == m2)
                 item2 = (j2, oi2, OpLite(t2), oi2 == n2 - 1)
+                if self.cfg.skip_same_machine_move and int(src2) == int(m2):
+                    # ⚠️ **同机台相邻工序**：原文省略这一趟 ⟹ 直接放回同一台机台的输入缓冲。
+                    yield entities[m2].in_q.put(item2)
+                    self._job_loc[j2] = int(m2)
+                    self._job_agv[j2] = -1
+                    booking.pop((j2, oi2), None)
+                    del pending[j2]
+                    continue
                 yield from self._emit_task(tasks_in, entities, stats, src2, m2, item2,
                                            j2, policy_l, bound, agv_phi, task_i,
                                            agv=booking.pop((j2, oi2), None))
@@ -2390,6 +2777,7 @@ class SimWorld:
         ⟹ 直接进它的队列，不再问一次策略——同一程问两次会拿到两个答案。
         """
         from .corridors import shortest_node_path
+        was_booked = agv is not None
         _path = shortest_node_path(self.g, entities[frm].pad.dock_node,
                                    entities[to].pad.dock_node)   # AGV 实际经过的节点序列
         task = (frm, to, item, _path)
@@ -2424,5 +2812,18 @@ class SimWorld:
             # 空载段取决于车的当前停位，此处不反推（登记 §72.1）。
             est = self.leg_min(self._node_of(frm), self._node_of(to))
             act = self._live_stats.setdefault("agv_act", [0.0] * self.cfg.n_agv)
-            act[agv] = advance_avail(act[agv], float(self.env.now), est)
+            # ⚠️ **已预订的任务不再重复推进**（`cfg.agv_act_book` 打开时）：
+            #    那笔账在派车那一刻（`_transporter` 的 booking 处）就已经记过了，
+            #    而且记的是**完整一趟**（`max(act, ready) + 空载 + 负载`）——
+            #    这里再按 `max(act, now) + 负载` 记一次就是**双重计数**。
+            #    `was_booked=False`（回站那条兜底路）仍走旧式，因为它确实没有预订点。
+            if not (self.cfg.agv_act_book and was_booked):
+                act[agv] = advance_avail(act[agv], float(self.env.now), est)
+            # ⚠️ **已派任务的预计目的地**（`cfg.agv_plan_pos`，2026-10-16）——
+            #    原文 LA 的 `l''` = *"完成上一任务后的位置"*（`citation-cards.md:1556`）。
+            #    派车那一刻就写下终点，LA 下次读的是它，不是车的物理位置。
+            #    **只在开关打开时写** ⟹ 关态逐位等于旧口径（连 `_live_stats` 都不多一个键）。
+            if self.cfg.agv_plan_pos:
+                self._live_stats.setdefault(
+                    "agv_plan_pos", [-1] * self.cfg.n_agv)[agv] = self._node_of(to)
         stats["tasks_put"] = stats.get("tasks_put", 0) + 1

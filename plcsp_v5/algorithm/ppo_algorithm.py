@@ -37,6 +37,7 @@ class PPOAlgorithm(object):
         self.n_machine = args['n_machine']
         self.n_total_task = self.n_job * self.n_machine
         self.batch_size = args['env_batch']
+        self.algo = args.get('algo', 'ppo')  # [v5] 'ppo' (critics) or 'grpo' (critic-free)
 
         self.GAMMA = args['GAMMA'] # reward折扣率
         self.LAMDA = args['LAMDA'] # GAE参数
@@ -51,44 +52,61 @@ class PPOAlgorithm(object):
         CNN、MLP、新版合并action和critic的网络参考D:/research/DeepReinforcementLearningScheduling/plcsp_v5/ppo_algorithm.py  TODO 250422-删除为了简便，别纠结，魔改！
         """
         
+        encoder_type = args.get('encoder_type', 'e2e')
+        self.use_pref_embed = bool(args.get('pref_embed', 0))
+        self.pref_dim = int(args.get('pref_dim', 16))
+        if self.use_pref_embed:
+            if encoder_type != 'e2e':
+                raise ValueError(
+                    "pref_embed is implemented for encoder_type=e2e only")
+            from model.preference import PreferenceEmbedding
+            self.pref_embed = PreferenceEmbedding(
+                3, hidden_dim=32, out_dim=self.pref_dim).to(device)
+            self.pref_optimizer = torch.optim.Adam(
+                self.pref_embed.parameters(), lr=args['LR'],
+                eps=args['lr_eps'])
+
         """
         初始化GCN的网络：
         1、分别初始化：选择machine + 选择operation + 全局critic网络（单独列出，不像eswa的合并在选择job中，会用task节点+全图节点+m的全图节点来训练）
         2、因为我想的全局critic分别用了选m和选o的数据，优化器不好选择
         3、不用old网络，直接单个网络采集+记录作为old。ReplayBuffer方式
         """
-        self.job_actor = Operation_Actor_JointAction_selfCritic(configs=args).to(device)  # 别忘了上GPU.初始化无参数传入
-        self.job_actor_optimizer = torch.optim.Adam(self.job_actor.parameters(),
-                                                    lr=args['LR'],
-                                                    eps=args['lr_eps'])  # 修改adam优化器默认的eps，提高训练性能
-        # 学习率的调度器，逐渐衰减！（每过step_size就乘以一个系数衰减）
-        self.job_actor_lr_decay = torch.optim.lr_scheduler.StepLR(self.job_actor_optimizer,
-                                                                  step_size=args['decay_step_size'],
-                                                                  gamma=args['decay_ratio'])
-
-        self.machine_actor_gcn = Machine_Actor_JointAction_selfGAT_selfCritic(configs=args).to(device)  # m节点的池化聚合 + MLPActor的网络
-        # TODO 0108-新增消融实验，只用1个m的状态，然后只能用MLP！
-        # # self.machine_actor_gcn = ablation_Machine_Actor_JointAction_selfGAT_selfCritic(configs=args).to(device)  # m节点的池化聚合 + MLPActor的网络
-        self.machine_actor_optimizer_gcn = torch.optim.Adam(self.machine_actor_gcn.parameters(),
-                                                            lr=args['LR'],
-                                                            eps=args['lr_eps'])  # 修改adam优化器默认的eps，提高训练性能
-        # 学习率的调度器，逐渐衰减！（每过step_size就乘以一个系数衰减）
-        self.machine_actor_lr_decay_gcn = torch.optim.lr_scheduler.StepLR(self.machine_actor_optimizer_gcn, 
-                                                                  step_size=args['decay_step_size'],
-                                                                  gamma=args['decay_ratio'])
-
-        
-        self.global_critic = Global_Critic_JointAction_GAT(configs=args).to(device)  # m节点的池化聚合 + MLPActor的网络
-        self.global_critic_optimizer = torch.optim.Adam(self.global_critic.parameters(),
+        # [v5] the settrans branch builds its own ST actors; skip the E2E
+        # GIN/GAT construction entirely so those modules are never created.
+        if encoder_type != 'settrans':
+            self.job_actor = Operation_Actor_JointAction_selfCritic(configs=args).to(device)  # 别忘了上GPU.初始化无参数传入
+            self.job_actor_optimizer = torch.optim.Adam(self.job_actor.parameters(),
                                                         lr=args['LR'],
                                                         eps=args['lr_eps'])  # 修改adam优化器默认的eps，提高训练性能
-        # 学习率的调度器，逐渐衰减！（每过step_size就乘以一个系数衰减）
-        self.global_critic_lr_decay = torch.optim.lr_scheduler.StepLR(self.global_critic_optimizer,
+            # 学习率的调度器，逐渐衰减！（每过step_size就乘以一个系数衰减）
+            self.job_actor_lr_decay = torch.optim.lr_scheduler.StepLR(self.job_actor_optimizer,
                                                                       step_size=args['decay_step_size'],
                                                                       gamma=args['decay_ratio'])
 
+            self.machine_actor_gcn = Machine_Actor_JointAction_selfGAT_selfCritic(configs=args).to(device)  # m节点的池化聚合 + MLPActor的网络
+            # TODO 0108-新增消融实验，只用1个m的状态，然后只能用MLP！
+            # # self.machine_actor_gcn = ablation_Machine_Actor_JointAction_selfGAT_selfCritic(configs=args).to(device)  # m节点的池化聚合 + MLPActor的网络
+            self.machine_actor_optimizer_gcn = torch.optim.Adam(self.machine_actor_gcn.parameters(),
+                                                                lr=args['LR'],
+                                                                eps=args['lr_eps'])  # 修改adam优化器默认的eps，提高训练性能
+            # 学习率的调度器，逐渐衰减！（每过step_size就乘以一个系数衰减）
+            self.machine_actor_lr_decay_gcn = torch.optim.lr_scheduler.StepLR(self.machine_actor_optimizer_gcn,
+                                                                      step_size=args['decay_step_size'],
+                                                                      gamma=args['decay_ratio'])
+
+
+            self.global_critic = Global_Critic_JointAction_GAT(configs=args).to(device)  # m节点的池化聚合 + MLPActor的网络
+            self.global_critic_optimizer = torch.optim.Adam(self.global_critic.parameters(),
+                                                            lr=args['LR'],
+                                                            eps=args['lr_eps'])  # 修改adam优化器默认的eps，提高训练性能
+            # 学习率的调度器，逐渐衰减！（每过step_size就乘以一个系数衰减）
+            self.global_critic_lr_decay = torch.optim.lr_scheduler.StepLR(self.global_critic_optimizer,
+                                                                          step_size=args['decay_step_size'],
+                                                                          gamma=args['decay_ratio'])
+
         # [v5] optional Set Transformer encoders (two independent sets)
-        if args.get('encoder_type', 'e2e') == 'settrans':
+        if encoder_type == 'settrans':
             from model.actor_critic_st import (
                 Operation_Actor_SetTransformer,
                 Machine_Actor_SetTransformer,
@@ -158,6 +176,11 @@ class PPOAlgorithm(object):
                 gamma=args['decay_ratio'])
         # [v5] Stage-0 AGV actor (independent of the encoder choice)
         self.use_agv = bool(args.get('use_agv', 0))
+        self.agv_rule = bool(args.get('agv_rule', 0))
+        self.agv_top_rule = bool(args.get('agv_top_rule', 0))
+        self.agv_dst_actor = bool(args.get('agv_dst_actor', 1))
+        self.train_agv_actor = (self.use_agv and not self.agv_rule
+                                and not self.agv_top_rule)
         if self.use_agv:
             try:
                 from agv.actor import AgvActor_SetTransformer
@@ -499,7 +522,7 @@ class PPOAlgorithm(object):
     
     
     
-    def step_for_net_out_Critic_GAT(self, net_model, task_fea, graph_pool_avg, adj, candidate, machine_fea1, machine_fea2, machine_fea3=None, task_ctx=None, trans_wrk=None, idle_wrk=None):
+    def step_for_net_out_Critic_GAT(self, net_model, task_fea, graph_pool_avg, adj, candidate, machine_fea1, machine_fea2, machine_fea3=None, task_ctx=None, trans_wrk=None, idle_wrk=None, pref_emb=None):
         out_temp_lst = []
         # BUG：小改进，是不是直接全输入到net_model中去，直接就是buffer_step * env_batch * 1的输出？
         for i in range(task_fea.shape[0]):  # 求取step的个数: buffer_step
@@ -513,7 +536,8 @@ class PPOAlgorithm(object):
                                         if machine_fea3 is not None else None),
                           task_ctx=(task_ctx[i] if task_ctx is not None else None),
                           trans_wrk=(trans_wrk[i] if trans_wrk is not None else None),
-                          idle_wrk=(idle_wrk[i] if idle_wrk is not None else None)
+                          idle_wrk=(idle_wrk[i] if idle_wrk is not None else None),
+                          pref_emb=(pref_emb[i] if pref_emb is not None else None)
                           )  # batch * 1 mlp只有一个state
             out_temp_lst.append(v)
         out = torch.stack(out_temp_lst, dim=0)  # 沿着第一个维度堆叠，list[tensor_1, tensor_2, ..., tensor_32]变成一个大tensor
@@ -655,6 +679,9 @@ class PPOAlgorithm(object):
             task_ctx = task_ctx_ = None
         if not args.get('st_edge_features', 0):
             trans = idle = trans_ = idle_ = None
+        use_hier = bool(args.get('hier', 0))
+        pref_all = (self.pref_embed(random_weight).detach()
+                    if self.use_pref_embed else None)
         # print("333:{}".format(get_GPU_usage()[1]))
         
         # print("---ReplayBuffer记录的： random_weight = {}， shape={}".format(random_weight, random_weight.shape))
@@ -730,7 +757,8 @@ class PPOAlgorithm(object):
                         machine_fea3=machine_fea3,
                         task_ctx=task_ctx,
                         trans_wrk=trans,
-                        idle_wrk=idle
+                        idle_wrk=idle,
+                        pref_emb=pref_all
                         )    # 按照step重新输入，shape = buffer_step * env_batch * 1
             
             # TODO 所以我需要自己建立一个最后一个step是随机值的m_fea1_(计算adv的只会进行一次，我感觉可以！)（因为没有task可选，没有候选m节点特征了）
@@ -760,7 +788,8 @@ class PPOAlgorithm(object):
                         machine_fea3=machine_fea3_,
                         task_ctx=task_ctx_,
                         trans_wrk=trans_,
-                        idle_wrk=idle_
+                        idle_wrk=idle_,
+                        pref_emb=pref_all
                         )  # 按照step重新输入，shape = buffer_step * env_batch * 1
 
             """-------------------------以上是全局value的采集！  +  j_v_和m_v_已经在外部采样并且记录在buffer里边！！-------------------------"""
@@ -837,13 +866,19 @@ class PPOAlgorithm(object):
                 # print("888:{}".format(get_GPU_usage()[1]))
                 
                 h_mch_pooled = None  # 初始化的时候m的全图特征=none，然后都用实时更新特征，不用保存
+                pref_mb = (self.pref_embed(random_weight[index])
+                           if self.use_pref_embed else None)
                 o_prob_lst = []  # 记录输出的可选task节点的概率！
                 m_prob_lst = []  # 记录输出的可选machine节点的概率！
                 lst_job_v = []  # 记录重新采样的自身的value值
                 lst_machine_v = []
                 agv_prob_lst = []  # [v5] AGV action probabilities per step
                 agv_v_lst = []     # [v5] AGV local critic values per step
+                agv_dst_prob_lst = []  # [v5] destination AGV probabilities
+                agv_dst_v_lst = []     # [v5] destination AGV critic values
                 for i in range(tasks_fea[index].shape[0]):  # 求取step的个数: mini_batch的个数
+                    pref_i = (pref_mb[i]
+                              if pref_mb is not None else None)
 
                     """
                     重采样
@@ -869,7 +904,11 @@ class PPOAlgorithm(object):
                                 idle_wrk=(idle[index][i]
                                           if idle is not None else None),
                                 task_ctx=(task_ctx[index][i]
-                                          if task_ctx is not None else None))
+                                          if task_ctx is not None else None),
+                                score_bias=(torch.from_numpy(
+                                    replay_buffer.job_bias[index][i]
+                                ).float().to(device) if use_hier else None),
+                                pref_emb=pref_i)
                     o_prob_lst.append(prob)  # 输出action的概率：mini_batch_size * env_batch * job
                     lst_job_v.append(job_v)  # 输出自身的value：mini_batch_size * env_batch * 2
 
@@ -884,18 +923,41 @@ class PPOAlgorithm(object):
                                 machine_fea_2=machine_fea2[index][i],
                                 h_pooled_o=h_g_o_pooled,
                                 machine_mask=mask_machine_batch_[index][i],
-                                machine_fea_3=machine_fea3[index][i])
+                                machine_fea_3=machine_fea3[index][i],
+                                score_bias=(torch.from_numpy(
+                                    replay_buffer.machine_bias[index][i]
+                                ).float().to(device) if use_hier else None),
+                                pref_emb=pref_i)
                     m_prob_lst.append(mch_prob)  # mini_batch * env_batch * m
                     lst_machine_v.append(mac_v)  # 输出自身的value：mini_batch_size * env_batch * 2
 
                     # [v5] re-run the AGV actor on the stored AGV state
-                    if self.use_agv:
+                    if self.train_agv_actor:
                         _af = torch.from_numpy(replay_buffer.agv_feat[index][i]).float().to(device)
                         _ac = torch.from_numpy(replay_buffer.agv_ctx[index][i]).float().to(device)
                         _am = replay_buffer.agv_mask[index][i].to(device)
-                        _aprob, _aval = self.agv_actor(_af, _ac, _am)
+                        _ab = torch.from_numpy(
+                            replay_buffer.agv_bias[index][i]
+                        ).float().to(device)
+                        _aprob, _aval = self.agv_actor(
+                            _af, _ac, _am, logit_bias=_ab)
                         agv_prob_lst.append(_aprob)
                         agv_v_lst.append(_aval)
+                        if self.agv_dst_actor:
+                            _adf = torch.from_numpy(
+                                replay_buffer.agv_dst_feat[index][i]
+                            ).float().to(device)
+                            _adc = torch.from_numpy(
+                                replay_buffer.agv_dst_ctx[index][i]
+                            ).float().to(device)
+                            _adm = replay_buffer.agv_dst_mask[index][i].to(device)
+                            _adb = torch.from_numpy(
+                                replay_buffer.agv_dst_bias[index][i]
+                            ).float().to(device)
+                            _adprob, _adv = self.agv_actor(
+                                _adf, _adc, _adm, logit_bias=_adb)
+                            agv_dst_prob_lst.append(_adprob)
+                            agv_dst_v_lst.append(_adv)
 
                 # 沿着第一个维度堆叠，list[tensor_1, tensor_2, ..., tensor_32]变成一个大tensor
                 j_action_prob = torch.stack(o_prob_lst,dim=0)  # mini_batch_size * env_batch * job
@@ -1076,8 +1138,8 @@ class PPOAlgorithm(object):
                 machine_actor_loss = -2 * global_loss_machine + (-1) * local_loss_machine + 0.5 * machine_critic_loss - self.ENTROPY_BETA * machine_dist_entropy
 
                 # [v5] Stage-0 AGV policy loss (stacked over the minibatch)
-                if self.use_agv:
-                    agv_action_prob = torch.stack(agv_prob_lst, dim=0)  # (mini_bs, B, n_agv+1)
+                if self.train_agv_actor:
+                    agv_action_prob = torch.stack(agv_prob_lst, dim=0)  # (mini_bs, B, n_agv)
                     agv_v_now = torch.stack(agv_v_lst, dim=0)  # (mini_bs, B, 2)
                     agv_dist_now = Categorical(probs=agv_action_prob)
                     agv_logprob_now = agv_dist_now.log_prob(
@@ -1116,6 +1178,52 @@ class PPOAlgorithm(object):
                                   + 0.5 * agv_critic_loss
                                   - self.ENTROPY_BETA * agv_dist_now.entropy())
                     agv_loss_i = agv_loss_i * replay_buffer.agv_valid[index].to(device).float()
+
+                    if self.agv_dst_actor:
+                        dst_action_prob = torch.stack(
+                            agv_dst_prob_lst, dim=0)
+                        dst_v_now = torch.stack(agv_dst_v_lst, dim=0)
+                        dst_dist_now = Categorical(probs=dst_action_prob)
+                        dst_logprob_now = dst_dist_now.log_prob(
+                            replay_buffer.a_agv_dst[index].to(device))
+                        dst_ratios = torch.exp(
+                            dst_logprob_now
+                            - replay_buffer.a_agv_dst_logprob[index]
+                            .to(device).detach())
+                        _s1_d = dst_ratios * _adv_agv
+                        _s2_d = torch.clamp(
+                            dst_ratios, 1 - self.epsilon,
+                            1 + self.epsilon) * _adv_agv
+                        global_loss_dst = torch.min(_s1_d, _s2_d)
+                        _dst_v_old = replay_buffer.agv_dst_v[index].to(device)
+                        _dst_adv_mk = job_v_target_mk[index] - _dst_v_old[:, :, 0]
+                        _dst_adv_it = job_v_target_it[index] - _dst_v_old[:, :, 1]
+                        _s1_d_mk = dst_ratios * _dst_adv_mk
+                        _s2_d_mk = torch.clamp(
+                            dst_ratios, 1 - self.epsilon,
+                            1 + self.epsilon) * _dst_adv_mk
+                        _s1_d_it = dst_ratios * _dst_adv_it
+                        _s2_d_it = torch.clamp(
+                            dst_ratios, 1 - self.epsilon,
+                            1 + self.epsilon) * _dst_adv_it
+                        local_loss_dst = (
+                            _w_mk * torch.min(_s1_d_mk, _s2_d_mk)
+                            + _w_ec * torch.min(_s1_d_it, _s2_d_it))
+                        dst_critic_loss_mk = self.global_critic_loss_func(
+                            _w_mk * job_v_target_mk[index],
+                            _w_mk * dst_v_now[:, :, 0])
+                        dst_critic_loss_it = self.global_critic_loss_func(
+                            _w_ec * job_v_target_it[index],
+                            _w_ec * dst_v_now[:, :, 1])
+                        dst_critic_loss = (dst_critic_loss_mk
+                                           + dst_critic_loss_it)
+                        dst_loss_i = (-2 * global_loss_dst - local_loss_dst
+                                      + 0.5 * dst_critic_loss
+                                      - self.ENTROPY_BETA
+                                      * dst_dist_now.entropy())
+                        dst_loss_i = dst_loss_i * replay_buffer.agv_dst_valid[
+                            index].to(device).float()
+                        agv_loss_i = agv_loss_i + dst_loss_i
                 
                 Logger.log("Training/buffer_done/actor_loss", f"job_actor_loss={job_actor_loss.shape}, machine_actor_loss={machine_actor_loss.shape}", print_true=1)  # 两个job和machine的网络的loss
                 
@@ -1129,13 +1237,20 @@ class PPOAlgorithm(object):
         
                 self.job_actor_optimizer.zero_grad()
                 self.machine_actor_optimizer_gcn.zero_grad()
-                if self.use_agv:
+                if self.train_agv_actor:
                     self.agv_optimizer.zero_grad()
+                if self.use_pref_embed:
+                    self.pref_optimizer.zero_grad()
 
                 loss = job_actor_loss.mean() + machine_actor_loss.mean()
-                if self.use_agv:
+                if self.train_agv_actor:
                     loss = loss + agv_loss_i.mean()
-                loss.backward()
+                if self.use_pref_embed:
+                    # The shared preference embedding is also used by the
+                    # global-critic loss below; keep its graph alive.
+                    loss.backward(retain_graph=True)
+                else:
+                    loss.backward()
 
                 # Gradient clip must run after backward() and before step().
                 if args['use_grad_clip']:  # Trick 7: Gradient clip
@@ -1145,14 +1260,14 @@ class PPOAlgorithm(object):
                     a_grad_norm = torch.nn.utils.clip_grad_norm_(
                         self.machine_actor_gcn.parameters(), args['CLIP_GRAD'])
                     a_grad_norm_lst.append(a_grad_norm)
-                    if self.use_agv:
+                    if self.train_agv_actor:
                         torch.nn.utils.clip_grad_norm_(
                             self.agv_actor.parameters(), args['CLIP_GRAD'])
 
                 self.job_actor_optimizer.step()
                 # print("999:{}".format(get_GPU_usage()[1]))
                 self.machine_actor_optimizer_gcn.step()
-                if self.use_agv:
+                if self.train_agv_actor:
                     self.agv_optimizer.step()
                 # print("777:{}".format(get_GPU_usage()[1]))
                 
@@ -1175,7 +1290,9 @@ class PPOAlgorithm(object):
                             trans_wrk=(trans[index]
                                        if trans is not None else None),
                             idle_wrk=(idle[index]
-                                      if idle is not None else None)
+                                      if idle is not None else None),
+                            pref_emb=(pref_mb
+                                      if pref_mb is not None else None)
                             )  # 按照step重新输入，shape = buffer_step * env_batch * 4
                             
                 """
@@ -1214,6 +1331,11 @@ class PPOAlgorithm(object):
                                                                  args['CLIP_GRAD'])  # 梯度裁剪，默认是0.5
                     v_grad_norm_lst.append(v_grad_norm)  # 保存minibatch的每一次的梯度缩放因子
                 self.global_critic_optimizer.step()
+                if self.use_pref_embed:
+                    if args['use_grad_clip']:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.pref_embed.parameters(), args['CLIP_GRAD'])
+                    self.pref_optimizer.step()
                 
                 # print("1111:{}".format(get_GPU_usage()[1]))
                 
@@ -1296,8 +1418,265 @@ class PPOAlgorithm(object):
                         torch.std(torch.stack(loss_dict['global_critic_loss']), dim=0).detach().cpu().numpy()]
         
         # return loss_dict, grad_norm_dict  # 返回k_epoch个元素的loss字典 + 总梯度范数字典
-        return loss_mean_lst, loss_std_lst  # 返回k_epoch次训练的loss的mean和std，转为数组！ 
-    
+        return loss_mean_lst, loss_std_lst  # 返回k_epoch次训练的loss的mean和std，转为数组！
+
+    def global_update_JointActions_GAT_grpo(
+            self, replay_buffer, all_steps, graph_pool_avg, args, mini_bs,
+            group_costs):
+        """Critic-free GRPO update: group-normalized scalar returns.
+
+        ``group_costs`` is a list of G ``(4, env_batch)`` arrays
+        ``[mk, pt, transT, idleT]`` for the *same* instances.  The scalar
+        return is lambda-weighted cost, negated before normalization so a
+        positive advantage means lower cost, and used as the PPO advantage
+        for every step of that rollout.
+        """
+        if group_costs is None or len(group_costs) != args['buffer_size']:
+            raise ValueError(
+                f"GRPO needs {args['buffer_size']} group returns, "
+                f"got {0 if group_costs is None else len(group_costs)}")
+
+        self.job_actor.train()
+        self.machine_actor_gcn.train()
+        if self.train_agv_actor:
+            self.agv_actor.train()
+
+        (
+            adj, tasks_fea, candidate, mask_operation, a_operation,
+            a_logprob_operation, adj_, tasks_fea_, candidate_,
+            mask_operation_, reward, done,
+            machine_fea2, a_machine, a_machine_logprob, machine_fea2_,
+            mask_machine_batch_, mk_r, pt_r, tt_r, it_r, machine_fea1,
+            machine_fea3, task_ctx, task_ctx_, trans, idle, trans_, idle_,
+            random_weight, job_v, machine_v, job_v_, machine_v_,
+        ) = replay_buffer.numpy_to_tensor_operation()
+        if not args.get('st_task_features', 0):
+            task_ctx = task_ctx_ = None
+        if not args.get('st_edge_features', 0):
+            trans = idle = trans_ = idle_ = None
+        use_hier = bool(args.get('hier', 0))
+
+        costs = torch.as_tensor(
+            np.asarray(group_costs), dtype=torch.float32, device=device)
+        w_mk = float(args['weight_mk'])
+        w_ec = float(args['weight_ec'])
+        w_tt = float(args['weight_tt'])
+        scalar = (w_mk * costs[:, 0]
+                  + w_ec * (costs[:, 1] + costs[:, 3])
+                  + w_tt * costs[:, 2])
+        mean = scalar.mean(dim=0, keepdim=True)
+        std = scalar.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-6)
+        # ``scalar`` is a cost: lower is better.  Negate so a positive
+        # advantage means lower cost, matching the reward-based PPO path.
+        adv = -((scalar - mean) / std)
+        tasks_n = self.n_total_task
+        grpo_adv = adv.repeat_interleave(tasks_n, dim=0)
+        if grpo_adv.shape[0] != tasks_fea.shape[0]:
+            raise ValueError(
+                f"GRPO advantage length {grpo_adv.shape[0]} != "
+                f"buffer steps {tasks_fea.shape[0]}")
+
+        loss_dict = {"job_actor_loss": [], "machine_actor_loss": [],
+                     "global_critic_loss": []}
+        for i_K in range(args['K_epochs']):
+            actor_loss_lst = []
+            actor_loss_lst_operation = []
+            critic_loss_lst = []
+            for index in BatchSampler(
+                    SubsetRandomSampler(range(tasks_fea.shape[0])),
+                    mini_bs, False):
+                h_mch_pooled = None
+                pref_mb = (self.pref_embed(random_weight[index])
+                           if self.use_pref_embed else None)
+                o_prob_lst = []
+                m_prob_lst = []
+                agv_prob_lst = []
+                agv_dst_prob_lst = []
+                for i in range(tasks_fea[index].shape[0]):
+                    pref_i = (pref_mb[i]
+                              if pref_mb is not None else None)
+                    _, _, _, prob, h_g_o_pooled, _ = self.job_actor(
+                        x_fea=tasks_fea[index][i],
+                        graph_pool_avg=graph_pool_avg,
+                        padded_nei=None,
+                        adj=adj[index][i],
+                        candidate=candidate[index][i],
+                        h_g_m_pooled=h_mch_pooled,
+                        mask_operation=mask_operation[index][i],
+                        use_greedy=False,
+                        trans_wrk=(trans[index][i]
+                                   if trans is not None else None),
+                        idle_wrk=(idle[index][i]
+                                  if idle is not None else None),
+                        task_ctx=(task_ctx[index][i]
+                                  if task_ctx is not None else None),
+                        score_bias=(torch.from_numpy(
+                            replay_buffer.job_bias[index][i]
+                        ).float().to(device) if use_hier else None),
+                        pref_emb=pref_i)
+                    o_prob_lst.append(prob)
+
+                    mch_prob, h_mch_pooled, _ = self.machine_actor_gcn(
+                        machine_fea_1=machine_fea1[index][i],
+                        machine_fea_2=machine_fea2[index][i],
+                        h_pooled_o=h_g_o_pooled,
+                        machine_mask=mask_machine_batch_[index][i],
+                        machine_fea_3=machine_fea3[index][i],
+                        score_bias=(torch.from_numpy(
+                            replay_buffer.machine_bias[index][i]
+                        ).float().to(device) if use_hier else None),
+                        pref_emb=pref_i)
+                    m_prob_lst.append(mch_prob)
+
+                    if self.train_agv_actor:
+                        _af = torch.from_numpy(
+                            replay_buffer.agv_feat[index][i]).float().to(device)
+                        _ac = torch.from_numpy(
+                            replay_buffer.agv_ctx[index][i]).float().to(device)
+                        _am = replay_buffer.agv_mask[index][i].to(device)
+                        _ab = torch.from_numpy(
+                            replay_buffer.agv_bias[index][i]
+                        ).float().to(device)
+                        _aprob, _ = self.agv_actor(
+                            _af, _ac, _am, logit_bias=_ab)
+                        agv_prob_lst.append(_aprob)
+                        if self.agv_dst_actor:
+                            _adf = torch.from_numpy(
+                                replay_buffer.agv_dst_feat[index][i]
+                            ).float().to(device)
+                            _adc = torch.from_numpy(
+                                replay_buffer.agv_dst_ctx[index][i]
+                            ).float().to(device)
+                            _adm = replay_buffer.agv_dst_mask[index][i].to(device)
+                            _adb = torch.from_numpy(
+                                replay_buffer.agv_dst_bias[index][i]
+                            ).float().to(device)
+                            _adprob, _ = self.agv_actor(
+                                _adf, _adc, _adm, logit_bias=_adb)
+                            agv_dst_prob_lst.append(_adprob)
+
+                j_action_prob = torch.stack(o_prob_lst, dim=0)
+                m_action_prob = torch.stack(m_prob_lst, dim=0)
+                j_dist_now = Categorical(probs=j_action_prob)
+                m_dist_now = Categorical(probs=m_action_prob)
+                j_logprob_now = j_dist_now.log_prob(a_operation[index])
+                m_logprob_now = m_dist_now.log_prob(a_machine[index])
+                job_ratios = torch.exp(
+                    j_logprob_now - a_logprob_operation[index].detach())
+                machine_ratios = torch.exp(
+                    m_logprob_now - a_machine_logprob[index].detach())
+                adv_mini = grpo_adv[index]
+
+                job_loss = (-torch.min(
+                    job_ratios * adv_mini,
+                    torch.clamp(job_ratios, 1 - self.epsilon,
+                                1 + self.epsilon) * adv_mini)
+                    - self.ENTROPY_BETA * j_dist_now.entropy())
+                machine_loss = (-torch.min(
+                    machine_ratios * adv_mini,
+                    torch.clamp(machine_ratios, 1 - self.epsilon,
+                                1 + self.epsilon) * adv_mini)
+                    - self.ENTROPY_BETA * m_dist_now.entropy())
+
+                self.job_actor_optimizer.zero_grad()
+                self.machine_actor_optimizer_gcn.zero_grad()
+                if self.train_agv_actor:
+                    self.agv_optimizer.zero_grad()
+                if self.use_pref_embed:
+                    self.pref_optimizer.zero_grad()
+                loss = job_loss.mean() + machine_loss.mean()
+
+                if self.train_agv_actor:
+                    agv_prob = torch.stack(agv_prob_lst, dim=0)
+                    agv_dist_now = Categorical(probs=agv_prob)
+                    agv_logprob_now = agv_dist_now.log_prob(
+                        replay_buffer.a_agv[index].to(device))
+                    agv_ratios = torch.exp(
+                        agv_logprob_now
+                        - replay_buffer.a_agv_logprob[index].to(device).detach())
+                    agv_loss = (-torch.min(
+                        agv_ratios * adv_mini,
+                        torch.clamp(agv_ratios, 1 - self.epsilon,
+                                    1 + self.epsilon) * adv_mini)
+                        - self.ENTROPY_BETA * agv_dist_now.entropy())
+                    agv_loss = agv_loss * replay_buffer.agv_valid[index].to(
+                        device).float()
+                    loss = loss + agv_loss.mean()
+
+                    if self.agv_dst_actor:
+                        dst_prob = torch.stack(agv_dst_prob_lst, dim=0)
+                        dst_dist_now = Categorical(probs=dst_prob)
+                        dst_logprob_now = dst_dist_now.log_prob(
+                            replay_buffer.a_agv_dst[index].to(device))
+                        dst_ratios = torch.exp(
+                            dst_logprob_now
+                            - replay_buffer.a_agv_dst_logprob[index]
+                            .to(device).detach())
+                        dst_loss = (-torch.min(
+                            dst_ratios * adv_mini,
+                            torch.clamp(dst_ratios, 1 - self.epsilon,
+                                        1 + self.epsilon) * adv_mini)
+                            - self.ENTROPY_BETA * dst_dist_now.entropy())
+                        dst_loss = dst_loss * replay_buffer.agv_dst_valid[
+                            index].to(device).float()
+                        loss = loss + dst_loss.mean()
+
+                loss.backward()
+                if args['use_grad_clip']:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.job_actor.parameters(), args['CLIP_GRAD'])
+                    torch.nn.utils.clip_grad_norm_(
+                        self.machine_actor_gcn.parameters(), args['CLIP_GRAD'])
+                    if self.train_agv_actor:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.agv_actor.parameters(), args['CLIP_GRAD'])
+                self.job_actor_optimizer.step()
+                self.machine_actor_optimizer_gcn.step()
+                if self.train_agv_actor:
+                    self.agv_optimizer.step()
+                if self.use_pref_embed:
+                    if args['use_grad_clip']:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.pref_embed.parameters(), args['CLIP_GRAD'])
+                    self.pref_optimizer.step()
+
+                actor_loss_lst_operation.append(job_loss.mean().detach())
+                actor_loss_lst.append(machine_loss.mean().detach())
+                critic_loss_lst.append(torch.zeros((), device=device))
+
+            loss_dict["job_actor_loss"].append(
+                torch.mean(torch.stack(actor_loss_lst_operation)))
+            loss_dict["machine_actor_loss"].append(
+                torch.mean(torch.stack(actor_loss_lst)))
+            loss_dict["global_critic_loss"].append(
+                torch.mean(torch.stack(critic_loss_lst)))
+            Logger.log(
+                "Training/buffer_done/update_1_epoch_done",
+                f"--------GRPO K_epoch: {i_K + 1}/{args['K_epochs']}, "
+                f"job_actor_loss={loss_dict['job_actor_loss'][-1]}, "
+                f"machine_actor_loss={loss_dict['machine_actor_loss'][-1]}"
+                f"--------", print_true=1)
+
+        if args['use_lr_decay']:
+            self.job_actor_lr_decay.step()
+            self.machine_actor_lr_decay_gcn.step()
+
+        loss_mean_lst = [
+            torch.mean(torch.stack(loss_dict['job_actor_loss']))
+            .detach().cpu().numpy(),
+            torch.mean(torch.stack(loss_dict['machine_actor_loss']))
+            .detach().cpu().numpy(),
+            np.float32(0.0),
+        ]
+        loss_std_lst = [
+            torch.std(torch.stack(loss_dict['job_actor_loss']))
+            .detach().cpu().numpy(),
+            torch.std(torch.stack(loss_dict['machine_actor_loss']))
+            .detach().cpu().numpy(),
+            np.float32(0.0),
+        ]
+        return loss_mean_lst, loss_std_lst
+
     # 全局变量清零函数
     def set_to_0(self, env):
         """

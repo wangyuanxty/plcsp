@@ -22,7 +22,8 @@ def _paview() -> PAView:
     那 `λ ≥ 0` 时 `SMPT` 的选择**永不翻转**（初版夹具就是这么挂的）。
     """
     return PAView(now=10.0, jobs=(PAJob(oi=0, done_oi=0, alts=((0, 5.0), (1, 9.0)),
-                                        apt=5.0, rem_apt=5.0, ready_at=10.0, due=50.0),),
+                                        apt=5.0, rem_apt=5.0, ready_at=10.0, due=50.0,
+                                        transportable_at=10.0),),
                   machines=(PAMachine(avail_at=30.0, assigned_min=30.0),   # 快，但要等 20
                             PAMachine(avail_at=10.0, assigned_min=0.0),    # 慢，但已空闲
                             PAMachine(avail_at=10.0, assigned_min=100.0)))

@@ -1,26 +1,10 @@
 # -*- coding: utf-8 -*-
-"""**网络 ↔ 仿真的桥**（步 5a）：`NetPolicy` 的契约（**v3 口径**）。
+"""**网络 ↔ 仿真的桥**（v3 top-K 架构）：`NetPolicy` 的契约。
 
 验收：一局由网络全程驱动跑完；**决策链**条数与仿真事件对得上；**同 seed 逐位复现**
-（重算是训练的前提）；顶层（MA）的触发理由与设计 §10⑤ 一致。
-
-⚠️ **2026-10-10 改到 v3 口径**（`docs/v3/progress-log.md` §9.5）：
-
-| v2 | **v3** |
-|---|---|
-| `PolicyOut.g_logits/g_bins/g/pa/la/ra_maint` | **`rule_logits / rule_sel / param_mu / value`** |
-| `Decision.action`（**一个整数**） | **`(rule_pa, rule_la, rule_ra)` + `param_u`（一个向量）** |
-| 一次决策 = "从固定几条规则里挑一条" | **"(规则, 参数)"两样 —— 一个整数装不下** |
-
-**三条必须钉住的 v3 口径**（设计 §6.1 / §13.3）：
-
-1. **`logp` 算在 `u` 上**（无界动作），**不是**算在 `param` 上；
-2. **`greedy=True` ⟹ 连续头取 `μ`**（确定性模式）—— 不是取 argmax，也不是照旧采样；
-3. **规则号 ↔ head 不错位**（`split_pa_rule` 与 `apply_pa_rule` 同源）。
+（重算是训练的前提）；候选集与 logp 在 K 内归一化。
 """
 from __future__ import annotations
-
-import math
 
 import numpy as np
 import pytest
@@ -33,23 +17,19 @@ from plcsp_v3.env.des import SimConfig, SimWorld, reference_makespan  # noqa: E4
 from plcsp_v3.env.instances import load_mk                            # noqa: E402
 from plcsp_v3.hrl.agents import HierarchicalPolicy                    # noqa: E402
 from plcsp_v3.hrl.rollout import NetPolicy, Recorder                  # noqa: E402
-from plcsp_v3.hrl.rules import SIGMA_DEFAULT                          # noqa: E402
-from plcsp_v3.hrl.train import RULE_NAMES, _one_logp, rules_dict      # noqa: E402
-from plcsp_v3.nn.features import norm_context                         # noqa: E402
+from plcsp_v3.hrl.train import (RULE_NAMES, _candidate_logits,        # noqa: E402
+                                _one_logp, rules_dict)
+from plcsp_v3.nn.features import norm_context                          # noqa: E402
 
 
 def _mk(name: str = "mk01"):
-    """建一套（实例 · 布局 · 图 · 距离 · 配置 · 归一化上下文 · 网络）。
-
-    ⚠️ **网络权重要固定**：`HierarchicalPolicy` 默认**随机初始化**，不播种的话两次调用
-    拿到的是**两个不同的网络** —— 那样"同 seed 复现"测的就不是仿真了。
-    """
+    """建一套（实例 · 布局 · 图 · 距离 · 配置 · 归一化上下文 · 网络）。"""
     torch.manual_seed(0)
     inst = load_mk(name)
     cfg = SimConfig()
     lay = layout_mod.sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
     g = build_corridor_graph(lay)
-    ctx = norm_context(inst, lay, reference_makespan(inst), cfg)
+    ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
     net = HierarchicalPolicy().eval()
     return inst, lay, g, dock_distance_matrix(g), cfg, ctx, net
 
@@ -57,8 +37,6 @@ def _mk(name: str = "mk01"):
 def _drive(name="mk01", *, greedy=True, seed=0, dt_events=20, rules=None):
     inst, lay, g, dm, cfg, ctx, net = _mk(name)
     w = SimWorld(inst, lay, dm, cfg, graph=g)
-    # ⚠️ `rules` 给定时用 **`freeze_rules`**（顶层**照常触发**、但不重新采规则）——
-    # 不是"把 `policy_ma` 传 None"：那样顶层一次都不发生，`stop_after_ma` 也就永远不触发。
     p = NetPolicy(net, inst, lay, ctx, rules=rules, greedy=greedy, seed=seed,
                   dt_events=dt_events, freeze_rules=rules is not None)
     m = w.run_gated(seed_chain=0, policy_pa=p.policy_pa, policy_l=p.policy_l,
@@ -68,19 +46,9 @@ def _drive(name="mk01", *, greedy=True, seed=0, dt_events=20, rules=None):
 
 
 def _rules_row(d) -> dict:
-    """`Decision` 的三个规则号 → `net(..., rules=…)` 要的**逐行**张量（这里只有一行）。
-
-    ⚠️ 字段名从 `train.RULE_NAMES` 派生 —— **不另抄一遍**（设计 §13.3 ③ 的同一纪律）。
-    """
+    """`Decision` 的三个规则号 → `net(..., rules=…)` 要的**逐行**张量（这里只有一行）。"""
     return {k: torch.as_tensor([int(getattr(d, "rule_" + k.lower()))])
             for k in RULE_NAMES}
-
-
-def _us(p) -> list:
-    """整条链的 `param_u`（MA 记 `None`）—— 逐位比较用。"""
-    return [None if d.param_u is None
-            else tuple(np.asarray(d.param_u, dtype=np.float32).tolist())
-            for d in p.rec.decisions]
 
 
 @pytest.mark.unit
@@ -97,17 +65,19 @@ def test_network_drives_a_full_episode_and_the_chain_matches_the_sim_events():
     kinds = p.rec.kinds()
     assert m["jobs_done"] == 10 and not m["horizon_hit"]
     assert kinds["PA"] == m["ops_done"] == 55, kinds
-    assert kinds["LA"] == m["pa_assigns"] + 10, ("派工点 55 + 回站 10", kinds)
+    # ⚠️ **同机台相邻工序跳过搬运**（A 组，2026-10-17）⟹ 不再恒为 `pa_assigns + 10`。
+    # 每次 LA 决策对应一次实际运输 ⟹ 与 `deliveries` 同数（含回站段）。
+    assert kinds["LA"] == m["deliveries"], ("每次 LA 决策对应一次运输", kinds, m["deliveries"])
     assert kinds["M"] == m["ops_done"], kinds
     assert kinds["MA"] >= 1, kinds
     assert len(p.rec) == sum(kinds.values())
-    # ⚠️ **v3 新增**：一次决策是"(规则, 参数)"两样 —— 下层每一条都必须带 `param_u`
-    # （少了它，事后带梯度重算 logp 就无从谈起）。
     for d in p.rec.decisions:
         if d.kind == "MA":
-            assert d.param_u is None, "MA 不产参数（v3 里它产**规则**）"
+            assert d.cand is None and d.act is None, "MA 不产候选/动作"
         else:
-            assert d.param_u is not None and d.param_u.size > 0, d.kind
+            assert d.cand is not None, f"{d.kind} 缺候选集"
+            assert d.act is not None, f"{d.kind} 缺具体动作"
+            assert 0 <= d.cand.act < len(d.cand.mask)
 
 
 @pytest.mark.unit
@@ -120,44 +90,33 @@ def test_ma_trigger_is_timer_plus_disturbance():
     assert p.ma_reasons.count("disturbance") == m["dist_events"], (p.ma_reasons,
                                                                   m["dist_events"])
     assert m["ma_decisions"] == len(p.ma_reasons)
-    # `dt_events=0` ⟹ 定时器关，只剩扰动触发
     _, p0 = _drive(dt_events=0)
     assert "timer" not in p0.ma_reasons
 
 
 @pytest.mark.unit
 def test_chain_is_reproducible_under_the_same_seed():
-    """**同 seed ⟹ 整条决策链逐位相同**（规则 + 参数 + logp）。这是重算的前提。"""
+    """**同 seed ⟹ 整条决策链逐位相同**（规则 + 候选 + 动作 + logp）。这是重算的前提。"""
     m1, p1 = _drive(greedy=False, seed=7)
     m2, p2 = _drive(greedy=False, seed=7)
     assert m1["makespan"] == m2["makespan"]
-    a = [(d.kind, d.rule_pa, d.rule_la, d.rule_ra) for d in p1.rec.decisions]
-    b = [(d.kind, d.rule_pa, d.rule_la, d.rule_ra) for d in p2.rec.decisions]
+    a = [(d.kind, d.rule_pa, d.rule_la, d.rule_ra, d.act) for d in p1.rec.decisions]
+    b = [(d.kind, d.rule_pa, d.rule_la, d.rule_ra, d.act) for d in p2.rec.decisions]
     assert a == b
     assert [d.logp for d in p1.rec.decisions] == [d.logp for d in p2.rec.decisions]
-    assert _us(p1) == _us(p2), "连续头的 `u` 不同 ⟹ 采样器没接在同一个 `torch.Generator` 上"
 
 
 @pytest.mark.unit
 def test_recorded_decisions_reproduce_their_own_logits():
-    """**重算是训练的前提**：拿记录下来的 `(tok, seg, rules, la_ctx, param_u)` 再前向一次，
-    该动作的 logp 必须逐位相同 —— 否则 `ratio ≠ 1` 是假象（v1 的教训）。
-
-    存的必须是**当时的**上下文：状态变了用新快照重算 = 把策略输入换成了另一个状态。
-
-    ⚠️ **v3 的判据统一走 `train._one_logp`** —— 那是训练器实际用的那一个。
-    在这里另抄一遍公式，测的就是"两处抄得一样不一样"，不是"记录对不对"。
-    """
+    """**重算是训练的前提**：拿记录下来的候选集再前向一次，该动作的 logp 必须相同。"""
     _, p = _drive(greedy=True)
-    net = _mk()[-1]
-    net.load_state_dict(p.net.state_dict())
+    net = p.net
     checked = 0
     for d in p.rec.decisions:
         t = torch.as_tensor(d.tok).unsqueeze(0)
-        lc = None if d.la_ctx is None else torch.as_tensor(d.la_ctx)[None]
         with torch.no_grad():
-            out = net(t, d.seg, rules=_rules_row(d), la_ctx=lc, hard=True)
-            lp = float(_one_logp(out, d, 0).detach())
+            out = net(t, d.seg, rules=_rules_row(d), hard=True)
+            lp = float(_one_logp(net, out, d, 0).detach())
         assert lp == pytest.approx(d.logp, abs=1e-5), \
             f"{d.kind} 的重算 logp 不一致：{lp} vs {d.logp}"
         checked += 1
@@ -172,8 +131,6 @@ def test_frozen_rules_condition_the_lower_heads_and_skip_ma():
 
     MA **照常被触发**（`ma_decisions` 照增 —— 停表靠的就是这个计数），
     但**不再重新采规则**，且**自己不进决策链**。
-
-    ⚠️ **v2 对应的是"冻结 `g`"**；v3 里 `g` 没了，冻结的是**规则**（设计 §6 阶段 B）。
     """
     m, p = _drive(rules={"PA": 3, "LA": 1, "RA": 0})
     assert m["ma_decisions"] > 0, "顶层**照常触发**（冻结的是规则，不是触发）"
@@ -197,36 +154,26 @@ def test_recorder_is_optional_and_counts_by_kind():
 
 
 @pytest.mark.unit
-def test_greedy_takes_mu_and_the_logp_is_computed_on_u():
-    """⚠️ **设计 §13.3 ①②**（v3 新加，这两条是连续动作最容易做错的地方）。
-
-    **① `greedy=True` ⟹ 连续头取 `μ`**（确定性模式）—— 不是 argmax、也不是照旧采样。
-    判据：记录的 `param_u` 与网络重算出的 `param_mu` **逐位相同**。
-
-    **② 而由此可以**反推** `logp` 算在 `u` 上**：`u = μ` 时高斯密度取峰值 ⟹
-    `logp = −½·k·log(2πσ²)`（`k` = 参数个数，**与 μ 无关**）。
-    **若 `logp` 被算在 `param` 上**（少乘一个 Jacobian），这个值就不成立。
-    """
+def test_greedy_takes_the_argmax_candidate():
+    """greedy ⟹ 在候选集内取 argmax；logp 是 K 内 `log_softmax`。"""
     _, p = _drive(greedy=True)
-    net = p.net
     checked = 0
     for d in p.rec.decisions:
         if d.kind == "MA":
             continue
         t = torch.as_tensor(d.tok).unsqueeze(0)
-        lc = None if d.la_ctx is None else torch.as_tensor(d.la_ctx)[None]
         with torch.no_grad():
-            out = net(t, d.seg, rules=_rules_row(d), la_ctx=lc, hard=True)
-        key = {"PA": "PA", "LA": "LA", "M": "RA"}[d.kind]
-        mu = out.param_mu[key][0].numpy()
-        u = np.asarray(d.param_u, dtype=np.float32)
-        assert u.shape == mu.shape, (d.kind, u.shape, mu.shape)
-        assert np.array_equal(u, mu), \
-            f"{d.kind}：greedy 档下 `u` 应当**逐位等于** `μ`（实测 {u} vs {mu}）"
-        k = int(u.size)
-        expect = -0.5 * k * math.log(2.0 * math.pi * SIGMA_DEFAULT ** 2)
-        assert d.logp == pytest.approx(expect, abs=1e-5), \
-            f"{d.kind}：`u = μ` 时的 logp 应为 {expect}，实得 {d.logp}（logp 算错变量了？）"
+            out = p.net(t, d.seg, rules=_rules_row(d), hard=True)
+            logits = _candidate_logits(p.net, out, d, 0)
+        if int(np.count_nonzero(d.cand.mask)) <= 1:
+            assert d.logp == 0.0
+            continue
+        best = float(torch.max(logits))
+        tied = torch.nonzero(logits == best, as_tuple=False).flatten().tolist()
+        if len(tied) == 1:                       # 并列时走逐决策 rng，这里不测
+            assert int(d.cand.act) == int(tied[0])
+        expect = float(torch.log_softmax(logits, dim=-1)[int(d.cand.act)])
+        assert d.logp == pytest.approx(expect, abs=1e-5)
         checked += 1
         if checked >= 30:
             break
@@ -234,52 +181,34 @@ def test_greedy_takes_mu_and_the_logp_is_computed_on_u():
 
 
 @pytest.mark.unit
-def test_param_mu_is_routed_by_the_rules_in_force_not_by_argmax():
-    """⚠️ **规则号 ↔ 参数 head 必须对得上**（设计 §13.3 ③）—— 最隐蔽的一类错位。
+def test_forced_single_candidate_does_not_advance_the_sampling_stream():
+    """⚠️ `K_eff == 1` 的强制决策**不抽签、不推进 `self.gen`**。
 
-    `param_mu` 按**哪条规则**的 head 算，决定了那几个 `λ` 的含义。若它按"网络自己 argmax
-    出来的规则"算，而 `apply_pa_rule` 用的是 `self.cur`（**采样的**），参数就配到了
-    **另一条规则**上 —— 不报错，只是学错。
-
-    ⚠️ **这类错位有两个天然盲区**：
-    ① `greedy=True` 时 `self.cur` **恰好就是** argmax ⟹ 两条路一致；
-    ② 采样档下错位是**确定性**的 ⟹ "同 seed 复现"两边错到同一处。
-    ⟹ 判据只能**直接比 `μ`**：拿冻结的规则重算，与记录的 `param_u` 逐位对上。
+    否则"多一个强制决策"会把后续采样流整体移位 —— 同 seed 的两条链在不同状态下会分岔。
+    判据：先过一个强制行、再过一个双候选行；与直接过双候选行抽到同一个动作。
     """
-    rules = {"PA": 11, "LA": 2, "RA": 2}
-    other = {"PA": 3, "LA": 0, "RA": 1}
-    _, p = _drive(rules=rules, greedy=True)
-    assert p.cur == rules
-    d = next(x for x in p.rec.decisions if x.kind == "PA")
-    t = torch.as_tensor(d.tok).unsqueeze(0)
-    with torch.no_grad():
-        mu_r = p.net(t, d.seg, rules={k: torch.tensor([v]) for k, v in rules.items()},
-                     hard=True).param_mu["PA"][0]
-        mu_o = p.net(t, d.seg, rules={k: torch.tensor([v]) for k, v in other.items()},
-                     hard=True).param_mu["PA"][0]
-        sel_default = p.net(t, d.seg, hard=True).rule_sel["PA"]
-    # 夹具有效性：argmax 不能恰好等于 `rules`（否则两条路本来就是同一条，测不出来）
-    assert int(sel_default) != rules["PA"], "本夹具下 argmax 恰好等于 rules ⟹ 换一组规则"
-    assert not torch.allclose(mu_r, mu_o), "两组规则算出同一个 μ ⟹ 换一组规则"
-    u = torch.as_tensor(np.asarray(d.param_u, dtype=np.float32))
-    assert torch.allclose(u, mu_r), \
-        "`param_u` 不是按**生效的规则**路由的 —— 按 argmax 路由就是参数与规则错位"
+    inst, lay, g, dm, cfg, ctx, net = _mk()
+    p = NetPolicy(net, inst, lay, ctx, greedy=False, seed=0)
+    row1 = torch.tensor([0.0])                    # 只有一个有限值 ⟹ 强制
+    row2 = torch.tensor([0.0, 1.0])
+    rng = np.random.default_rng([0, 0])
+    p.gen.manual_seed(11)
+    a0, lp0 = p._pick_candidate(row1, rng)
+    a, lp = p._pick_candidate(row2, rng)
+    p.gen.manual_seed(11)
+    b, lp_b = p._pick_candidate(row2, rng)
+    assert a0 == 0 and lp0 == 0.0
+    assert (a, lp) == (b, lp_b), "强制决策推进了采样流"
 
 
 @pytest.mark.unit
-def test_sampled_params_actually_carry_sigma():
-    """⚠️ **`σ` 要真的接上**：采样档的 `u` 必须**不等于** `μ`，且同 seed 可复现。
-
-    若 `σ` 被写成 0（或忘了加噪声），**探索就整条没了**，而曲线看上去照跑。
-    """
-    _, pg = _drive(greedy=True)
-    _, ps = _drive(greedy=False, seed=3)
-    _, ps2 = _drive(greedy=False, seed=3)
-    ug = [u for u in _us(pg) if u is not None]
-    us = [u for u in _us(ps) if u is not None]
-    assert ug and len(ug) == len(us), "两档的决策条数不同 ⟹ 不能用这条比"
-    assert all(a != b for a, b in zip(ug, us)), "采样档与 `μ` 逐位相同 ⟹ σ 没接上"
-    assert _us(ps2) == _us(ps), "同 seed 的采样档不可复现 ⟹ `torch.Generator` 没接上"
+def test_sampled_actions_are_seeded():
+    """采样档同 seed 可复现；不同 seed 可不同。"""
+    _, p1 = _drive(greedy=False, seed=3)
+    _, p2 = _drive(greedy=False, seed=3)
+    acts1 = [d.act for d in p1.rec.decisions]
+    acts2 = [d.act for d in p2.rec.decisions]
+    assert acts1 == acts2, "同 seed 的采样档不可复现 ⟹ `torch.Generator` 没接上"
 
 
 # ══════════════════ 步 5b 的机制层：重放前缀 ══════════════════
@@ -300,21 +229,13 @@ def test_top_level_points_record_cumulative_counters():
 def test_replaying_the_prefix_lands_on_the_same_state():
     """⚠️ **本步的核心性质**：从 t=0 **照已记录的决策回放**，必然回到同一个 `Z_t`。
 
-    这是"用重放代替分叉"（§13 #1）能成立的**唯一理由**。判据用**累计读数逐位相同** ——
-    它把"机台队列 · 工件位置 · 车辆状态 · 计划表"等一切压缩成一个可比的数。
-
-    ⚠️ 必须 `greedy=True`：**采样**下分支自己的随机流与 base 不同，动作会分岔，
-    那测的就不是"回放"而是"另一条链"。
-
-    ⚠️ **v3：回放吃的是 `Decision` 序列**（一次决策 = "(规则, 参数)"，一个整数装不下）——
-    与 `train._prefix_to` **同源**，不另建一套编码。
+    判据用**累计读数逐位相同**。
     """
     from plcsp_v3.hrl.replay import run_branch
 
     m, p = _drive(greedy=True, dt_events=20)
     ma_idx = [i for i, d in enumerate(p.rec.decisions) if d.kind == "MA"]
     assert len(ma_idx) >= 2, "本实例至少要两个顶层点才测得到"
-    # 前缀 = base 从 0 到**第 2 个顶层点之前**的全部决策（含第 1 个 MA 决策）
     prefix = list(p.rec.decisions[:ma_idx[1]])
     d1 = p.rec.decisions[ma_idx[1]]
     rules_at_z1 = (d1.rule_pa, d1.rule_la, d1.rule_ra)
@@ -330,7 +251,6 @@ def test_replaying_the_prefix_lands_on_the_same_state():
 
     base_at_z1 = p.ma_counters[1]
     assert metrics["ma_decisions"] == 2
-    # ⚠️ 比的是**累计读数**（两处同口径），不是 `metrics["energy"]`（那个按 makespan 算）
     assert at_z1.now == pytest.approx(base_at_z1.now)
     assert at_z1.done_ops == base_at_z1.done_ops
     assert at_z1.done_jobs == base_at_z1.done_jobs
@@ -340,3 +260,70 @@ def test_replaying_the_prefix_lands_on_the_same_state():
 
 def _world(inst, lay, g, dm, cfg):
     return SimWorld(inst, lay, dm, cfg, graph=g)
+
+
+def _spec_from(inst, lay, g, dm, cfg, ctx, constraints=None):
+    """`_mk()` 的那套对象 → `Spec`（`base_chain` 要）。"""
+    from plcsp_v3.env.reward import EQUAL_WEIGHTS
+    from plcsp_v3.hrl.train import Spec
+    return Spec(inst, lay, g, dm, cfg, ctx, EQUAL_WEIGHTS,
+                constraints=constraints)
+
+
+@pytest.mark.unit
+def test_exact_rule_reproduces_the_cdr_baseline():
+    """⚠️ **`exact_rule` 必须与 CDR 基线逐位相同**（2026-10-20）。
+
+    此前固定规则对照表里的"策略 top-1"走的是 `pa_candidates` 排序后取第 0 个 ——
+    **那不是规则的 argmin**（候选集截断、确定性平局）。本测试钉住修复：
+    `exact_rule=True` 直接调 `rules.apply_pa_rule` + 环境 `tie_rng`，
+    必须与 `cdr.run_cdr` 给出**同一个** makespan / 能耗 / 拖期。
+    """
+    from plcsp_v3.env.constraints import ConstraintConfig
+    from plcsp_v3.hrl.cdr import run_cdr
+    from plcsp_v3.hrl.rules import LA_RULE_NAMES, PA_RULE_NAMES
+    from plcsp_v3.hrl.train import base_chain
+
+    inst, lay, g, dm, cfg, ctx, net = _mk()
+    cons = ConstraintConfig(maintenance=False)      # 与 CDR 对照档一致（RA 不参与）
+    pa, la = "EAJ+EAM", "LATEST_IN_TIME"
+    rules = {"PA": PA_RULE_NAMES.index(pa), "LA": LA_RULE_NAMES.index(la),
+             "RA": 0}
+    m_cdr = run_cdr(_world(inst, lay, g, dm, cfg), pa, la, seed_chain=0)
+    # ⚠️ 必须走 `base_chain`：它负责"三个头全固定 ⟹ 不挂 `policy_ma`"。
+    #    直接调 `run_gated(policy_ma=...)` 会打开机台扰动事件流，换掉世界。
+    spec_p = base_chain(net, _spec_from(inst, lay, g, dm, cfg, ctx, cons),
+                        greedy=True, seed=0, dt_events=20,
+                        fixed_rules=rules, exact_rule=True)
+    m_ex = spec_p.metrics
+    for k in ("makespan", "energy", "tardy_twt"):
+        assert m_ex[k] == pytest.approx(m_cdr[k], abs=1e-9), \
+            f"exact_rule 与 CDR 在 {k} 上不同：{m_ex[k]} vs {m_cdr[k]}"
+
+
+@pytest.mark.unit
+def test_tie_seed_defaults_to_seed_chain_and_variants_differ():
+    """⚠️ **平局流与场景流分开**（2026-10-20）。
+
+    评测精度要求：同一场景跑多条平局流。`tie_seed=None` 必须**逐位等于**旧口径
+    （即 `tie_seed=seed_chain`）；不同的 `tie_seed` 必须给出不同的读数。
+    """
+    from plcsp_v3.env.constraints import ConstraintConfig
+    from plcsp_v3.hrl.rules import LA_RULE_NAMES, PA_RULE_NAMES
+    from plcsp_v3.hrl.train import base_chain
+
+    inst, lay, g, dm, cfg, ctx, net = _mk()
+    cons = ConstraintConfig(maintenance=False)
+    pa, la = "EAJ+EAM", "LATEST_IN_TIME"
+    rules = {"PA": PA_RULE_NAMES.index(pa), "LA": LA_RULE_NAMES.index(la),
+             "RA": 0}
+    sp = _spec_from(inst, lay, g, dm, cfg, ctx, cons)
+    kw = dict(greedy=True, seed=0, dt_events=20, fixed_rules=rules,
+              exact_rule=True, seed_chain=3)
+    a = base_chain(net, sp, **kw).metrics["makespan"]
+    b = base_chain(net, sp, **kw, tie_seed=3).metrics["makespan"]
+    assert a == pytest.approx(b, abs=1e-12), \
+        "tie_seed=None 必须等于 tie_seed=seed_chain（逐位兼容）"
+    vals = {round(float(base_chain(net, sp, **kw, tie_seed=10_000 + j)
+                        .metrics["makespan"]), 6) for j in range(4)}
+    assert len(vals) > 1, "4 条平局流给出同一个读数 ⟹ tie_seed 没接上"

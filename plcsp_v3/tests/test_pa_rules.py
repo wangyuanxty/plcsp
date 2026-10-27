@@ -38,9 +38,12 @@ def _view(jobs, machines, now=10.0) -> PAView:
 
 
 def _pajob(oi, alts, apt, rem_apt, ready_at, due, done_oi=0) -> PAJob:
-    """`PAJob` 的简写（`done_oi` 默认 0——纯规则层不用它）。"""
+    """`PAJob` 的简写（`done_oi` 默认 0——纯规则层不用它）。
+
+    ⚠️ `transportable_at` 取 `ready_at`（纯规则夹具不区分这两个；PA 侧规则两条都不用）。
+    """
     return PAJob(oi=oi, done_oi=done_oi, alts=alts, apt=apt, rem_apt=rem_apt,
-                 ready_at=ready_at, due=due)
+                 ready_at=ready_at, due=due, transportable_at=ready_at)
 
 
 def _world(name: str = "mk01") -> SimWorld:
@@ -247,7 +250,7 @@ def test_pool_is_no_longer_degenerate():
     def probe(self, plans, policy_pa, stats):
         snap = self.snapshot()
         v = build_pa_view(snap, self.inst, plans, [0.0] * self.inst.n_machines,
-                          [0.0] * self.inst.n_machines)
+                          [0.0] * self.inst.n_machines, self.layout, self.leg_min)
         sizes.append(sum(1 for j, jv in enumerate(v.jobs)
                          if jv.oi < len(self.inst.jobs[j])))
         return orig(self, plans, policy_pa, stats)
@@ -280,7 +283,7 @@ def test_pa_is_actually_called_once_per_operation():
 
 
 @pytest.mark.unit
-def test_offline_path_is_bit_identical_to_the_v2_golden_value():
+def test_offline_path_is_bit_identical_to_the_golden_value():
     """离线路径（`policy_pa=None`）**逐位不变**：73.010 / task_flow 同形。
 
     ⚠️ **这是统一事件流之后必须守住的性质**：第二稿把"派工点即决策点"的新流与离线路径
@@ -299,11 +302,14 @@ def test_offline_path_is_bit_identical_to_the_v2_golden_value():
     是**两个不同的双精度数**（前者才是本次算出来的那个）。旧值 `75.870` 能写成短字面量
     是**碰巧**它恰好往返 —— 那让"精确相等"这条判据看起来比它实际的样子更随意。
     化简字面量会让本断言**从"逐位"退化成"近似"**，而它的名字就叫 `bit_identical`。
+
+    ⚠️ **2026-10-18：`task_flow` 65 → 64**（A 组修正：同机台相邻工序不再生成搬运任务）。
+    makespan 未变（73.00999999999999）—— 那次搬运是零距离，但它占过车辆。
     """
     m = _world().run(seed_chain=0)
     assert m["makespan"] == 73.009999999999990
     assert m["pa_assigns"] == 0                        # 离线路径：PA 一次都不该被调用
-    assert len(m["task_flow"]) == 65                   # 55 道工序流转 + 10 次投放
+    assert len(m["task_flow"]) == 64                   # 55 道工序流转 + 10 次投放 − 1 次同机台省略
     assert m["jobs_done"] == 10
 
 
@@ -367,7 +373,7 @@ def test_pa_ledger_makes_inflight_reservations_visible():
     led[0] = snap.now + 999.0
     v = build_pa_view(snap, w.inst,
                       {j: [None] * len(ops) for j, ops in enumerate(w.inst.jobs)},
-                      led, [0.0] * m)
+                      led, [0.0] * m, w.layout, w.leg_min)
     phys0 = (snap.now + snap.machines[0].remaining_min + snap.machines[0].backlog_min)
     assert v.machines[0].avail_at == pytest.approx(snap.now + 999.0)
     assert v.machines[0].avail_at > phys0
@@ -429,6 +435,37 @@ def test_la_rules_pick_the_expected_vehicle(rule: str, expected: int):
     view = _la_view()
     best = min(range(3), key=lambda a: (la_score(rule, view, a), a))
     assert best == expected
+
+
+@pytest.mark.unit
+def test_la_tie_is_broken_randomly_when_a_tie_rng_is_given():
+    """⚠️ **2026-10-15 修**：LA 的平局曾按**车号升序**打破 —— 而车号是**任意标签**。
+
+    车队**完全同构**（`AgvSpec` 只剩 `id`）且全部在 L/U 起步 ⟹ 打分完全并列时，
+    按车号选 = 制造**任意偏置**，不是打破平局。
+    实测代价：`MINCOST` 的 MS 差 **16%**（585.6 → 489.2）、t=0 的 **16 次**投放全给 V0。
+    口径**照 PA 层**（`des.py` 对 PA 的 `tie_rng` 写着 *"照 AEI2025 的随机平局"*）。
+    登记：`docs/v3/open-question-nhdrl.md` §4.28。
+
+    本测试钉两件事：
+    ① `tie_rng=None` ⟹ **旧口径**（车号最小）⟹ **v3 主线逐位不变**；
+    ② 给了 `tie_rng` ⟹ 并列的三台**都被抽到过**（不是恒选最小）。
+    """
+    def tied_view(rng=None) -> LAView:
+        return LAView(now=0.0, job=0, oi=1, frm_node=100, to_node=200, ready_at=0.0,
+                      vehicles=(LAVehicle(node=100, busy_min=0.0, free_at=0.0),
+                                LAVehicle(node=100, busy_min=0.0, free_at=0.0),
+                                LAVehicle(node=100, busy_min=0.0, free_at=0.0)),
+                      leg_min=lambda u, v: float(abs(u - v)), tie_rng=rng)
+
+    pol = la_rule_policy("MINCOST")
+    # ① 无 rng：三台打分并列 ⟹ 恒选车号最小的 0（= 修前行为）
+    assert {pol(tied_view(), (0, 1, 2)) for _ in range(50)} == {0}
+    # ② 有 rng：三台都被抽到
+    rng = np.random.default_rng(0)
+    assert {pol(tied_view(rng), (0, 1, 2)) for _ in range(200)} == {0, 1, 2}
+    # ③ 候选非升序时，"无 rng"仍取**车号最小**（不是候选里第一个）
+    assert pol(tied_view(), (2, 0, 1)) == 0
 
 
 @pytest.mark.unit
@@ -674,3 +711,90 @@ def test_mix_sets_differ_across_rules():
         assert main not in aux, f"{rule} 的主量混进了辅量"
         missing = {"apt", "rtj", "wait", "due", "ready_delay"} - {main, *aux}
         assert missing, f"{rule} 什么都没漏 —— 会与其它规则趋同"
+
+
+@pytest.mark.unit
+def test_ready_at_has_resolution_and_uses_planned_ledger():
+    """`ready_at` 重写（2026-10-12）的判据 —— 修 §37.10 查实的洞。
+
+    **旧口径**（`now + 前道机台的**物理** `remaining+backlog`，**不算运输**）实测把 `EAJ`
+    退化成「取池首」：池内 **85.1%** 等于 `now`、极差 **2.79 min**、不同取值 **1.94** 个、
+    有效候选数 **2.05**、确定性平局下 **89.7%** 挑池首。
+    **而 `EAJ+SMPT` / `EAJ+EAM` 是 27 条 CDR 里最好的两条** ⟹ 最强的规则实际没在看状态。
+
+    **新口径**三支（在车上 / 前道未完工 / 已可运）**每支都加运输段**，② 改用**计划账本**。
+    本测试钉三件事：分辨力、账本依赖、在途件不再被当成「现在就能开工」。
+    """
+    from plcsp_v3.env.rule_views import build_pa_view, estimate_ready_at
+
+    w = _world()
+    inst = w.inst
+    caps: list = []
+    orig = SimWorld._pa_dispatch
+
+    def probe(self, plans, policy_pa, stats):
+        led = self._live_stats.setdefault("pa_mct", [0.0] * self.inst.n_machines)
+        leda = self._live_stats.setdefault("pa_assigned_min", [0.0] * self.inst.n_machines)
+        snap = self.snapshot()
+        v = build_pa_view(snap, inst, plans, led, leda, self.layout, self.leg_min)
+        caps.append((snap, {j: list(r) for j, r in plans.items()}, list(led), v,
+                     self.layout, self.leg_min))
+        return orig(self, plans, policy_pa, stats)
+
+    SimWorld._pa_dispatch = probe
+    try:
+        w.run(seed_chain=0, policy_pa=pa_rule_policy("SPT+EAM"))
+    finally:
+        SimWorld._pa_dispatch = orig
+
+    assert len(caps) > 40, f"决策点太少：{len(caps)}"
+
+    def _pool(v):
+        return [(j, jv.oi) for j, jv in enumerate(v.jobs)
+                if jv.oi < len(inst.jobs[j]) and jv.alts]
+
+    # ── (1) 分辨力 ──
+    eq, uniq = [], []
+    for _s, _p, _l, v, _lay, _lm in caps:
+        pool = _pool(v)
+        if not pool:
+            continue
+        r = [v.jobs[j].ready_at for j, _oi in pool]
+        eq.append(sum(1 for x in r if abs(x - v.now) < 1e-9) / len(r))
+        uniq.append(len({round(x, 9) for x in r}))
+    assert np.mean(eq) < 0.35, f"`ready_at == now` 占比 {np.mean(eq):.0%} 仍偏高（旧 85.1%）"
+    assert np.mean(uniq) > 3.0, f"池内不同 `ready_at` 值 {np.mean(uniq):.2f} 个（旧 1.94）"
+
+    # ── (2) ② 支走**计划账本**：推后前道那台机的账本，`ready_at` 必须**等量**推后 ──
+    hit = 0
+    for snap, plans, led, v, lay, lm in caps:
+        for j, jv in enumerate(v.jobs):
+            row = plans.get(j, [])
+            if not (jv.oi > 0 and jv.oi - 1 >= jv.done_oi and jv.alts):
+                continue
+            k = row[jv.oi - 1] if jv.oi - 1 < len(row) else None
+            if k is None or not (0 <= k < len(snap.machines)) or led[k] <= snap.now:
+                continue                       # 只挑 `max(now, 账本)` 真的取账本的点
+            bumped = list(led)
+            bumped[k] += 50.0
+            r0 = estimate_ready_at(snap, inst, j, jv.oi, jv.done_oi, jv.alts,
+                                   plans, led, lay, lm)
+            r1 = estimate_ready_at(snap, inst, j, jv.oi, jv.done_oi, jv.alts,
+                                   plans, bumped, lay, lm)
+            assert r1 - r0 == pytest.approx(50.0), (
+                f"账本推后 50 min，`ready_at` 只动了 {r1 - r0:.3f} —— ② 支没走账本")
+            assert r0 == pytest.approx(jv.ready_at)   # 与视图里的是同一条
+            hit += 1
+            if hit >= 5:
+                break
+        if hit >= 5:
+            break
+    assert hit >= 1, "本局没出现「前道未完工且账本已排到未来」的点，判据没验到"
+
+    # ── (3) 在途件不再被报成「现在就能开工」──
+    tr = [abs(v.jobs[j].ready_at - v.now) < 1e-9
+          for snap, _p, _l, v, _lay, _lm in caps
+          for j, _oi in _pool(v) if snap.jobs[j].on_agv >= 0]
+    assert tr, "本局没有出现在途件，判据没验到"
+    assert np.mean(tr) < 0.6, (
+        f"在途件里 {np.mean(tr):.0%} 仍报 `ready_at == now`（旧 72.6%）")

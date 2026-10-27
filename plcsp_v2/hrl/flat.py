@@ -89,7 +89,9 @@ def flat_rollout(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
     for i in range(n):
         p = base_chain(net, spec, greedy=greedy, seed=seed * 1000 + i, dt_events=dt_events)
         f = objective_vector(p.metrics)                      # type: ignore[attr-defined]
-        out.append(Chain(scalar_reward(f, spec.w), tuple(f), p.rec.decisions))
+        # ⚠️ `spec.bounds=None`（默认）⟹ `scalar_reward` 用原始量纲，**逐位等于今日**。
+        out.append(Chain(scalar_reward(f, spec.w, bounds=spec.bounds),
+                         tuple(f), p.rec.decisions))
     return out
 
 

@@ -31,6 +31,8 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
         self.n_machine = configs['n_machine']
         self.n_total_task = self.n_job * self.n_machine
         self.batch_size = configs['env_batch']
+        self.use_pref_embed = bool(configs.get('pref_embed', 0))
+        self.pref_dim = int(configs.get('pref_dim', 16)) if self.use_pref_embed else 0
 
         self.GAMMA = configs['GAMMA']  # reward折扣率
         self.LAMDA = configs['LAMDA']  # GAE参数
@@ -75,7 +77,7 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
         #     def __init__(self, num_layers, input_dim, hidden_dim, output_dim):
         1、Actor_policy输入参数：待选节点嵌入 + 全图节点嵌入 + M节点全图嵌入 = in 上述3个元素，so hidden*3
         """
-        self.o_policy = MLPActor(mlp_actor_layer, gcn_hidden_dim * 3, gcn_hidden_dim, 1).to(device)  # 几层 + in + hidden + out
+        self.o_policy = MLPActor(mlp_actor_layer, gcn_hidden_dim * 3 + self.pref_dim, gcn_hidden_dim, 1).to(device)  # 几层 + in + hidden + out
         Logger.log("Training/ppo/init_job_actor", f"MLP: self.o_policy={self.o_policy}", print_true=1)
 
         """
@@ -84,7 +86,7 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
         mlp_critic_layer = configs['mlp_critic_layer']
         critic_input_dim = configs['critic_input_dim']
         critic_hidden_dim = configs['critic_hidden_dim']
-        self.job_critic = MLPCritic(mlp_critic_layer, critic_input_dim, critic_hidden_dim, 2).to(device)  # 3层 + 128in + 128隐藏 + 2out  TODO 全图特征的输入= 1*128 + mk和it的反馈reward = 2！
+        self.job_critic = MLPCritic(mlp_critic_layer, critic_input_dim + self.pref_dim, critic_hidden_dim, 2).to(device)  # 3层 + 128in + 128隐藏 + 2out  TODO 全图特征的输入= 1*128 + mk和it的反馈reward = 2！
         # TODO 0109-消融实验-不使用r向量和v向量，那么动态的权重01其实没用，不改问题不大，看看效果
         # self.job_critic = MLPCritic(mlp_critic_layer, critic_input_dim, critic_hidden_dim, 1).to(device)  # 3层 + 128in + 128隐藏 + 1out  
         Logger.log("Training/ppo/init_job_critic", f"MLP: self.job_critic={self.job_critic}", print_true=1)
@@ -110,7 +112,8 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
                 h_g_m_pooled,  # 传入每一step的m节点的全图节点嵌入均值：                       batch，hidden
                 mask_operation,  # 传入当前可选节点的mask位，某一job选完了，那就置为true：      batch，job
                 use_greedy=False,
-                trans_wrk=None, idle_wrk=None, task_ctx=None
+                trans_wrk=None, idle_wrk=None, task_ctx=None,
+                score_bias=None, pref_emb=None
                 ):
         # if h_g_m_pooled is not None:
         #     Logger.log("Training/ppo/job_actor_forward_input", f"x_fea={x_fea.shape}, graph_pool_avg={graph_pool_avg.shape}, adj={adj.shape}, candidate={candidate.shape}, h_g_m_pooled={h_g_m_pooled.shape}, mask_operation={mask_operation.shape}", print_true=1)
@@ -156,7 +159,10 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
             adj = aggr_obs(torch.from_numpy(copy.copy(adj)).to(device).to_sparse(),
                            self.n_total_task)  
 
-        mask_operation = copy.copy(mask_operation).to(device)  # 原deepcopy：已经是张量，可选节点的mask：batch* job
+        mask_operation = copy.copy(mask_operation).to(device)
+        if self.use_pref_embed and x_fea.size(-1) >= 12:
+            x_fea = x_fea.clone()
+            x_fea[:, 9:12] = 0.0  # 原deepcopy：已经是张量，可选节点的mask：batch* job
 
         # print("1.2:{}".format(get_GPU_usage()[1]))
 
@@ -254,6 +260,13 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
         输入：4,4,128*3 （batch * job * hidden_dim）
         输出：4,4,1    1是因为输入的数据已经是可以每一个可以选择的job的节点表征了，输出1是针对每一个可选job的打分！（batch，job，1）
         """
+        if self.use_pref_embed:
+            if pref_emb is None:
+                pref_emb = h_g_o_pooled.new_zeros(h_g_o_pooled.size(0), self.pref_dim)
+            else:
+                pref_emb = pref_emb.to(device=device, dtype=h_g_o_pooled.dtype)
+            pref_rep = pref_emb.unsqueeze(1).expand(-1, concateFea.size(1), -1)
+            concateFea = torch.cat((concateFea, pref_rep), dim=-1)
         candidate_scores = self.o_policy(concateFea)  # Job的全连接层：3层，128*3输入，128隐藏，1输出（只看第二维度，最后一个维度为1，便于去掉）
         # candidate_scores = candidate_scores * 10  # 之前都是/1000作为归一化，可能是为了增加得分的范围或强调得分的重要性
         # Logger.log("Training/ppo/job_actor_forward_candidate_scores", f"candidate_scores={candidate_scores.shape}", print_true=1)
@@ -265,6 +278,10 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
         3、为什么他的mask先第一列的job选完之后，后边的每次只能选择指定好的job（指定那个由env里边在判断！）
         """
         mask_operation_reshape = mask_operation.reshape(candidate_scores.size())  # 变成和打分结果一样：4,4,1（batch，job，1）
+        if score_bias is not None:  # [v5 hier] fixed top-level rule bias
+            candidate_scores = candidate_scores + score_bias.to(
+                device=candidate_scores.device,
+                dtype=candidate_scores.dtype).unsqueeze(-1)
         # 将mask_reshape中对应位置为True的元素置为-inf
         candidate_scores[mask_operation_reshape] = float('-inf')
         # Logger.log("Training/ppo/job_actor_forward_mask_operation_reshape", f"mask_operation_reshape={mask_operation_reshape.shape}, new candidate_scores={candidate_scores}", print_true=1)
@@ -291,7 +308,14 @@ class Operation_Actor_JointAction_selfCritic(nn.Module):
         # Logger.log("Training/ppo/job_actor_forward_a_index", f"task_index={task_index.shape}, action_index={action_index.shape}, task_index={log_a.shape}", print_true=1)
         
         # TODO 1113-新增局部的job的critic，只关注mk和it = in hidden_size, out 2 reward's value
-        job_v = self.job_critic(h_g_o_pooled) # h_g_o_pooled = bs * hidden  
+        if self.use_pref_embed:
+            if pref_emb is None:
+                pref_emb = h_g_o_pooled.new_zeros(h_g_o_pooled.size(0), self.pref_dim)
+            else:
+                pref_emb = pref_emb.to(device=device, dtype=h_g_o_pooled.dtype)
+            job_v = self.job_critic(torch.cat((h_g_o_pooled, pref_emb), dim=-1))
+        else:
+            job_v = self.job_critic(h_g_o_pooled) # h_g_o_pooled = bs * hidden  
         # Logger.log("Training/ppo/job_actor_forward_job_value", f"job_v={job_v.shape}", print_true=1)  # batch*2
 
         return task_index, action_index, log_a, prob, h_g_o_pooled, job_v  # 全图的特征batch*hidden
@@ -304,6 +328,8 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
         self.n_machine = configs['n_machine']
         mlp_actor_layer = configs['mlp_actor_layer']
         self.machine_hidden_dim = configs['machine_hidden_dim']
+        self.use_pref_embed = bool(configs.get('pref_embed', 0))
+        self.pref_dim = int(configs.get('pref_dim', 16)) if self.use_pref_embed else 0
 
         self.bn = torch.nn.BatchNorm1d(self.machine_hidden_dim).to(device)  # 批归一化层
 
@@ -331,7 +357,7 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
         我这里直接用GAT方式！
         """
         self.fcl_pooling = nn.Linear(self.machine_hidden_dim, self.machine_hidden_dim, bias=False).to(device)  # GAT聚合之后，全连接层来池化节点的特征，128in，128out，没有偏置项
-        self.m_policy = MLPActor(mlp_actor_layer, self.machine_hidden_dim * 3, self.machine_hidden_dim, 1).to(device)  # 选择m的actor网络：共3层（包括输入）+ 128*3in + 128hidden + 1out
+        self.m_policy = MLPActor(mlp_actor_layer, self.machine_hidden_dim * 3 + self.pref_dim, self.machine_hidden_dim, 1).to(device)  # 选择m的actor网络：共3层（包括输入）+ 128*3in + 128hidden + 1out
         Logger.log("Training/ppo/init_machine_actor", f"MLP: self.fcl_pooling={self.fcl_pooling}, self.m_policy={self.m_policy}", print_true=1)
 
         """
@@ -340,7 +366,7 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
         mlp_critic_layer = configs['mlp_critic_layer']
         critic_input_dim = configs['critic_input_dim']
         critic_hidden_dim = configs['critic_hidden_dim']
-        self.machine_critic = MLPCritic(mlp_critic_layer, critic_input_dim, critic_hidden_dim, 2).to(device)  # 3层 + 128in + 128隐藏 + 2out  TODO 全图特征的输入= 1*128 + pt和tt的反馈reward = 2！
+        self.machine_critic = MLPCritic(mlp_critic_layer, critic_input_dim + self.pref_dim, critic_hidden_dim, 2).to(device)  # 3层 + 128in + 128隐藏 + 2out  TODO 全图特征的输入= 1*128 + pt和tt的反馈reward = 2！
         # TODO 0109-消融实验-不使用r向量和v向量，那么动态的权重01其实没用，不改问题不大，看看效果
         # self.machine_critic = MLPCritic(mlp_critic_layer, critic_input_dim, critic_hidden_dim, 1).to(device)  # 3层 + 128in + 128隐藏 + 1out 
         Logger.log("Training/ppo/init_machine_critic", f"MLP: self.machine_critic={self.machine_critic}", print_true=1)
@@ -358,9 +384,9 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
                     Logger.log("Training/ppo/init_m_orthogonal_gcn_bias", f"Machine Actor: constant_(p, 0)", print_true=1)
 
     def forward(self, machine_fea_1, machine_fea_2, h_pooled_o, machine_mask,
-                machine_fea_3=None):  # m_fea2 指向 m_fea1： 有向边
-        
-        
+                machine_fea_3=None, score_bias=None, pref_emb=None):  # m_fea2 指向 m_fea1： 有向边
+
+
         # Logger.log("Training/ppo/machine_actor_forward_input", f"machine_fea_1={machine_fea_1.shape}, machine_fea_2={machine_fea_2.shape}, h_pooled_o={h_pooled_o.shape}, machine_mask={machine_mask.shape}", print_true=1)
         
         """
@@ -382,6 +408,10 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
         # print("MActor: machine_fea_1 = ", machine_fea_1, machine_fea_1.shape)
 
         """将不同维度的m_fea转换成一致，然后按照（bs*m，2, hidden）进行转换： 代表两个m节点的聚合，2-->1"""
+        if self.use_pref_embed and machine_fea_2.size(-1) >= 8:
+            machine_fea_2 = machine_fea_2.clone()
+            machine_fea_2[:, :, 5:8] = 0.0
+
         m_fea1 = self.m_fea_1_fcl(machine_fea_1)  # bs * m * 128(hidden)
         m_fea2 = self.m_fea_2_fcl(machine_fea_2)
         # Logger.log("Training/ppo/machine_actor_forward_fcl_out", f"m_fea1={m_fea1.shape}, m_fea2={m_fea2.shape}", print_true=1)
@@ -475,8 +505,18 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
                                 o_pooled_repeated), dim=-1)  # 最后一个维度合并
         # Logger.log("Training/ppo/machine_actor_forward_concateFea", f"concateFea={concateFea.shape}", print_true=1)
 
+        if self.use_pref_embed:
+            if pref_emb is None:
+                pref_emb = h_pooled.new_zeros(h_pooled.size(0), self.pref_dim)
+            else:
+                pref_emb = pref_emb.to(device=device, dtype=h_pooled.dtype)
+            pref_rep = pref_emb.unsqueeze(1).expand(-1, concateFea.size(1), -1)
+            concateFea = torch.cat((concateFea, pref_rep), dim=-1)
         mch_scores = self.m_policy(concateFea)  # batch * m * 1 输出的是选择哪一个m的得分：放入到了MLPActor的网络中
         mch_scores = mch_scores.squeeze(-1) * 10  # 去掉最后一个维度：batch * m。数值放大10倍
+        if score_bias is not None:  # [v5 hier] fixed top-level rule bias
+            mch_scores = mch_scores + score_bias.to(
+                device=mch_scores.device, dtype=mch_scores.dtype)
         # Logger.log("Training/ppo/machine_actor_forward_mch_scores", f"mch_scores={mch_scores.shape}", print_true=1)
         
 
@@ -494,7 +534,14 @@ class Machine_Actor_JointAction_selfGAT_selfCritic(nn.Module):
         # Logger.log("Training/ppo/machine_actor_forward_mch_prob", f"prob={mch_prob.shape}", print_true=1)
         
         # TODO 1113-新增局部的machine的critic，只关注pt和tt
-        machine_v = self.machine_critic(h_pooled)  # h_pooled = bs * hidden
+        if self.use_pref_embed:
+            if pref_emb is None:
+                pref_emb = h_pooled.new_zeros(h_pooled.size(0), self.pref_dim)
+            else:
+                pref_emb = pref_emb.to(device=device, dtype=h_pooled.dtype)
+            machine_v = self.machine_critic(torch.cat((h_pooled, pref_emb), dim=-1))
+        else:
+            machine_v = self.machine_critic(h_pooled)  # h_pooled = bs * hidden
         # Logger.log("Training/ppo/machine_actor_forward_machine_v", f"machine_v={machine_v.shape}", print_true=1)  # batch*2
 
         return mch_prob, h_pooled, machine_v  # batch*m的选择m的概率 + 返回所有m节点的全局嵌入（求均值）：batch * hidden_dim + m本地value=batch*2
@@ -520,6 +567,8 @@ class Global_Critic_JointAction_GAT(nn.Module):
         self.n_job = configs['n_job']
         self.n_machine = configs['n_machine']
         self.n_total_task = self.n_job * self.n_machine
+        self.use_pref_embed = bool(configs.get('pref_embed', 0))
+        self.pref_dim = int(configs.get('pref_dim', 16)) if self.use_pref_embed else 0
 
         self.heads = 1
 
@@ -571,7 +620,7 @@ class Global_Critic_JointAction_GAT(nn.Module):
         critic_hidden_dim = configs['critic_hidden_dim']
         # TODO 0109-消融实验-不使用r向量和v向量，那么动态的权重01其实没用，不改问题不大，看看效果
         # self.critic = MLPCritic(mlp_critic_layer, critic_input_dim * 2, critic_hidden_dim, 1).to(device)  # 2层 + 128in + 128隐藏 + 1out
-        self.critic = MLPCritic(mlp_critic_layer, critic_input_dim * 2, critic_hidden_dim, 4).to(device)  # 3层 + 128in + 128隐藏 + 4out
+        self.critic = MLPCritic(mlp_critic_layer, critic_input_dim * 2 + self.pref_dim, critic_hidden_dim, 4).to(device)  # 3层 + 128in + 128隐藏 + 4out
 
         # 正交初始化！
         if configs['use_orthogonal']:  # 就是configs的init
@@ -596,7 +645,8 @@ class Global_Critic_JointAction_GAT(nn.Module):
                 machine_fea3=None,
                 trans_wrk=None,
                 idle_wrk=None,
-                task_ctx=None
+                task_ctx=None,
+                pref_emb=None
                 ):
 
         # Logger.log("Training/ppo/global_critic_forward_input", f"x_fea={x_fea.shape}, graph_pool_avg={graph_pool_avg.shape}, adj={adj.shape}, candidate={candidate.shape}, machine_fea1={machine_fea1.shape}, machine_fea2={machine_fea2.shape}", print_true=1)
@@ -645,6 +695,13 @@ class Global_Critic_JointAction_GAT(nn.Module):
         """
         # 3层gin网络卷积之后，
         # 反馈：全图的节点嵌入(维度4（batch） * 128) + 各个节点的嵌入（64（batch*tasks） * 128）
+        if self.use_pref_embed:
+            if x_fea.size(-1) >= 12:
+                x_fea = x_fea.clone()
+                x_fea[:, 9:12] = 0.0
+            if machine_fea2.size(-1) >= 8:
+                machine_fea2 = machine_fea2.clone()
+                machine_fea2[:, :, 5:8] = 0.0
         h_g_o_pooled, h_o_nodes = self.encoder(x=x_fea,  # 这里直接就GIN的节点特征，和全局的池化特征都有了
                                                graph_pool=graph_pool_avg,
                                                padded_nei=None,
@@ -750,6 +807,12 @@ class Global_Critic_JointAction_GAT(nn.Module):
         只有全图的信息输入到value中！！！！
         输出：2层+128*2in+128隐+4out  batch*4
         """
+        if self.use_pref_embed:
+            if pref_emb is None:
+                pref_emb = h_g_o_pooled.new_zeros(h_g_o_pooled.size(0), self.pref_dim)
+            else:
+                pref_emb = pref_emb.to(device=device, dtype=h_g_o_pooled.dtype)
+            concateFea = torch.cat((concateFea, pref_emb), dim=-1)
         v = self.critic(concateFea)
         # Logger.log("Training/ppo/global_critic_forward_global_v", f"v={v.shape}", print_true=1)  # batch*4 = 对应4个reward
         

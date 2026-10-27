@@ -55,6 +55,7 @@ parser.add_argument('--weight_ec', type=float, default=0.4, help='instance')
 parser.add_argument('--weight_tt', type=float, default=0.2, help='instance')
 
 parser.add_argument('--train_seed', type=int, default=0, help='instance')
+parser.add_argument('--seed', type=int, default=-1, help='[v5] global RNG seed; -1 = off')
 parser.add_argument('--eval_seed', type=int, default=1, help='instance') # 是否在更新ppo的时候采用学习率递减（线性递减）
 parser.add_argument('--test_seed', type=int, default=3, help='instance')
 
@@ -101,19 +102,45 @@ parser.add_argument('--fig_scaling', type=int, default=100, help='hyper_paras') 
 parser.add_argument('--use_orthogonal', type=int, default=False, help='hyper_paras')  # 是否使用正交初始化
 parser.add_argument('--neighbor_pooling_type', type=str, default="average", help='gcn_paras') # 定义pooling或aggregate的方式（暂时用average，比max什么的好）
 parser.add_argument('--encoder_type', type=str, default='e2e', choices=['e2e', 'settrans', 'hybrid', 'hybrid_full', 'job_st'], help='[v5] e2e=GIN+GAT, settrans=ST+ST, hybrid=GIN job + ST machine, hybrid_full=also ST machine critic, job_st=ST job + original GAT machine')
+parser.add_argument('--algo', type=str, default='ppo', choices=['ppo', 'grpo'], help='[v5] policy optimization: ppo (critics) or grpo (critic-free group-relative)')
 parser.add_argument('--st_graph_bias', type=int, default=0, help='[v5] inject ST attention bias from the task graph')
-parser.add_argument('--st_token_context', type=int, default=0, help='[v5] add edge-consequence features to ST task tokens')
+parser.add_argument('--st_token_context', type=int, default=1, help='[v5] add edge-consequence features to ST task tokens')
 parser.add_argument('--st_full_context', type=int, default=0, help='[v5] add full job/machine/edge context features to ST')
-parser.add_argument('--st_task_features', type=int, default=0, help='[v5] add the 13 task-context features')
+parser.add_argument('--st_task_features', type=int, default=1, help='[v5] add the 13 task-context features')
 parser.add_argument('--st_edge_features', type=int, default=0, help='[v5] add the 4 edge-split features')
 parser.add_argument('--machine_id_emb', type=int, default=0, help='[v5] add a learned machine-ID embedding to ST machine tokens')
 parser.add_argument('--machine_no_attn', type=int, default=0, help='[v5] remove cross-machine attention; use per-machine MLP + mean')
 parser.add_argument('--machine_no_sab', type=int, default=0, help='[v5] keep machine input projection + PMA, remove only the SAB layers')
+parser.add_argument('--machine_logit_scale', type=float, default=1.0, help='[v5] scale the ST machine policy logits (GAT machine uses 10)')
+parser.add_argument('--machine_bn', type=int, default=0, help='[v5] apply BatchNorm to ST machine node embeddings (GAT machine uses BN)')
+parser.add_argument('--machine_intra_attn', type=int, default=1, help='[v5] ST machine: separate m1/m2/m3 projections + intra-machine attention before the inter-machine SAB (0 = joint-projection ablation)')
 parser.add_argument('--run_tag', type=str, default='', help='[v5] optional output subdirectory tag')
 parser.add_argument('--use_agv', type=int, default=0, help='[v5] Stage-0 AGV transport resource (0=off)')
+parser.add_argument('--agv_rule', type=int, default=0, help='[v5] use earliest-free AGV rule instead of the AGV actor')
+parser.add_argument('--agv_top_rule', type=int, default=0, help='[v5] use the top-level AGV rule head for dispatch (RS arms)')
+parser.add_argument('--agv_dst_actor', type=int, default=1, help='[v5] let the AGV actor choose the destination-workshop AGV too (cross-workshop legs); 0 = destination stays earliest-free')
+parser.add_argument('--machine_failure', type=int, default=0, help='[v5] enable machine failures (repair delays)')
+parser.add_argument('--machine_mtbf', type=float, default=100.0, help='[v5] machine mean time between failures')
+parser.add_argument('--machine_mttr', type=float, default=10.0, help='[v5] machine mean repair time')
+parser.add_argument('--agv_failure', type=int, default=0, help='[v5] enable AGV failures (repair delays)')
+parser.add_argument('--agv_mtbf', type=float, default=100.0, help='[v5] AGV mean time between failures')
+parser.add_argument('--agv_mttr', type=float, default=10.0, help='[v5] AGV mean repair time')
+parser.add_argument('--failure_seed', type=int, default=0, help='[v5] failure-event RNG seed')
+parser.add_argument('--buffer_capacity', type=int, default=0, help='[v5] finite machine buffer capacity (0=off)')
 parser.add_argument('--n_agv', type=int, default=6, help='[v5] total number of AGVs (split by workshop edge)')
 parser.add_argument('--cross_delay', type=float, default=5.0, help='[v5] fixed cross-workshop delay; consumes no AGV')
 parser.add_argument('--cross_leg_ratio', type=float, default=0.5, help='[v5] source share of remaining cross-workshop travel time')
+parser.add_argument('--hier', type=int, default=0, help='[v5] top-level rule-pair PPO (0=off)')
+parser.add_argument('--hier_interval', type=int, default=8, help='[v5] low-level steps per top-level rule')
+parser.add_argument('--hier_alpha', type=float, default=0.5, help='[v5] rule logit-bias scale')
+parser.add_argument('--hier_lr', type=float, default=1e-3, help='[v5] top-level PPO learning rate')
+parser.add_argument('--hier_epochs', type=int, default=4, help='[v5] top-level PPO epochs per episode')
+parser.add_argument('--hier_entropy', type=float, default=0.01, help='[v5] top-level entropy bonus')
+parser.add_argument('--top_credit', type=str, default='team',
+                    choices=['team', 'local', 'coma', 'hybrid'],
+                    help='[v5] top-level credit assignment: shared team reward, per-head local rewards, COMA counterfactual advantage, or hybrid (COMA over per-head local returns)')
+parser.add_argument('--pref_embed', type=int, default=0, help='[v5] replace raw lambda features with a learned preference embedding')
+parser.add_argument('--pref_dim', type=int, default=16, help='[v5] preference embedding dimension')
 parser.add_argument('--gcn_layer', type=int, default=3, help='gcn_paras') # 定义gcn的总层数，包括输入层
 parser.add_argument('--mlp_fea_extract_layer', type=int, default=3, help='gcn_paras') # 定义特征提取要用的mlp的层数
 parser.add_argument('--gcn_input_dim', type=int, default=12, help='gcn_paras') # 定义图卷积的最初输入的维度，即特征向量元素的个数
@@ -131,7 +158,7 @@ parser.add_argument('--load_pth', type=parse_dict, default=run_dict["load_pth"],
 parser.add_argument('--use_load_model', type=int, default=False, help='paload_pth_parametersth') # 定义是否加载模型
 parser.add_argument('--resume_ckpt', type=str, default='', help='[v5] full checkpoint .pt to resume training from')
 parser.add_argument('--load_model_type', type=int, default=0, help='paload_pth_parametersth') # 0=best/top1,1=final,2=error选episode,3=top2/3
-parser.add_argument('--trained_model_pth', type=str, default='D:/research/DeepReinforcementLearningScheduling/plcsp_v5/trained_model/', help='paload_pth_parametersth')
+parser.add_argument('--trained_model_pth', type=str, default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trained_model') + os.sep, help='paload_pth_parametersth')
 
 """计算episode的总次数，保证生成的instances数量都能跑完"""
 epi_num = 12800 / parser.get_default('env_batch') * parser.get_default('resample_freq')    # 获取 --xxx 参数的默认值

@@ -43,7 +43,22 @@ _PAPER_TIERS = ("M1_M4", "M1_M4", "M1_M4", "M1_M4",
 # 第 11 台起按三档**循环**指派（M1_M4 → M5_M6 → M7_M10 → …）。这是本模块唯一的非引证假设，
 # 已列 spec §9 的 assumed 表；敏感性分析应覆盖"档位指派方式"对能耗的影响。
 _CYCLE_TIERS = ("M1_M4", "M5_M6", "M7_M10")
-MAX_MACHINES = len(_PAPER_TIERS) + len(_CYCLE_TIERS) * 2      # 16：覆盖到 MK 实例族上限
+MAX_MACHINES = 18
+"""机位数上限 —— **外推档位能延伸到哪里**。
+
+⚠️ **2026-10-12：由 16 提到 18**（用户裁定）。原值 `len(_PAPER_TIERS) + len(_CYCLE_TIERS)*2`
+= 16，注释写的是"覆盖到 MK 实例族上限" ⟹ **16 是"当时够用"，不是从文献推出来的**。
+
+**提到 18 的理由**：按 **Shi et al., *Advanced Engineering Informatics* 65 (2025) 103195**
+的规格跑，它的验证环境是 **18 台机器**（见 `env/shi_instances.N_MACHINES_SHI`）。
+不提就一台都跑不了（`machine_params_for` 会直接报错）。
+
+⚠️ **代价（必须写进论文的 assumed 表）**：第 **11–18** 台的能耗档位**全部是循环外推**
+（`_CYCLE_TIERS`），**不是引证值** —— 原文献只有 10 台机位的参数表。
+外推的**性质没变**（11 台起本来就是循环），只是**范围扩了 2 台**。
+
+⚠️ 本文件与 `plcsp/energy.py` 曾**逐位相同**，本次只在 v3 改（v1 已封笔）⟹ **两者自此分叉**。
+"""
 
 
 def _tier_of(idx: int) -> str:

@@ -1,0 +1,81 @@
+{
+ "max_parallel": 3,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-26 10x6 E3 same-policy AGV control: same checkpoint, AGV forced to earliest-free rule.",
+ "jobs": [
+  {
+   "id": "E_10x6_rule_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 4.1,
+   "after": [],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6_rule"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--machine_intra_attn", "1",
+    "--use_agv", "1",
+    "--n_agv", "6",
+    "--cross_delay", "5",
+    "--cross_leg_ratio", "0.5",
+    "--agv_dst_actor", "1",
+    "--agv_rule", "1",
+    "--run_tag", "plan_E3_J10M6E2_s1_remote"
+   ],
+   "notes": "E3 s1, AGV forced to rule"
+  },
+  {
+   "id": "E_10x6_rule_s2",
+   "script": "eval_st_seed3.py",
+   "priority": 4.2,
+   "after": [],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6_rule"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--machine_intra_attn", "1",
+    "--use_agv", "1",
+    "--n_agv", "6",
+    "--cross_delay", "5",
+    "--cross_leg_ratio", "0.5",
+    "--agv_dst_actor", "1",
+    "--agv_rule", "1",
+    "--run_tag", "plan_E3_J10M6E2_s2_remote"
+   ],
+   "notes": "E3 s2, AGV forced to rule"
+  },
+  {
+   "id": "E_10x6_rule_s3",
+   "script": "eval_st_seed3.py",
+   "priority": 4.3,
+   "after": [],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6_rule"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--machine_intra_attn", "1",
+    "--use_agv", "1",
+    "--n_agv", "6",
+    "--cross_delay", "5",
+    "--cross_leg_ratio", "0.5",
+    "--agv_dst_actor", "1",
+    "--agv_rule", "1",
+    "--run_tag", "plan_E3_J10M6E2_s3_remote"
+   ],
+   "notes": "E3 s3, AGV forced to rule"
+  }
+ ]
+}

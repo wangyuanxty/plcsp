@@ -11,7 +11,7 @@ import random
 import numpy as np
 from torch.utils.data import DataLoader
 import sys
-sys.path.insert(0, 'D:/research/DeepReinforcementLearningScheduling/plcsp_v5')  # 将a文件夹的路径添加到Python路径,0表示添加到最前边
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 将本文件目录添加到Python路径,0表示添加到最前边
 from algorithm.ppo_algorithm import PPOAlgorithm
 from instance.generate_allsize_mofjsp_dataset import Instance_Dataset, Logger, Result_Logger
 from trainer.parallel_env import Parallel_env
@@ -21,8 +21,121 @@ from algorithm.agent_func import select_machine_action
 from trainer.validate import validate_cost_gcn_jointActor_GAT, read_MIP_result_from_csv
 from trainer.fig_kpi import plot_show
 from parameters import args
+try:
+    from hierarchy.rules import (
+        N_JOB_RULES, N_MACHINE_RULES, N_AGV_RULES,
+        agv_rule_bias, job_rule_bias, machine_rule_bias,
+        select_agv_by_rule, top_state_features)
+    from hierarchy.top_ppo import TopLevelController
+except ImportError:
+    from plcsp_v5.hierarchy.rules import (
+        N_JOB_RULES, N_MACHINE_RULES, N_AGV_RULES,
+        agv_rule_bias, job_rule_bias, machine_rule_bias,
+        select_agv_by_rule, top_state_features)
+    from plcsp_v5.hierarchy.top_ppo import TopLevelController
 import wandb
 import heapq  # 最小堆，堆中从小到大进行排序，插入会自动保持堆的顺序
+
+V5_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+
+
+def _current_weights(paral_env, variant):
+    """Per-env preference weights.
+
+    GRPO uses one group lambda shared by all envs.  PPO keeps a separate
+    sampled ``reward_random_weight`` per env.
+    """
+    if variant.get('algo', 'ppo') == 'grpo':
+        w = np.array([variant['weight_mk'], variant['weight_ec'],
+                      variant['weight_tt']], dtype=np.float32)
+        return np.tile(w, (variant['env_batch'], 1))
+    rows = []
+    for i in range(variant['env_batch']):
+        rw = getattr(paral_env.paral_env_DG[i],
+                     'reward_random_weight', None)
+        if rw is None:
+            rw = (variant['weight_mk'], variant['weight_ec'],
+                  variant['weight_tt'])
+        rows.append(np.asarray(rw, dtype=np.float32))
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _scheduled_now(env):
+    """Latest finish time among scheduled operations (0 before any)."""
+    finished = [float(n.get('finish_time') or 0.0)
+                for _, n in env.G.nodes(data=True) if n.get('scheduled')]
+    return max(finished) if finished else 0.0
+
+
+def _agv_top_stats(paral_env, variant):
+    """Per-env AGV busy fraction and mean wait for the top-level state.
+
+    ``now`` must be the current schedule time, not the makespan estimate.
+    ``makespan_previous_step`` is a horizon over all tasks, so every AGV
+    ``free_time`` is below it and the features would be constant zero.
+    """
+    if not variant.get('use_agv', 0):
+        return np.zeros((variant['env_batch'], 2), dtype=np.float32)
+    rows = []
+    for i in range(variant['env_batch']):
+        agvs = paral_env.agv_states[i]
+        env = paral_env.paral_env_DG[i]
+        now = _scheduled_now(env)
+        if not agvs:
+            rows.append((0.0, 0.0))
+            continue
+        busy = np.mean([1.0 if a.free_time > now + 1e-9 else 0.0
+                        for a in agvs])
+        wait = np.mean([max(0.0, a.free_time - now) for a in agvs])
+        rows.append((float(busy), float(wait / max(1.0, now))))
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _weighted_cost(paral_env, variant, weights=None):
+    """Per-env weighted objective used by the top-level controller.
+
+    ``weights`` is (B, 3).  When omitted it is taken from the active
+    preference of each env.  The top-level state carries the same values.
+    """
+    attrs = ['makespan_previous_step', 'total_e1_previous_step',
+             'trans_t_previous_step', 'idle_t_previous_step']
+    c = np.array(
+        [[getattr(paral_env.paral_env_DG[i], attr)
+          for i in range(variant['env_batch'])]
+         for attr in attrs], dtype=np.float32)
+    c[1] /= variant['n_job'] * variant['n_machine']
+    w = (_current_weights(paral_env, variant) if weights is None
+         else np.asarray(weights, dtype=np.float32))
+    if w.ndim == 1:
+        w = np.tile(w, (variant['env_batch'], 1))
+    return (w[:, 0] * c[0]
+            + w[:, 1] * (c[1] + c[3])
+            + w[:, 2] * c[2])
+
+
+def _local_cost_vector(paral_env, variant):
+    """Per-head local costs for top-level credit assignment.
+
+    Returns (B, 3): job = mk + idleT, machine = mean PEC + transT,
+    AGV = transT + accumulated AGV wait.  The caller slices the vector
+    to the active heads.
+    """
+    attrs = ['makespan_previous_step', 'total_e1_previous_step',
+             'trans_t_previous_step', 'idle_t_previous_step']
+    c = np.array(
+        [[getattr(paral_env.paral_env_DG[i], attr)
+          for i in range(variant['env_batch'])]
+         for attr in attrs], dtype=np.float32)
+    c[1] /= variant['n_job'] * variant['n_machine']
+    wait = np.asarray(
+        getattr(paral_env, 'agv_wait_total',
+                np.zeros(variant['env_batch'], dtype=np.float64)),
+        dtype=np.float32)
+    return np.stack([c[0] + c[3], c[1] + c[2], c[2] + wait], axis=1)
+
+
 
 
 
@@ -30,10 +143,26 @@ import heapq  # 最小堆，堆中从小到大进行排序，插入会自动保�
 
 def experiment(
         variant,   # 传入的是arg定义好的参数，dict形式
-): 
-    
+):
+    if int(variant.get('seed', -1)) >= 0:
+        _seed = int(variant['seed'])
+        random.seed(_seed)
+        np.random.seed(_seed)
+        torch.manual_seed(_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(_seed)
+        print(f"[v5-seed] global seed={_seed}", flush=True)
+
     """加载生成的数据"""
-    pth = 'D:/research/DeepReinforcementLearningScheduling/plcsp_v5/instance'
+    if variant.get('algo', 'ppo') == 'grpo':
+        if variant['resample_freq'] != variant['buffer_size']:
+            raise ValueError(
+                "GRPO needs resample_freq == buffer_size "
+                "(one group = G rollouts on the same instances)")
+        # GRPO samples one lambda per group and injects it through configs.
+        # The env reset mode must read configs, hence 'eval'.
+        variant['random_weight_type'] = 'eval'
+    pth = os.path.join(V5_ROOT, 'instance')
     dataset_path = pth + f"/Instance_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}.pkl"
     train_instance = Instance_Dataset(  # TODO def的所有形参都默认值，这里传入可以只选择要改的值！
             generate_true=0,    # TODO generate_true=0直接读取文件的地址，不需要其他参数
@@ -75,6 +204,33 @@ def experiment(
     
     ppo = PPOAlgorithm(args=variant, load_pretrained=False)
 
+    # [v5 hier] top-level rule-pair PPO (design A); low-level actors unchanged
+    top_ctl = None
+    if bool(variant.get('hier', 0)):
+        if int(variant['hier_interval']) < 1:
+            raise ValueError("hier_interval must be >= 1")
+        _head_sizes = [N_JOB_RULES, N_MACHINE_RULES]
+        if bool(variant.get('use_agv', 0)):
+            _head_sizes.append(N_AGV_RULES)
+        top_ctl = TopLevelController(
+            input_dim=18,
+            head_sizes=tuple(_head_sizes),
+            lr=variant['hier_lr'],
+            gamma=variant['GAMMA'],
+            lam=variant['LAMDA'],
+            clip=variant['epsilon'],
+            epochs=variant['hier_epochs'],
+            entropy_coef=variant['hier_entropy'],
+            credit=variant.get('top_credit', 'team'),
+            device=variant['device'])
+        Logger.log(
+            "Training/hierarchy/init",
+            f"top-level PPO: heads={tuple(_head_sizes)}, "
+            f"interval={variant['hier_interval']}, "
+            f"alpha={variant['hier_alpha']}, "
+            f"credit={variant.get('top_credit', 'team')}",
+            print_true=1)
+
     # [v5] resume from a full checkpoint (models + optimizers + schedulers)
     resume_episode = 0
     if variant.get('resume_ckpt'):
@@ -93,6 +249,19 @@ def experiment(
         if ppo.use_agv and 'agv_actor' in _ckpt and 'agv_optimizer' in _ckpt:
             ppo.agv_actor.load_state_dict(_ckpt['agv_actor'])
             ppo.agv_optimizer.load_state_dict(_ckpt['agv_optimizer'])
+        if top_ctl is not None and 'hier_top_model' in _ckpt:
+            top_ctl.load_state_dict(_ckpt['hier_top_model'])
+            if 'hier_top_optimizer' in _ckpt:
+                top_ctl.load_optimizer_state_dict(_ckpt['hier_top_optimizer'])
+            if (getattr(top_ctl, 'credit', 'team') in ('coma', 'hybrid')
+                    and _ckpt.get('hier_top_q_replay')):
+                top_ctl.q_replay = [
+                    (a.to(top_ctl.device), b.to(top_ctl.device))
+                    for a, b in _ckpt['hier_top_q_replay']]
+        if getattr(ppo, 'use_pref_embed', False) and 'pref_embed' in _ckpt:
+            ppo.pref_embed.load_state_dict(_ckpt['pref_embed'])
+            if 'pref_optimizer' in _ckpt:
+                ppo.pref_optimizer.load_state_dict(_ckpt['pref_optimizer'])
         resume_episode = int(_ckpt['episode'])
         print(f"[v5-resume] loaded {variant['resume_ckpt']} @ episode {resume_episode}", flush=True)
     
@@ -105,8 +274,10 @@ def experiment(
       },
     """
     _run_tag = variant.get('run_tag', '')
-    model_pth = ("D:/research/DeepReinforcementLearningScheduling/plcsp_v5/trained_model/"
-                 + (_run_tag + "/" if _run_tag else ""))
+    model_pth = os.path.join(V5_ROOT, "trained_model")
+    if _run_tag:
+        model_pth = os.path.join(model_pth, _run_tag)
+    model_pth = model_pth + os.sep
     os.makedirs(model_pth, exist_ok=True)
     job_name = "PPO_job_actor_"
     machine_name = "PPO_machine_actor_"
@@ -187,9 +358,13 @@ def experiment(
         "TransEC": [],
     }
     """
-    MIP_result_file = "D:/research/DeepReinforcementLearningScheduling/plcsp_v5/tester/Solver_seed3/MO_FJSP_MIP_result_(J%s_M%s_seed%s_sample%s_w%s%s%s).csv" % \
-                      (variant['n_job'], variant['n_machine'], variant['eval_seed'], 100,
-                       int(variant['weight_mk'] * 10), int(variant['weight_ec'] * 10), int(variant['weight_tt'] * 10))
+    MIP_result_file = os.path.join(
+        V5_ROOT, "tester", "Solver_seed3",
+        "MO_FJSP_MIP_result_(J%s_M%s_seed%s_sample%s_w%s%s%s).csv"
+        % (variant['n_job'], variant['n_machine'], variant['eval_seed'],
+           100, int(variant['weight_mk'] * 10),
+           int(variant['weight_ec'] * 10),
+           int(variant['weight_tt'] * 10)))
     # [v5] seed1 MIP results are not shipped; validation does not need them.
     if os.path.exists(MIP_result_file):
         MIP_cost_dict = read_MIP_result_from_csv(MIP_result_file)
@@ -216,8 +391,15 @@ def experiment(
     top3_obj_heap = []  # 使用最大堆来存储最小的三个obj_eval_mean,（存储记录pth的文件名）
     
     traj_lst =[]  # 储存轨迹 = episode_num，同一批batch走buffer_size遍，ppo不断更新进化中 (TODO list中多个tuple，内含元素shape不同)
+    group_costs = []  # [v5 grpo] per-episode (4, env_batch) final costs of the current group
     
     for i_episode in range(resume_episode, variant['episode_num']):
+        # [v5 grpo] one lambda per group: fixed inside G rollouts, random across groups.
+        if variant.get('algo', 'ppo') == 'grpo' and not group_costs:
+            _w = np.random.rand(3)
+            _w = _w / _w.sum()
+            variant['weight_mk'], variant['weight_ec'], variant['weight_tt'] = map(float, _w)
+            Logger.log("Training/grpo/group_lambda", f"group lambda={_w.tolist()}", print_true=1)
         """
         泛化性：
         1、尝试不断更改ability instance的数值：每20轮 + 20的batch_size
@@ -295,6 +477,43 @@ def experiment(
         # TODO 将布尔张量取反
         mask_machine_batch0 = ~mask_machine_batch  # mask作用是，true代表不能选
         # Logger.log("Training/init_mask_machine", f"mask_machine_batch0={mask_machine_batch0}, shape={mask_machine_batch0.shape}", print_true=1)  # = bs * tasks * m
+
+        # [v5 hier] sample the first rule pair of this episode
+        top_enabled = top_ctl is not None
+        top_credit = (variant.get('top_credit', 'team')
+                      if top_enabled else 'team')
+        top_step = 0
+        top_rule = None
+        top_job = top_machine = top_agv = None
+        top_last_cost = None
+        top_last_local = None
+        if top_enabled:
+            _w_np = _current_weights(paral_env, variant)
+            _agv_np = _agv_top_stats(paral_env, variant)
+            _trend_np = np.zeros(variant['env_batch'], dtype=np.float32)
+            top_state = top_state_features(
+                tasks_fea_batch, candidate_batch, mask_operation_batch,
+                machine_scheduled_fea_batch, 0,
+                variant['n_job'] * variant['n_machine'],
+                variant['n_machine'], variant['n_job'],
+                weights=_w_np, agv_stats=_agv_np, cost_trend=_trend_np,
+                device=variant['device'])
+            top_rule, _, _ = top_ctl.act(top_state, store=True)
+            top_job, top_machine = top_rule[:, 0], top_rule[:, 1]
+            top_agv = (top_rule[:, 2] if top_rule.size(1) > 2 else None)
+            top_last_cost = _weighted_cost(paral_env, variant, _w_np)
+            if top_credit in ('local', 'hybrid'):
+                top_last_local = _local_cost_vector(
+                    paral_env, variant)[:, :top_ctl.n_heads]
+
+        # [v5 pref] learned preference embedding, fixed within an episode
+        pref_emb = None
+        if bool(variant.get('pref_embed', 0)):
+            _lam = np.array(
+                [paral_env.paral_env_DG[i].reward_random_weight
+                 for i in range(variant['env_batch'])], dtype=np.float32)
+            pref_emb = ppo.pref_embed(
+                torch.from_numpy(_lam).to(variant['device']))
         
         """
         win_done：解决最后只剩一个job的0001学习问题：只计算，但是不训练到net中
@@ -346,6 +565,12 @@ def experiment(
                 """
                 use_task = bool(variant.get('st_task_features', 0))
                 use_edge = bool(variant.get('st_edge_features', 0))
+                job_bias = None
+                if top_enabled:
+                    job_bias = job_rule_bias(
+                        tasks_fea_batch, candidate_batch, mask_operation_batch,
+                        top_job, variant['n_machine'],
+                        variant['hier_alpha'], device=variant['device'])
                 if use_task:
                     task_context_batch = paral_env.cal_cur_task_context()
                     task_context_t = torch.from_numpy(
@@ -370,7 +595,9 @@ def experiment(
                             use_greedy=False,
                             trans_wrk=trans_t,
                             idle_wrk=idle_t,
-                            task_ctx=task_context_t
+                            task_ctx=task_context_t,
+                            score_bias=job_bias,
+                            pref_emb=pref_emb
                             )
                 # Logger.log("Training/while/ppo_job_actor", f"task_index={task_index.shape}, action_index={action_index.shape}, log_a={log_a.shape}, h_g_o_pooled={h_g_o_pooled.shape}, job_v={job_v.shape}", print_true=1)
 
@@ -386,6 +613,19 @@ def experiment(
                                                    task_index.unsqueeze(-1).unsqueeze(-1).expand(mask_machine_batch0.size(0), -1,mask_machine_batch0.size(2)))  
                 # Logger.log("Training/while/machine_mask", f"mask_machine_batch_={mask_machine_batch_}, shape={mask_machine_batch_.shape}", print_true=1)  # 4 * 1 * 4 = batch * 1 * m
 
+                machine_mask_original = mask_machine_batch_
+                if int(variant.get('buffer_capacity', 0)) > 0:
+                    _bm = paral_env.machine_buffer_mask(task_index)
+                    if _bm is not None:
+                        _bm_t = torch.from_numpy(_bm).bool().to(
+                            variant['device']).unsqueeze(1)
+                        mask_machine_batch_ = mask_machine_batch_ | _bm_t
+                        _all_blocked = mask_machine_batch_.all(
+                            dim=-1, keepdim=True)
+                        mask_machine_batch_ = torch.where(
+                            _all_blocked, machine_mask_original,
+                            mask_machine_batch_)
+
                 """
                 TODO 新增当前task的对应可选m的节点特征 
                 1、候选m的节点特征（bs，m，6）= 做当前task的<能力t, 能力pt, 所需transt, 可选Im, 能力p, 属于edge>(有则真，无则估计mean)
@@ -399,7 +639,14 @@ def experiment(
                             all_task_fea=tasks_fea_batch)  # （env_batch*tasks， 12）
                 machine_context_batch = paral_env.cal_cur_task_machine_context(
                             task_index=task_index, m_mask=mask_machine_batch_)
-                # Logger.log("Training/while/machine_candidate_fea", f"machine_candidate_fea_batch={machine_candidate_fea_batch}, shape={machine_candidate_fea_batch.shape}", print_true=1)  #
+                # Logger.log("Training/while/machine_candidate_fea", f"machine_candidate_fea_batch={machine_candidate_fea_batch}, shape={machine_candidate_fea_batch.shape}", print_true=1)
+
+                machine_bias = None
+                if top_enabled:
+                    machine_bias = machine_rule_bias(
+                        machine_candidate_fea_batch, mask_machine_batch_,
+                        top_machine, variant['hier_alpha'],
+                        device=variant['device'])
                 
                 """
                 TODO m_fea1（job_actor后产生） 和 m_fea2（env后产生） 都要输入到machine网络中，进行GAT自聚合
@@ -416,7 +663,9 @@ def experiment(
                             machine_fea_2=machine_scheduled_fea_batch,  # bs*m*8  上一次选完m后的ENV的更新m特征
                             h_pooled_o=h_g_o_pooled,   # task全图张量h_g_o_pooled = bs * hidden
                             machine_mask=mask_machine_batch_,  # batch * 1 * m machine的mask
-                            machine_fea_3=machine_context_batch)
+                            machine_fea_3=machine_context_batch,
+                            score_bias=machine_bias,
+                            pref_emb=pref_emb)
                 # Logger.log("Training/while/ppo_machine_actor_out", f"mch_prob={mch_prob.shape}, h_mch_pooled={h_mch_pooled.shape}, machine_v={machine_v.shape}", print_true=1)
 
                 # print("3:{}".format(get_GPU_usage()[1]))
@@ -463,9 +712,15 @@ def experiment(
             joint_actions = [x for x in zip(task_index.tolist(), m_action.tolist())]  
             # [v5] Stage-0 AGV action (optional)
             agv_actions = None
+            agv_dst_actions = None
             agv_feat_np = agv_ctx_np = agv_mask_np = agv_valid_np = None
+            agv_dst_feat_np = agv_dst_ctx_np = agv_dst_mask_np = agv_dst_valid_np = None
             a_agv_store = a_agv_logprob_store = agv_mask_store = agv_valid_store = None
+            a_agv_dst_store = a_agv_dst_logprob_store = agv_dst_mask_store = agv_dst_valid_store = None
             agv_v_store = None
+            agv_dst_v_store = None
+            agv_bias_np = None
+            agv_dst_bias_np = None
             if variant.get('use_agv', 0):
                 _task_np = (task_index.detach().cpu().numpy()
                             if torch.is_tensor(task_index) else np.asarray(task_index))
@@ -474,21 +729,118 @@ def experiment(
                 agv_feat_np, agv_ctx_np, agv_mask_np, agv_valid_np = \
                     paral_env.get_agv_decision_batch(_task_np, _m_np)
                 _dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-                agv_feat_t = torch.from_numpy(agv_feat_np).float().to(_dev)
-                agv_ctx_t = torch.from_numpy(agv_ctx_np).float().to(_dev)
-                agv_mask_t = torch.from_numpy(agv_mask_np).bool().to(_dev)
-                agv_prob, _agv_v = ppo.agv_actor(agv_feat_t, agv_ctx_t, agv_mask_t)
-                _agv_dist = torch.distributions.Categorical(probs=agv_prob)
-                a_agv = _agv_dist.sample()
-                a_agv_logprob = _agv_dist.log_prob(a_agv)
-                agv_actions = a_agv.detach().cpu().numpy()
-                a_agv_store = a_agv.detach().cpu()
-                a_agv_logprob_store = a_agv_logprob.detach().cpu()
-                agv_v_store = _agv_v.detach().cpu()
-                agv_mask_store = torch.from_numpy(agv_mask_np).bool()
-                agv_valid_store = torch.from_numpy(agv_valid_np).bool()
+                _top_agv = top_agv if top_enabled else None
+                _agv_top_rule = bool(variant.get('agv_top_rule', 0))
+                _agv_bias_t = None
+                if _top_agv is not None:
+                    _agv_bias_t = agv_rule_bias(
+                        agv_feat_np, agv_mask_np, _top_agv,
+                        alpha=variant['hier_alpha'],
+                        device=variant['device'])
+                _b = agv_mask_np.shape[0]
+                if _agv_top_rule and _top_agv is not None:
+                    agv_actions = select_agv_by_rule(
+                        agv_feat_np, agv_mask_np, _top_agv,
+                        generator=None).detach().cpu().numpy()
+                    a_agv_store = torch.from_numpy(agv_actions)
+                    a_agv_logprob_store = torch.zeros(_b, dtype=torch.float)
+                    agv_v_store = torch.zeros(_b, 2, dtype=torch.float)
+                    agv_mask_store = torch.from_numpy(agv_mask_np).bool()
+                    agv_valid_store = torch.zeros(_b, dtype=torch.bool)
+                elif bool(variant.get('agv_rule', 0)):
+                    try:
+                        from agv.state import earliest_free_agv
+                    except ImportError:
+                        from plcsp_v5.agv.state import earliest_free_agv
+                    agv_actions = np.asarray(
+                        [earliest_free_agv(paral_env.agv_states[i],
+                                           agv_mask_np[i])
+                         for i in range(_b)], dtype=np.int64)
+                    a_agv_store = torch.from_numpy(agv_actions)
+                    a_agv_logprob_store = torch.zeros(_b, dtype=torch.float)
+                    agv_v_store = torch.zeros(_b, 2, dtype=torch.float)
+                    agv_mask_store = torch.from_numpy(agv_mask_np).bool()
+                    agv_valid_store = torch.zeros(_b, dtype=torch.bool)
+                else:
+                    agv_feat_t = torch.from_numpy(agv_feat_np).float().to(_dev)
+                    agv_ctx_t = torch.from_numpy(agv_ctx_np).float().to(_dev)
+                    agv_mask_t = torch.from_numpy(agv_mask_np).bool().to(_dev)
+                    agv_prob, _agv_v = ppo.agv_actor(
+                        agv_feat_t, agv_ctx_t, agv_mask_t,
+                        logit_bias=_agv_bias_t)
+                    _agv_dist = torch.distributions.Categorical(probs=agv_prob)
+                    a_agv = _agv_dist.sample()
+                    a_agv_logprob = _agv_dist.log_prob(a_agv)
+                    agv_actions = a_agv.detach().cpu().numpy()
+                    a_agv_store = a_agv.detach().cpu()
+                    a_agv_logprob_store = a_agv_logprob.detach().cpu()
+                    agv_v_store = _agv_v.detach().cpu()
+                    agv_mask_store = torch.from_numpy(agv_mask_np).bool()
+                    agv_valid_store = torch.from_numpy(agv_valid_np).bool()
+                    if _agv_bias_t is not None:
+                        agv_bias_np = _agv_bias_t.detach().cpu().numpy()
 
-            adj_batch_, oenv_step_info, machine_scheduled_fea_batch_, tasks_fea_batch_ = paral_env.DGFJSPEnv_paral_step(joint_actions, agv_actions)
+                # [v5] destination-workshop AGV: actor or earliest-free rule
+                _b = agv_mask_np.shape[0]
+                agv_dst_feat_np, agv_dst_ctx_np, agv_dst_mask_np, agv_dst_valid_np = \
+                    paral_env.get_agv_dst_decision_batch(_task_np, _m_np,
+                                                         agv_actions)
+                _dst_by_rule = (_agv_top_rule
+                                or bool(variant.get('agv_rule', 0))
+                                or not bool(variant.get('agv_dst_actor', 1)))
+                if _agv_top_rule and _top_agv is not None:
+                    agv_dst_actions = select_agv_by_rule(
+                        agv_dst_feat_np, agv_dst_mask_np, _top_agv,
+                        generator=None).detach().cpu().numpy()
+                    a_agv_dst_store = torch.from_numpy(agv_dst_actions)
+                    a_agv_dst_logprob_store = torch.zeros(_b, dtype=torch.float)
+                    agv_dst_v_store = torch.zeros(_b, 2, dtype=torch.float)
+                    agv_dst_mask_store = torch.from_numpy(agv_dst_mask_np).bool()
+                    agv_dst_valid_store = torch.zeros(_b, dtype=torch.bool)
+                elif _dst_by_rule:
+                    try:
+                        from agv.state import earliest_free_agv
+                    except ImportError:
+                        from plcsp_v5.agv.state import earliest_free_agv
+                    agv_dst_actions = np.asarray(
+                        [earliest_free_agv(paral_env.agv_states[i],
+                                           agv_dst_mask_np[i])
+                         for i in range(_b)], dtype=np.int64)
+                    a_agv_dst_store = torch.from_numpy(agv_dst_actions)
+                    a_agv_dst_logprob_store = torch.zeros(_b, dtype=torch.float)
+                    agv_dst_v_store = torch.zeros(_b, 2, dtype=torch.float)
+                    agv_dst_mask_store = torch.from_numpy(agv_dst_mask_np).bool()
+                    agv_dst_valid_store = torch.zeros(_b, dtype=torch.bool)
+                else:
+                    dst_feat_t = torch.from_numpy(
+                        agv_dst_feat_np).float().to(_dev)
+                    dst_ctx_t = torch.from_numpy(
+                        agv_dst_ctx_np).float().to(_dev)
+                    dst_mask_t = torch.from_numpy(
+                        agv_dst_mask_np).bool().to(_dev)
+                    _dst_bias_t = None
+                    if _top_agv is not None:
+                        _dst_bias_t = agv_rule_bias(
+                            agv_dst_feat_np, agv_dst_mask_np, _top_agv,
+                            alpha=variant['hier_alpha'],
+                            device=variant['device'])
+                        agv_dst_bias_np = _dst_bias_t.detach().cpu().numpy()
+                    dst_prob, _dst_v = ppo.agv_actor(
+                        dst_feat_t, dst_ctx_t, dst_mask_t,
+                        logit_bias=_dst_bias_t)
+                    _dst_dist = torch.distributions.Categorical(probs=dst_prob)
+                    a_dst = _dst_dist.sample()
+                    a_dst_logprob = _dst_dist.log_prob(a_dst)
+                    agv_dst_actions = a_dst.detach().cpu().numpy()
+                    a_agv_dst_store = a_dst.detach().cpu()
+                    a_agv_dst_logprob_store = a_dst_logprob.detach().cpu()
+                    agv_dst_v_store = _dst_v.detach().cpu()
+                    agv_dst_mask_store = torch.from_numpy(
+                        agv_dst_mask_np).bool()
+                    agv_dst_valid_store = torch.from_numpy(
+                        agv_dst_valid_np).bool()
+
+            adj_batch_, oenv_step_info, machine_scheduled_fea_batch_, tasks_fea_batch_ = paral_env.DGFJSPEnv_paral_step(joint_actions, agv_actions, agv_dst_actions)
             if bool(variant.get('st_task_features', 0)):
                 task_context_batch_ = paral_env.cal_cur_task_context()
                 task_context_t_ = torch.from_numpy(
@@ -558,7 +910,8 @@ def experiment(
                                 use_greedy=False,
                                 trans_wrk=trans_t_,
                                 idle_wrk=idle_t_,
-                                task_ctx=task_context_t_
+                                task_ctx=task_context_t_,
+                                pref_emb=pref_emb
                                 )
                     machine_candidate_fea_batch_ = machine_candidate_fea_batch  # 就用最后一步的m_fea1，因为下一时刻没有task可以选择，不会有m_fea1
                     _, _, machine_v_ = ppo.machine_actor_gcn(
@@ -566,7 +919,8 @@ def experiment(
                                 machine_fea_2=machine_scheduled_fea_batch_, # bs*m*8  上一次选完m后的ENV的更新m特征
                                 h_pooled_o=h_g_o_pooled_,   # 这里使用的是上一个job产生的全图的节点嵌入特征值
                                 machine_mask=mask_machine_batch_,  # ！TODO 最后一步的时候已经没有task了，所以没法找到对应大于0的t，所以用最后一次的mask
-                                machine_fea_3=machine_context_batch)
+                                machine_fea_3=machine_context_batch,
+                                pref_emb=pref_emb)
                     replay_buffer.store_v_next(j_v_=job_v_,  # 最后一步其实已经记录过了，这是重新记录最后一次的下一次state的对应的v_
                                                m_v_=machine_v_)
                     step_flag_for_v_ = 0 # 此时可以清0了，因为马上也要done了！！！！
@@ -621,7 +975,22 @@ def experiment(
                         a_agv=a_agv_store,
                         a_agv_logprob=a_agv_logprob_store,
                         agv_valid=agv_valid_store,
-                        agv_v=agv_v_store)
+                        agv_v=agv_v_store,
+                        agv_dst_feat=agv_dst_feat_np,
+                        agv_dst_ctx=agv_dst_ctx_np,
+                        agv_dst_mask=agv_dst_mask_store,
+                        a_agv_dst=a_agv_dst_store,
+                        a_agv_dst_logprob=a_agv_dst_logprob_store,
+                        agv_dst_valid=agv_dst_valid_store,
+                        agv_dst_v=agv_dst_v_store,
+                        job_bias=(job_bias.detach().cpu().numpy()
+                                  if job_bias is not None else None),
+                        machine_bias=(machine_bias.detach().cpu().numpy()
+                                      if machine_bias is not None else None),
+                        rule_id=(top_rule.detach().cpu().numpy()
+                                 if top_rule is not None else None),
+                        agv_bias=agv_bias_np,
+                        agv_dst_bias=agv_dst_bias_np)
             
 
             """
@@ -630,6 +999,38 @@ def experiment(
             all_steps += 1  # 不间断记录step的次数，用于动态递减LR (虽然只记录了选择operation的step，但是选择machine和operation的次数是一样的)
             # Logger.log("Training/while/save_in_buffer", f"all_steps = {all_steps}, replay_buffer.store_operation", print_true=1)
 
+            # [v5 hier] close the current segment and resample when it ends
+            if top_enabled:
+                top_step += 1
+                if (top_step % int(variant['hier_interval']) == 0
+                        and not all(check_done_operation)):
+                    cost_now = _weighted_cost(paral_env, variant)
+                    _delta_np = ((cost_now - top_last_cost)
+                                 / np.maximum(cost_now, 1.0))
+                    if top_credit in ('local', 'hybrid'):
+                        local_now = _local_cost_vector(
+                            paral_env, variant)[:, :top_ctl.n_heads]
+                        top_ctl.close_segment(-(local_now - top_last_local))
+                        top_last_local = local_now
+                    else:
+                        top_ctl.close_segment(
+                            -(cost_now - top_last_cost))
+                    top_last_cost = cost_now
+                    _w_np = _current_weights(paral_env, variant)
+                    _agv_np = _agv_top_stats(paral_env, variant)
+                    top_state = top_state_features(
+                        tasks_fea_batch_, candidate_batch_, mask_operation_batch_,
+                        machine_scheduled_fea_batch_, top_step,
+                        variant['n_job'] * variant['n_machine'],
+                        variant['n_machine'], variant['n_job'],
+                        weights=_w_np, agv_stats=_agv_np,
+                        cost_trend=_delta_np,
+                        device=variant['device'])
+                    top_rule, _, _ = top_ctl.act(top_state, store=True)
+                    top_job, top_machine = top_rule[:, 0], top_rule[:, 1]
+                    top_agv = (top_rule[:, 2]
+                               if top_rule.size(1) > 2 else None)
+
             """
             When the number of transitions in buffer reaches batch_size, then update
             1、只有>=train_batch: 才会开始训练：每一轮episode = job * machine个计数
@@ -637,7 +1038,8 @@ def experiment(
 
             现在是选operation的次数够了（理论上machine的次数也一样）是要够train_batch，才会开始训练
             """
-            if replay_buffer.count_operation == variant['n_job'] * variant['n_machine'] * variant['buffer_size']:  # buffer多大，所以维度就是多大  # state和action都存够了，然后就开始更新网络，不一定是done之后再更新
+            if (replay_buffer.count_operation == variant['n_job'] * variant['n_machine'] * variant['buffer_size']
+                    and variant.get('algo', 'ppo') == 'ppo'):  # [v5] GRPO updates after the episode returns are known
                 
                 tasks_n = variant['n_job'] * variant['n_machine']
                 mini_batch_size = tasks_n  # 从经验池replayBuffer中取出数据进行训练的minibatch大小:tasks
@@ -649,7 +1051,9 @@ def experiment(
                 
                 """250429-储存轨迹，bs=16走buffer_size=5遍，然后ppo还不断更新"""
                 traj_tuple = replay_buffer.numpy_to_tensor_operation()  # 存满了，直接取出来保存！ buffer_step * bs * xxx
-                traj_tuple = tuple(tensor.cpu().numpy() for tensor in traj_tuple)# 将tensors转换为NumPy数组并存储为元组
+                traj_tuple = tuple(
+                    tensor.cpu().numpy() if tensor is not None else None
+                    for tensor in traj_tuple)  # disabled context features are None
                 # [v5] do not keep every trajectory in RAM (unbounded growth; training does not need it)
         # traj_lst.append(traj_tuple)  # 储存轨迹 = episode_num，同一批batch走buffer_size遍，ppo不断更新进化中 (TODO list中多个tuple，内含元素shape不同)
                 
@@ -740,15 +1144,63 @@ def experiment(
                             记录数据：4最终reward(=objective)：env_bs求mean
                             Final_cost = np.array([mk_cost, pt_cost, transT_cost, idleT_cost])
                 +++++++++++++++++++++++++++++++++++++++++++++"""
-                costs = [sum(getattr(paral_env.paral_env_DG[i_bs], attr) for i_bs in range(variant['env_batch']))
-                        for attr in ['makespan_previous_step', 'total_e1_previous_step', 'trans_t_previous_step', 'idle_t_previous_step']]
-                costs[1] /= variant['n_job'] * variant['n_machine']  #  ! TODO 别忘了这里是平均能耗
-                Final_4cost = np.array(costs) / variant['env_batch'] # ! TODO 当前episode的 = 真实cost对env_bs求平均
+                attrs = ['makespan_previous_step', 'total_e1_previous_step',
+                         'trans_t_previous_step', 'idle_t_previous_step']
+                episode_costs = np.array(
+                    [[getattr(paral_env.paral_env_DG[i_bs], attr)
+                      for i_bs in range(variant['env_batch'])]
+                     for attr in attrs], dtype=np.float32)
+                episode_costs[1] /= variant['n_job'] * variant['n_machine']  # average PEC
+                if variant.get('algo', 'ppo') == 'grpo':
+                    group_costs.append(episode_costs.copy())
+                Final_4cost = episode_costs.mean(axis=1)
                 Final_4cost_lst.append(Final_4cost)  # done之后存下轨迹的最终的4个reward，转为list = episode*4
                 # !TODO 直接打印出4个平均env_bs之后指标的加权和！（不是偏差，直接平均真实值加权） = Cost/Objective in Paper!
-                Objective = variant['weight_mk'] * Final_4cost[0] + variant['weight_ec'] * (Final_4cost[1] + Final_4cost[3]) \
-                                         + variant['weight_tt'] * Final_4cost[2]
+                Objective = float(_weighted_cost(paral_env, variant).mean())
                 Obj_lst.append(Objective)  # ! 这里是更新的网络采集instance数据集产生的最终reward的加权和，TODO 查看变化没啥用啊，至少有5轮episode用的相同的ability_instance并行环境，但是在重新run的时候，instance都没有固定（会shuffle！）
+
+                # [v5 hier] terminal segment + top-level PPO update
+                if top_enabled:
+                    final_cost = _weighted_cost(paral_env, variant)
+                    final_local = None
+                    if top_credit in ('local', 'hybrid'):
+                        final_local = _local_cost_vector(
+                            paral_env, variant)[:, :top_ctl.n_heads]
+                        top_ctl.close_segment(
+                            -(final_local - top_last_local))
+                    else:
+                        top_ctl.close_segment(
+                            -(final_cost - top_last_cost))
+                    top_stats = top_ctl.finish_episode(
+                        final_cost, final_local=final_local)
+                    if top_stats is not None:
+                        _q = top_stats.get('top_q_loss')
+                        _q_txt = (f", q_loss={_q:.4f}"
+                                  if _q is not None else "")
+                        Logger.log(
+                            "Training/hierarchy/update",
+                            f"episode={i_episode + 1}, steps={top_step}, "
+                            f"actor_loss={top_stats['top_actor_loss']:.4f}, "
+                            f"critic_loss={top_stats['top_critic_loss']:.4f}, "
+                            f"entropy={top_stats['top_entropy']:.4f}"
+                            f"{_q_txt}",
+                            print_true=1)
+
+                if (variant.get('algo', 'ppo') == 'grpo'
+                        and len(group_costs) == variant['buffer_size']):
+                    tasks_n = variant['n_job'] * variant['n_machine']
+                    loss_mean, loss_std = ppo.global_update_JointActions_GAT_grpo(
+                        replay_buffer=replay_buffer,
+                        all_steps=all_steps,
+                        graph_pool_avg=graph_pool_avg,
+                        args=variant,
+                        mini_bs=tasks_n,
+                        group_costs=group_costs)
+                    loss_mean_lst.append(loss_mean)
+                    loss_std_lst.append(loss_std)
+                    group_costs = []
+                    replay_buffer.count_operation = 0
+                    replay_buffer.count_operation_ = 0
                 
                 print('**'*250)
                 Logger.log("Training/while/done", f"Trajectory Done (step = tasks) episode {i_episode+1}/{variant['episode_num']} ", print_true=1)  # 
@@ -785,8 +1237,21 @@ def experiment(
 
             print("------------------------------------------------Evaluation-------------------------------------------------------")
             eval_obj_lst = []  # 用于记录每一个测试数据的加权和obj
-            eval_4_cost_lst = []  # 用于记录每一个测试数据的4指标的真实值，大lst，每个小lst包含 [mk, pt, transT, idleT]  
-            
+            eval_4_cost_lst = []  # 用于记录每一个测试数据的4指标的真实值，大lst，每个小lst包含 [mk, pt, transT, idleT]
+            eval_variant = variant.copy()
+            if variant.get('algo', 'ppo') == 'grpo':
+                # validation stays at the report weights, independent of the group lambda
+                eval_variant['weight_mk'] = 0.4
+                eval_variant['weight_ec'] = 0.4
+                eval_variant['weight_tt'] = 0.2
+            eval_pref_emb = None
+            if bool(variant.get('pref_embed', 0)):
+                _lam = torch.tensor(
+                    [[eval_variant['weight_mk'], eval_variant['weight_ec'],
+                      eval_variant['weight_tt']]],
+                    device=variant['device'], dtype=torch.float32)
+                eval_pref_emb = ppo.pref_embed(_lam)
+
             gantt_flag = False   # 是否render渲染画图
             for i_eval in range(variant['eval_sample']):  # 固定100个样本数据（随即生成），计算r
                 if i_eval == variant['eval_sample'] - 1:
@@ -817,17 +1282,19 @@ def experiment(
                             gantt_flag=gantt_flag,
                             data=eval_instance,  # 传入的是dataset，定义的可以直接.x读取数据
                             data_index=i_eval,
-                            data_type=variant['eval_data_type'],  
+                            data_type=variant['eval_data_type'],
                             greedy=True,
-                            args=variant)  # 
+                            args=eval_variant,
+                            top_ctl=(top_ctl if variant.get('hier', 0) else None),
+                            pref_emb=eval_pref_emb)  #
 
                 
                 if MIP_cost_dict is not None:
                     idea_cost_refer = [MIP_cost_dict["Makespan"][i_eval], MIP_cost_dict["MachineEC"][i_eval],
                                        MIP_cost_dict["TransEC"][i_eval], MIP_cost_dict["MachineIdleT"][i_eval]]  # TODO 别忘了这里是平均能耗
                     new_related_cost = (np.array(eval_4_cost) - np.array(idea_cost_refer)) / np.array(idea_cost_refer)  # 差值为正数，越小越好！！！
-                    eval_obj_gap = variant['weight_mk'] * new_related_cost[0] + variant['weight_ec'] * (new_related_cost[1] + new_related_cost[3]) \
-                                    + variant['weight_tt'] * new_related_cost[2]
+                    eval_obj_gap = eval_variant['weight_mk'] * new_related_cost[0] + eval_variant['weight_ec'] * (new_related_cost[1] + new_related_cost[3]) \
+                                    + eval_variant['weight_tt'] * new_related_cost[2]
                 else:
                     eval_obj_gap = None
 
@@ -863,8 +1330,8 @@ def experiment(
             """++++++++++++++++++++++++++++++++++++++++++
                         保存数据到csv：100evalInstance的均值
             +++++++++++++++++++++++++++++++++++++++++++++"""
-            save_pth = "D:/research/DeepReinforcementLearningScheduling/plcsp_v5/results/"
-            result_file = save_pth + (_run_tag + "_" if _run_tag else "") + f"Obj_100_EvalInstance_J{variant['n_job']}_M{variant['n_machine']}_E{variant['n_edge']}_BS{variant['env_batch']}_Weight{int(variant['weight_mk'] * 10)}{int(variant['weight_ec'] * 10)}{int(variant['weight_tt'] * 10)}.csv" 
+            save_pth = os.path.join(V5_ROOT, "results") + os.sep
+            result_file = save_pth + (_run_tag + "_" if _run_tag else "") + f"Obj_100_EvalInstance_J{variant['n_job']}_M{variant['n_machine']}_E{variant['n_edge']}_BS{variant['env_batch']}_Weight{int(eval_variant['weight_mk'] * 10)}{int(eval_variant['weight_ec'] * 10)}{int(eval_variant['weight_tt'] * 10)}.csv"
             # 将数据存储到CSV文件中; 每次写入都是覆盖的方式，最终展示的是跑完100次的结果
             with open(result_file, 'w', newline='') as csvfile1:  # `newline`参数设置为空字符串`''`，以确保写入CSV文件时不进行额外的换行操作
                 writer = csv.writer(csvfile1)
@@ -897,6 +1364,12 @@ def experiment(
             if ppo.use_agv:
                 model4f = model_pth + "PPO_agv_actor_" + id_name + "_final.pth"
                 torch.save(ppo.agv_actor.state_dict(), model4f)
+            if top_ctl is not None:
+                torch.save(top_ctl.state_dict(),
+                           model_pth + "PPO_hier_top_" + id_name + "_final.pth")
+            if getattr(ppo, 'use_pref_embed', False):
+                torch.save(ppo.pref_embed.state_dict(),
+                           model_pth + "PPO_pref_embed_" + id_name + "_final.pth")
             
             model1 = model_pth + job_name + id_name + f'_EP{i_episode + 1}_.pth'
             model2 = model_pth + machine_name + id_name + f'_EP{i_episode + 1}_.pth'
@@ -909,6 +1382,14 @@ def experiment(
             if ppo.use_agv:
                 model4 = model_pth + "PPO_agv_actor_" + id_name + f'_EP{i_episode + 1}_.pth'
                 torch.save(ppo.agv_actor.state_dict(), model4)
+            if top_ctl is not None:
+                torch.save(top_ctl.state_dict(),
+                           model_pth + "PPO_hier_top_" + id_name
+                           + f'_EP{i_episode + 1}_.pth')
+            if getattr(ppo, 'use_pref_embed', False):
+                torch.save(ppo.pref_embed.state_dict(),
+                           model_pth + "PPO_pref_embed_" + id_name
+                           + f'_EP{i_episode + 1}_.pth')
 
             # [v5] full checkpoint is saved after the eval block, independent of eval_freq.
 
@@ -947,6 +1428,16 @@ def experiment(
                         agv_dst = model_pth + "PPO_agv_actor_" + id_name + suffix
                         if os.path.exists(agv_src):
                             os.replace(agv_src, agv_dst)
+                    if top_ctl is not None:
+                        top_src = entry[1].replace(job_name, "PPO_hier_top_")
+                        top_dst = model_pth + "PPO_hier_top_" + id_name + suffix
+                        if os.path.exists(top_src):
+                            os.replace(top_src, top_dst)
+                    if getattr(ppo, 'use_pref_embed', False):
+                        pref_src = entry[1].replace(job_name, "PPO_pref_embed_")
+                        pref_dst = model_pth + "PPO_pref_embed_" + id_name + suffix
+                        if os.path.exists(pref_src):
+                            os.replace(pref_src, pref_dst)
                 
                 Logger.log("Evaluation/save model.pth", f"Final and TOP3 Best model parameters saved. Best_model={sorted_list[-1]}", print_true=1)  #  
             
@@ -968,6 +1459,16 @@ def experiment(
             if ppo.use_agv:
                 full_ckpt["agv_actor"] = ppo.agv_actor.state_dict()
                 full_ckpt["agv_optimizer"] = ppo.agv_optimizer.state_dict()
+            if top_ctl is not None:
+                full_ckpt["hier_top_model"] = top_ctl.state_dict()
+                full_ckpt["hier_top_optimizer"] = \
+                    top_ctl.optimizer_state_dict()
+                if getattr(top_ctl, 'credit', 'team') in ('coma', 'hybrid'):
+                    full_ckpt["hier_top_q_replay"] = top_ctl.q_replay
+            if getattr(ppo, 'use_pref_embed', False):
+                full_ckpt["pref_embed"] = ppo.pref_embed.state_dict()
+                full_ckpt["pref_optimizer"] = \
+                    ppo.pref_optimizer.state_dict()
             full_path = model_pth + f"full_ckpt_{variant.get('encoder_type', 'e2e')}_ep{i_episode + 1}.pt"
             torch.save(full_ckpt, full_path)
             Logger.log("Training/full_ckpt", f"saved {full_path}", print_true=1)
@@ -998,7 +1499,7 @@ def experiment(
         
             
         """一个episode存一次结果，就需要输入到wandb一次，然后重新赋值和清0，get_log会自动清lst的，放心"""
-        pth = 'D:/research/DeepReinforcementLearningScheduling/plcsp_v5/results/'
+        pth = os.path.join(V5_ROOT, "results") + os.sep
         result_f = pth + (_run_tag + "_" if _run_tag else "") + f"Loss_Cost_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}.txt"
         logg = Result_Logger.get_logs(pth=result_f)  # TODO 返回所有保存的log，log是dict形式，储存的txt文件是"追加"模式，会不断很长 (队列会清0！)
         if variant['log_to_wandb']:
@@ -1006,7 +1507,8 @@ def experiment(
         # 注意：result_f因为调用的是get_logs，每个epi都会调用，会默认打印”===“，相当于episode的次数
             
     """从坏到好的轨迹，bs=16走buffer_size=5遍，保存结果到pickle文件"""
-    pth1 = 'D:/research/DeepReinforcementLearningScheduling/plcsp_v5/trajectory/'
+    pth1 = os.path.join(V5_ROOT, "trajectory") + os.sep
+    os.makedirs(pth1, exist_ok=True)
     traj_f = pth1 + (_run_tag + "_" if _run_tag else "") + f"Trajectory_{variant['episode_num']}_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}_Seed{variant['train_seed']}_BS{variant['env_batch']}_Weight{int(variant['weight_mk'] * 10)}{int(variant['weight_ec'] * 10)}{int(variant['weight_tt'] * 10)}.pkl"
     with open(traj_f, 'wb') as f:
         pickle.dump(traj_lst, f)  # 储存轨迹 = episode_num，同一批batch走buffer_size遍，ppo不断更新进化中
@@ -1027,7 +1529,7 @@ if __name__ == '__main__':
     
     experiment(variant=vars(args))  # vars内置函数，转为dict，表示参数和其值
     
-    pth2 = 'D:/research/DeepReinforcementLearningScheduling/plcsp_v5/'
+    pth2 = V5_ROOT + os.sep
     _tag_suffix = f"_{args.run_tag}" if args.run_tag else ""
     training_log_file = pth2 + f"/training_log_J{args.n_job}M{args.n_machine}E{args.n_edge}_BS{args.env_batch}_InsSeed{args.train_seed}_Weight{int(args.weight_mk*10)}{int(args.weight_ec*10)}{int(args.weight_tt*10)}{_tag_suffix}.txt"
     Logger.get_logs(training_log_file)

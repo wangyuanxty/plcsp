@@ -9,8 +9,15 @@ from trainer.DGenv_func import (
     split_edge_matrices,
     task_context_features,
 )
+try:
+    from constraints import sample_repair, buffer_mask
+except ImportError:
+    from plcsp_v5.constraints import sample_repair, buffer_mask
 # ! TODO (LLM) root@01a43040a453:D:/research/DeepReinforcementLearningScheduling/plcsp_v5/graph-jsp-env# pip install -e .  (需要在新的根目录安装下env的环境)- https://github.com/RKWin93/graph-jsp-env
-from graph_jsp_env.disjunctive_graph_jsp_env_singlestep import DisjunctiveGraphJspEnv_singleStep
+try:
+    from graph_jsp_env.disjunctive_graph_jsp_env_singlestep import DisjunctiveGraphJspEnv_singleStep
+except ImportError:  # CPU test env without gym; the class is only needed at runtime
+    DisjunctiveGraphJspEnv_singleStep = None
 
 """
 新建Env的并行运行类：（batch_siaze， x）堆叠
@@ -49,12 +56,22 @@ class Parallel_env(object):
         self.n_agv = int(args.get('n_agv', 6))
         self.cross_delay = float(args.get('cross_delay', 5.0))
         self.cross_leg_ratio = float(args.get('cross_leg_ratio', 0.5))
+        self.agv_failure = bool(args.get('agv_failure', 0))
+        self.agv_mtbf = float(args.get('agv_mtbf', 100.0))
+        self.agv_mttr = float(args.get('agv_mttr', 10.0))
+        self.failure_seed = int(args.get('failure_seed', 0))
+        self.agv_failure_rng = [
+            np.random.default_rng(self.failure_seed + 1000 + i)
+            for i in range(self.batch_size)
+        ]
         if self.use_agv and self.n_agv < self.nedges:
             raise ValueError(
                 f"n_agv={self.n_agv} must be >= n_edge={self.nedges} "
                 "for per-workshop AGV fleets")
         self.agv_states = []  # list[env_batch] of list[AgvState]
-        
+        # Accumulated AGV wait per env, used by the per-head local reward.
+        self.agv_wait_total = np.zeros(self.batch_size, dtype=np.float64)
+
     # 采样Batch_size个，然后赋值self.ability_instance（不再清0和变化！）
     def get_batch(self, dataset_dict): # dataloader的返回数据是我在__getitem__中定义的字典
         """
@@ -110,6 +127,7 @@ class Parallel_env(object):
     
     def _init_agv_states(self):
         """Reset the AGV fleet. Must run at the start of every episode."""
+        self.agv_wait_total = np.zeros(self.batch_size, dtype=np.float64)
         if not self.use_agv:
             return
         try:
@@ -163,6 +181,12 @@ class Parallel_env(object):
                                                     # perform_left_shift_if_possible=False  # 打开左移的机制
                                                     configs=self.args
                                                     )
+            # [v5] independent failure RNG per env
+            env.machine_failure = bool(self.args.get('machine_failure', 0))
+            env.machine_mtbf = float(self.args.get('machine_mtbf', 100.0))
+            env.machine_mttr = float(self.args.get('machine_mttr', 10.0))
+            env.failure_rng = np.random.default_rng(
+                self.failure_seed + ii_batch)
 
             self.paral_env_DG.append(copy.deepcopy(env))  # 记录选择operation的env
 
@@ -337,6 +361,31 @@ class Parallel_env(object):
                 t_ins[int(task_index[i])], tt_ins, self.nmachines, **kwargs)
         return out
 
+    def machine_buffer_mask(self, task_indices):
+        """Stage-0 finite-buffer mask for the selected task (B, m)."""
+        capacity = int(self.args.get('buffer_capacity', 0))
+        if capacity <= 0:
+            return None
+        ti = (task_indices.cpu().numpy()
+              if hasattr(task_indices, 'cpu') else np.asarray(task_indices))
+        out = np.zeros((self.batch_size, self.nmachines), dtype=bool)
+        for i, env in enumerate(self.paral_env_DG):
+            task_idx = int(ti[i])
+            if task_idx % self.nmachines == 0:
+                ready = 0.0
+            else:
+                ready = float(
+                    env.G.nodes[task_idx].get('finish_time') or 0.0)
+            start_time = {}
+            for route in env.machine_routes.values():
+                for node in route:
+                    start_time[int(node)] = float(
+                        env.G.nodes[int(node)].get('start_time') or 0.0)
+            out[i] = buffer_mask(
+                env.machine_routes, start_time, ready, capacity,
+                self.nmachines)
+        return out
+
     def cal_cur_task_context(self, task_index=None):
         """ST-only per-task context (B, N, 13)."""
         out = np.zeros((self.batch_size, self.ntasks, 13), dtype=np.float32)
@@ -412,10 +461,13 @@ class Parallel_env(object):
                 src_agvs = [a for a in agvs if a.edge == pickup_edge]
                 n_avail = sum(1 for a in src_agvs
                               if a.free_time <= now + 1e-9)
-                mask = available_mask(agvs, now, edge=pickup_edge)
+                mask = available_mask(agvs, edge=pickup_edge)
             else:
                 n_avail = 0
-                mask = np.zeros(len(agvs), dtype=bool)
+                # No transport: keep every token selectable so the AGV
+                # softmax stays finite; the step ignores the action and the
+                # AGV loss is masked by ``agv_valid``.
+                mask = np.ones(len(agvs), dtype=bool)
 
             feats.append(agv_features(agvs, pickup, dropoff, travel, now))
             ctxs.append(context_features(pickup, dropoff, pickup_edge,
@@ -429,7 +481,107 @@ class Parallel_env(object):
                 np.asarray(masks, dtype=bool),
                 np.asarray(valids, dtype=bool))
 
-    def DGFJSPEnv_paral_step(self, joint_actions, agv_actions=None):
+    def get_agv_dst_decision_batch(self, task_indices, machine_indices,
+                                   src_actions):
+        """Build (feat, ctx, mask, valid) for destination-workshop AGVs.
+
+        The decision is made at dispatch time.  The boundary arrival time is
+        predicted from the chosen source AGV::
+
+            max(ready, src.free_time) + dead(src -> pickup)
+            + source leg + fixed cross-workshop delay
+
+        Same-workshop transports have no destination decision; their entries
+        are marked invalid and their mask stays all-True so the softmax is
+        finite.
+        """
+        try:
+            from agv.state import (agv_features, context_features,
+                                   available_mask, split_cross_edge)
+        except ImportError:
+            from plcsp_v5.agv.state import (agv_features, context_features,
+                                            available_mask, split_cross_edge)
+
+        feats, ctxs, masks, valids = [], [], [], []
+        for i in range(self.batch_size):
+            env = self.paral_env_DG[i]
+            task_idx = int(task_indices[i])
+            m_idx = int(machine_indices[i])
+            edge_info = self.ability_instance[i][3]
+            trans_t = self.ability_instance[i][2]
+            agvs = self.agv_states[i]
+
+            def travel(a, b):
+                if a < 0 or b < 0:
+                    return 0.0
+                return float(trans_t[int(a)][int(b)])
+
+            def edge_of(m):
+                for e in range(self.nedges):
+                    if int(m) in [int(x) for x in edge_info[e]]:
+                        return e
+                return 0
+
+            if task_idx % self.nmachines == 0:
+                valid = False
+                pickup = dropoff = -1
+                pickup_edge = dropoff_edge = 0
+            else:
+                pickup = int(env.G.nodes[task_idx]["machine"])
+                dropoff = m_idx
+                valid = pickup >= 0 and pickup != dropoff
+                pickup_edge = edge_of(pickup) if pickup >= 0 else edge_of(dropoff)
+                dropoff_edge = edge_of(dropoff)
+                if pickup_edge == dropoff_edge:
+                    valid = False
+
+            feat = np.zeros((self.n_agv, 11), dtype=np.float32)
+            ctx = np.zeros(6, dtype=np.float32)
+            mask = np.ones(self.n_agv, dtype=bool)
+            if valid:
+                src_agvs = [a for a in agvs if a.edge == pickup_edge]
+                if not src_agvs:
+                    raise ValueError(
+                        f"workshop edge {pickup_edge} has no AGV")
+                src_idx = int(src_actions[i]) if src_actions is not None else -1
+                if (0 <= src_idx < len(agvs)
+                        and agvs[src_idx].edge == pickup_edge):
+                    src = agvs[src_idx]
+                else:
+                    src = min(src_agvs, key=lambda a: a.free_time)
+                ready = float(
+                    env.G.nodes[task_idx].get("finish_time") or 0.0)
+                total = float(trans_t[pickup][dropoff])
+                t_src, d_eff, _t_dst = split_cross_edge(
+                    total, self.cross_delay, self.cross_leg_ratio)
+                start_src = max(ready, float(src.free_time))
+                boundary = start_src + travel(src.location, pickup) + t_src + d_eff
+                boundary_machine = int(edge_info[dropoff_edge][0])
+                dst_agvs = [a for a in agvs if a.edge == dropoff_edge]
+                if not dst_agvs:
+                    raise ValueError(
+                        f"workshop edge {dropoff_edge} has no AGV")
+                n_avail = sum(1 for a in dst_agvs
+                              if a.free_time <= boundary + 1e-9)
+                feat = agv_features(agvs, boundary_machine, dropoff,
+                                    travel, boundary)
+                ctx = context_features(boundary_machine, dropoff,
+                                       dropoff_edge, dropoff_edge, travel,
+                                       boundary, n_avail, self.n_agv)
+                mask = available_mask(agvs, edge=dropoff_edge)
+
+            feats.append(feat)
+            ctxs.append(ctx)
+            masks.append(mask)
+            valids.append(valid)
+
+        return (np.asarray(feats, dtype=np.float32),
+                np.asarray(ctxs, dtype=np.float32),
+                np.asarray(masks, dtype=bool),
+                np.asarray(valids, dtype=bool))
+
+    def DGFJSPEnv_paral_step(self, joint_actions, agv_actions=None,
+                             agv_dst_actions=None):
         """
         1、actor输出：action = tensor([1, 3, 3, 2, 1, 1, 1, 1, 1, 2, 0, 3, 3, 1, 2, 3]) torch.Size([16])，idx从0开始,(bacth,)
         2、转成task_id： self.chosen_action_list_batch = [[5], [13], [13], [9], [5], [5], [5], [5], [5], [9], [1], [13], [13], [5], [9],[13]]  16个list，分别记录选择的task，append加在后边,id从1开始
@@ -450,11 +602,12 @@ class Parallel_env(object):
                 # Stage 0.1: per-workshop fleets; an AGV never crosses an edge.
                 # Cross-edge = source AGV leg + fixed delay (no AGV) + target AGV leg.
                 try:
-                    from agv.state import split_cross_edge
+                    from agv.state import split_cross_edge, transport_timing
                 except ImportError:
-                    from plcsp_v5.agv.state import split_cross_edge
+                    from plcsp_v5.agv.state import (
+                        split_cross_edge, transport_timing)
                 if agv_actions is None:
-                    agv_action = self.n_agv
+                    agv_action = -1
                 else:
                     agv_action = int(agv_actions[l_batch])
                 if select_task_index % self.nmachines == 0:
@@ -485,44 +638,77 @@ class Parallel_env(object):
                         if not src_agvs:
                             raise ValueError(
                                 f"workshop edge {pickup_edge} has no AGV")
-                        if (agv_action >= self.n_agv
+                        # Safety fallback: the policy normally selects an AGV
+                        # in the source workshop. Busy AGVs are valid here;
+                        # wait_src below pays the wait.
+                        if (agv_action < 0 or agv_action >= len(agvs)
                                 or agvs[agv_action].edge != pickup_edge):
                             agv_action = min(
                                 (a.idx for a in src_agvs),
                                 key=lambda k: agvs[k].free_time)
                         src = agvs[agv_action]
-                        wait_src = max(0.0, src.free_time - ready)
                         total = float(trans_t[prev_machine][select_mch_index])
 
+                        def _travel_agv(a, b):
+                            if a < 0 or b < 0:
+                                return 0.0
+                            return float(trans_t[int(a)][int(b)])
+
                         if pickup_edge == dropoff_edge:
-                            travel = total
-                            wait = wait_src
-                            src.free_time = ready + wait + travel
-                            src.location = select_mch_index
-                            src.travelled += travel
+                            repair = 0.0
+                            if self.agv_failure:
+                                repair = sample_repair(
+                                    self.agv_failure_rng[l_batch], total,
+                                    self.agv_mtbf, self.agv_mttr)
+                            timing = transport_timing(
+                                src, prev_machine, select_mch_index, ready,
+                                total, _travel_agv, src_repair=repair)
+                            travel = timing["loaded"]
+                            wait = timing["wait"]
+                            src.free_time = timing["src_free"]
+                            src.location = timing["src_location"]
+                            src.travelled += timing["src_travelled"]
                         else:
-                            t_src, d_eff, t_dst = split_cross_edge(
+                            t_src, _d_eff, _t_dst = split_cross_edge(
                                 total, self.cross_delay, self.cross_leg_ratio)
-                            src_arrival = ready + wait_src + t_src
-                            boundary = src_arrival + d_eff
+                            repair = 0.0
+                            if self.agv_failure:
+                                repair = sample_repair(
+                                    self.agv_failure_rng[l_batch], t_src,
+                                    self.agv_mtbf, self.agv_mttr)
                             dst_agvs = [a for a in agvs
                                         if a.edge == dropoff_edge]
                             if not dst_agvs:
                                 raise ValueError(
                                     f"workshop edge {dropoff_edge} has no AGV")
-                            dst = min(dst_agvs, key=lambda a: a.free_time)
-                            wait_dst = max(0.0, dst.free_time - boundary)
-                            travel = t_src + t_dst
-                            wait = wait_src + d_eff + wait_dst
-                            src.free_time = src_arrival
-                            src.location = -1  # at the workshop boundary
-                            src.travelled += t_src
-                            dst.free_time = boundary + wait_dst + t_dst
-                            dst.location = select_mch_index
-                            dst.travelled += t_dst
+                            dst = None
+                            if agv_dst_actions is not None:
+                                a_dst = int(agv_dst_actions[l_batch])
+                                if (0 <= a_dst < len(agvs)
+                                        and agvs[a_dst].edge == dropoff_edge):
+                                    dst = agvs[a_dst]
+                            if dst is None:
+                                dst = min(dst_agvs, key=lambda a: a.free_time)
+                            boundary_machine = int(edge_info[dropoff_edge][0])
+                            timing = transport_timing(
+                                src, prev_machine, select_mch_index, ready,
+                                total, _travel_agv, dst=dst,
+                                cross_delay=self.cross_delay,
+                                leg_ratio=self.cross_leg_ratio,
+                                boundary_machine=boundary_machine,
+                                src_repair=repair)
+                            travel = timing["loaded"]
+                            wait = timing["wait"]
+                            src.free_time = timing["src_free"]
+                            src.location = timing["src_location"]
+                            src.travelled += timing["src_travelled"]
+                            dst.free_time = timing["dst_free"]
+                            dst.location = timing["dst_location"]
+                            dst.travelled += timing["dst_travelled"]
 
                         edge = (int(select_task_index),
                                 int(select_task_index) + 1)
+                        self.agv_wait_total[l_batch] += float(wait)
                         env.G.graph["transport_override"] = {edge: travel}
                         env.G.graph["transport_wait_override"] = {edge: wait}
             """

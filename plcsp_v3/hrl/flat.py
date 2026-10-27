@@ -71,7 +71,12 @@ CV_DEFAULT = 0.5
 
 def flat_rollout(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
                  dt_events: int, greedy: bool = False,
-                 pool: "ChainPool | None" = None, seed_chain: int = 0) -> list[Chain]:
+                 pool: "ChainPool | None" = None, seed_chain: int = 0,
+                 force_top1: bool = False,
+                 fixed_rules: dict[str, int] | None = None,
+                 pa_limit: int | None = None,
+                 exact_rule: bool = False,
+                 tie_seed: int | None = None) -> list[Chain]:
     """采 `n` 条**完整链**（全层一起采、不冻结、不重放）→ `Chain` 列表。
 
     ⚠️ 复用 `train.base_chain` —— 它本来就是"一条完整链、全层 live"。
@@ -89,11 +94,18 @@ def flat_rollout(net: HierarchicalPolicy, spec: Spec, *, n: int, seed: int,
     if pool is not None:
         if greedy:
             raise ValueError("并行档不支持 `greedy=True`（评测要确定性、且要 GPU 单档）")
+        if force_top1:
+            raise ValueError("并行档不支持 `force_top1=True`（只给评测/诊断用）")
+        if fixed_rules is not None or pa_limit is not None:
+            raise ValueError("并行 ChainPool 不支持 fixed_rules / pa_limit")
         return pool.rollout(n, seed, seed_chain)
     out: list[Chain] = []
     for i in range(n):
         p = base_chain(net, spec, greedy=greedy, seed=seed * 1000 + i,
-                       dt_events=dt_events, seed_chain=seed_chain)
+                       dt_events=dt_events, seed_chain=seed_chain,
+                       force_top1=force_top1, fixed_rules=fixed_rules,
+                       pa_limit=pa_limit, exact_rule=exact_rule,
+                       tie_seed=tie_seed)
         f = objective_vector(p.metrics)                      # type: ignore[attr-defined]
         # ⚠️ `spec.bounds=None`（默认）⟹ `scalar_reward` 用原始量纲，**逐位等于今日**。
         out.append(Chain(scalar_reward(f, spec.w, bounds=spec.bounds),
@@ -110,9 +122,8 @@ def grad_norm(net: HierarchicalPolicy) -> dict:
                 if p.grad is not None:
                     s += float(p.grad.pow(2).sum())
         return float(np.sqrt(s))
-    # ⚠️ **v3 的五个头**：上层三个分类头合在 `select` 里，下层四个参数头。
-    # （`net.ra_charge` 随 ⑪ 删；v2 的 `net.ma` / `net.pa` / `net.ra_maint` 在 v3 不存在。）
-    heads = (net.select, net.pa_job, net.pa_mach, net.la, net.ra)
+    # ⚠️ **v3 top-K 的四个头**：上层三个分类头合在 `select` 里；下层三个打分头。
+    heads = (net.select, net.scorer_pa, net.scorer_la, net.scorer_ra)
     crit = () if net.value_head is None else (net.value_head,)
     return {"heads": acc(heads), "critic": acc(crit), "encoder": acc((net.enc,))}
 

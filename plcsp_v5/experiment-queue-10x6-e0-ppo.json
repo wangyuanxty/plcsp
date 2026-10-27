@@ -1,0 +1,147 @@
+{
+ "max_parallel": 3,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-26 10x6 E0 PPO control: settrans, intra1, 33-dim, no AGV, no RS, 200 ep, 3 seeds.",
+ "jobs": [
+  {
+   "id": "T_10x6_ppo_s1",
+   "script": "Run.py",
+   "priority": 5.1,
+   "after": [],
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "settrans",
+    "--algo", "ppo",
+    "--machine_intra_attn", "1",
+    "--st_token_context", "1",
+    "--st_task_features", "1",
+    "--st_edge_features", "0",
+    "--episode_num", "200",
+    "--buffer_size", "8",
+    "--resample_freq", "8",
+    "--LR", "1e-3",
+    "--use_lr_decay", "0",
+    "--eval_sample", "100",
+    "--random_weight_type", "01",
+    "--seed", "1",
+    "--train_seed", "1",
+    "--run_tag", "plan10_ppo_E0_J10M6E2_s1_remote"
+   ],
+   "notes": "10x6 E0 PPO control seed=1"
+  },
+  {
+   "id": "E_10x6_ppo_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 6.1,
+   "after": ["T_10x6_ppo_s1"],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6_ppo"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--machine_intra_attn", "1",
+    "--run_tag", "plan10_ppo_E0_J10M6E2_s1_remote"
+   ],
+   "notes": "seed3 eval of 10x6 PPO seed=1"
+  },
+  {
+   "id": "T_10x6_ppo_s2",
+   "script": "Run.py",
+   "priority": 5.2,
+   "after": [],
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "settrans",
+    "--algo", "ppo",
+    "--machine_intra_attn", "1",
+    "--st_token_context", "1",
+    "--st_task_features", "1",
+    "--st_edge_features", "0",
+    "--episode_num", "200",
+    "--buffer_size", "8",
+    "--resample_freq", "8",
+    "--LR", "1e-3",
+    "--use_lr_decay", "0",
+    "--eval_sample", "100",
+    "--random_weight_type", "01",
+    "--seed", "2",
+    "--train_seed", "2",
+    "--run_tag", "plan10_ppo_E0_J10M6E2_s2_remote"
+   ],
+   "notes": "10x6 E0 PPO control seed=2"
+  },
+  {
+   "id": "E_10x6_ppo_s2",
+   "script": "eval_st_seed3.py",
+   "priority": 6.2,
+   "after": ["T_10x6_ppo_s2"],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6_ppo"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--machine_intra_attn", "1",
+    "--run_tag", "plan10_ppo_E0_J10M6E2_s2_remote"
+   ],
+   "notes": "seed3 eval of 10x6 PPO seed=2"
+  },
+  {
+   "id": "T_10x6_ppo_s3",
+   "script": "Run.py",
+   "priority": 5.3,
+   "after": [],
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "settrans",
+    "--algo", "ppo",
+    "--machine_intra_attn", "1",
+    "--st_token_context", "1",
+    "--st_task_features", "1",
+    "--st_edge_features", "0",
+    "--episode_num", "200",
+    "--buffer_size", "8",
+    "--resample_freq", "8",
+    "--LR", "1e-3",
+    "--use_lr_decay", "0",
+    "--eval_sample", "100",
+    "--random_weight_type", "01",
+    "--seed", "3",
+    "--train_seed", "3",
+    "--run_tag", "plan10_ppo_E0_J10M6E2_s3_remote"
+   ],
+   "notes": "10x6 E0 PPO control seed=3"
+  },
+  {
+   "id": "E_10x6_ppo_s3",
+   "script": "eval_st_seed3.py",
+   "priority": 6.3,
+   "after": ["T_10x6_ppo_s3"],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6_ppo"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--machine_intra_attn", "1",
+    "--run_tag", "plan10_ppo_E0_J10M6E2_s3_remote"
+   ],
+   "notes": "seed3 eval of 10x6 PPO seed=3"
+  }
+ ]
+}

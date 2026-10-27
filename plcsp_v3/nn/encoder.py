@@ -69,8 +69,20 @@ class AttnLayer(nn.Module):
         return self.oproj(out)
 
     def forward(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        x = x + self.ln1(self._attn(x, bias))
-        return x + self.ln2(self.ffn(x))
+        """**pre-LN 残差**（2026-10-11 修，`progress-log.md` §32）。
+
+        ⚠️ **此前写的是** `x = x + ln(sublayer(x))` —— **不是任何标准写法**，而且有致命后果：
+        `LayerNorm` 的输出**恒为 `√d_model` 量级**（实测每层 `‖ln(·)‖ = 11.31`，`d=128`），
+        而**输入嵌入只有 3.9** ⟹ **第 1 层之后原输入被稀释到 32%**，残差流里 68% 是
+        「所有 token 的均值」⟹ 20 个 token 一层就趋同（余弦 0.29 → 0.90），
+        再叠 4 层 ⟹ **不同状态喂进来、`pooled` 几乎一样**，即"输入不同、输出不变"。
+
+        标准 **pre-LN**（本行）：`x = x + sublayer(ln(x))` —— 归一化在**分支输入**上，
+        分支输出**不归一化**，尺度由权重决定、与残差流同量级，残差流得以保留原输入。
+        （另一种标准写法 **post-LN** 是 `x = ln(x + sublayer(x))`，归一化**和**。）
+        """
+        x = x + self._attn(self.ln1(x), bias)
+        return x + self.ffn(self.ln2(x))
 
 
 class LayoutEncoder(nn.Module):

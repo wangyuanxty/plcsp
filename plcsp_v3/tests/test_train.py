@@ -12,17 +12,20 @@ from __future__ import annotations
 
 import copy
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
 
 from plcsp_v3.env import layout as layout_mod                        # noqa: E402
+from plcsp_v3.env.constraints import ConstraintConfig                 # noqa: E402
 from plcsp_v3.env.corridors import build_corridor_graph, dock_distance_matrix  # noqa: E402
 from plcsp_v3.env.des import SimConfig, reference_makespan            # noqa: E402
 from plcsp_v3.env.instances import load_mk                            # noqa: E402
 from plcsp_v3.env.reward import EQUAL_WEIGHTS, objective_vector  # noqa: E402
 from plcsp_v3.hrl.agents import HierarchicalPolicy                    # noqa: E402
 from plcsp_v3.hrl.pool import SegmentPool                             # noqa: E402
+from plcsp_v3.hrl.rules import LA_RULE_NAMES, PA_RULE_NAMES          # noqa: E402
 from plcsp_v3.hrl.train import (Spec, base_chain, group_advantage,    # noqa: E402
                                 ma_logp_at, segment_from, train_step)
 from plcsp_v3.nn.features import norm_context                         # noqa: E402
@@ -30,22 +33,27 @@ from plcsp_v3.nn.features import norm_context                         # noqa: E4
 DT = 50          # ⚠️ 只为测试提速；设计值见 §10②（20）
 
 
-def _spec(tau: float = 1.0):
+def _spec(tau: float = 1.0, constraints: ConstraintConfig | None = None):
     """⚠️ **必须给一个收紧的 `tau`**：MK01 默认参考解 **TWT=0**，而 `reward_weights`
-    对 0 分量**显式报错**（"TWT=0 的实例须先调 τ"）。不静默补假权重。"""
+    对 0 分量**显式报错**（"TWT=0 的实例须先调 τ"）。不静默补假权重。
+
+    `constraints` 必须**同时**给 `norm_context` 与 `Spec` —— 两份不同源就是假信号。
+    """
     torch.manual_seed(0)
     inst = load_mk("mk01")
     cfg = SimConfig(tau=tau)
     lay = layout_mod.sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
     g = build_corridor_graph(lay)
     dm = dock_distance_matrix(g)
-    ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg)
+    ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg,
+                       constraints=constraints)
     # ⚠️ `1/f^ref` 已删（2026-10-11）⟹ 用等权 + 一个固定的 `bounds`
     # （测试只关心「接口通不通」，不关心具体数值）
     w = EQUAL_WEIGHTS
     bounds = ((60.0, 4.0, 0.0), (140.0, 8.0, 300.0))
     net = HierarchicalPolicy()
-    return Spec(inst, lay, g, dm, cfg, ctx, w, bounds=bounds), net
+    return Spec(inst, lay, g, dm, cfg, ctx, w, constraints=constraints,
+                bounds=bounds), net
 
 
 @pytest.mark.slow
@@ -120,6 +128,139 @@ def test_gradients_reach_only_the_layer_being_trained():
     assert a["upper"] > 0.0, f"阶段 A 没动顶层：{a}"
     assert a["lower"] == 0.0, f"阶段 A 动了下层（该层被冻结）：{a}"
     assert out["A"]["loss"] != 0.0
+
+
+@pytest.mark.slow
+def test_per_head_groups_vary_one_head_at_a_time():
+    """**逐头分组**：每个顶层点三组，成员数 12/3/3；只更新 `select`。"""
+    spec, net = _spec()
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     per_head=True, span=1, ma_only=True)
+    a = out["A"]
+    assert a["kind"] == "A_per_head"
+    assert a["n_top"] > 0
+    assert len(a["groups"]) == 3 * a["n_top"]
+    for g in a["groups"]:
+        want = {"PA": 12, "LA": 3, "RA": 3}[g["head"]]
+        assert len(g["adv"]) == want == len(g["rewards"]) == len(g["rule_ids"])
+    assert a["grad_norm"]["upper"] > 0.0
+    assert a["grad_norm"]["lower"] == 0.0
+
+
+@pytest.mark.slow
+def test_per_head_skips_ra_when_maintenance_is_off():
+    """保养关掉时**不建 RA 组**：没有 RA 决策点，变 RA 规则不会改变读数。"""
+    spec, net = _spec(constraints=ConstraintConfig(maintenance=False))
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     per_head=True, span=1, ma_only=True)
+    a = out["A"]
+    assert a["heads"] == ["PA", "LA"]
+    assert {g["head"] for g in a["groups"]} == {"PA", "LA"}
+    assert len(a["groups"]) == 2 * a["n_top"]
+    assert a["grad_norm"]["upper"] > 0.0
+
+
+@pytest.mark.slow
+def test_fixed_rules_and_pa_limit_are_respected():
+    """单训 PA 档：LA 固定、RA 关、PA 只在前 9 条里采。"""
+    spec, net = _spec(constraints=ConstraintConfig(maintenance=False))
+    la = LA_RULE_NAMES.index("LATEST_IN_TIME")
+    p = base_chain(net, spec, greedy=True, dt_events=DT,
+                   fixed_rules={"LA": la, "RA": 0}, pa_limit=9)
+    ma = [d for d in p.rec.decisions if d.kind == "MA"]
+    assert ma, "一条 MA 决策都没有"
+    assert all(d.rule_pa < 9 for d in ma), "PA 采到了第 9 条以后"
+    assert all(d.rule_la == la for d in ma), "LA 没固定住"
+    assert all(d.rule_ra == 0 for d in ma), "RA 没固定住"
+
+
+@pytest.mark.slow
+def test_per_head_pa_only_uses_nine_rules():
+    """只训 PA 头：组里只有 PA，成员数 = 9。"""
+    spec, net = _spec(constraints=ConstraintConfig(maintenance=False))
+    la = LA_RULE_NAMES.index("LATEST_IN_TIME")
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     per_head=True, ma_only=True, only_head="PA",
+                     fixed_rules={"LA": la, "RA": 0}, pa_limit=9)
+    a = out["A"]
+    assert a["heads"] == ["PA"]
+    assert {g["head"] for g in a["groups"]} == {"PA"}
+    assert all(len(g["adv"]) == 9 for g in a["groups"])
+    assert a["grad_norm"]["upper"] > 0.0
+
+
+@pytest.mark.slow
+def test_per_head_la_only_uses_three_rules():
+    """只训 LA 头：PA 固定为最好 CDR 的 PA，组里只有 LA，成员数 = 3。"""
+    spec, net = _spec(constraints=ConstraintConfig(maintenance=False))
+    pa = PA_RULE_NAMES.index("EAJ+SMPT")
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     per_head=True, ma_only=True, only_head="LA",
+                     fixed_rules={"PA": pa, "RA": 0})
+    a = out["A"]
+    assert a["heads"] == ["LA"]
+    assert {g["head"] for g in a["groups"]} == {"LA"}
+    assert all(len(g["adv"]) == 3 for g in a["groups"])
+    assert a["grad_norm"]["upper"] > 0.0
+
+
+@pytest.mark.slow
+def test_per_head_pa_and_la_together():
+    """PA 9 + LA 3 一起逐头分组：两组各自更新，不共用优势。"""
+    spec, net = _spec(constraints=ConstraintConfig(maintenance=False))
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     per_head=True, ma_only=True, only_head=("PA", "LA"),
+                     fixed_rules={"RA": 0}, pa_limit=9)
+    a = out["A"]
+    assert a["heads"] == ["PA", "LA"]
+    assert {g["head"] for g in a["groups"]} == {"PA", "LA"}
+    for g in a["groups"]:
+        want = 9 if g["head"] == "PA" else 3
+        assert len(g["adv"]) == want
+    assert a["grad_norm"]["upper"] > 0.0
+
+
+@pytest.mark.slow
+def test_sequential_ma_conditions_la_on_pa_and_trains():
+    """顺序 MA：LA 的 logits 随 PA 变；一步训练有梯度。"""
+    spec, _ = _spec(constraints=ConstraintConfig(maintenance=False))
+    torch.manual_seed(0)
+    net = HierarchicalPolicy(seq_ma=True)
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     ma_only=True, span=1, fixed_rules={"RA": 0}, pa_limit=9)
+    a = out["A"]
+    assert np.isfinite(a["loss"])
+    assert a["grad_norm"]["upper"] > 0.0
+    base = base_chain(net, spec, greedy=True, dt_events=DT,
+                      fixed_rules={"RA": 0}, pa_limit=9)
+    d = next(d for d in base.rec.decisions if d.kind == "MA")
+    t = torch.as_tensor(d.tok).unsqueeze(0)
+    o1 = net(t, d.seg, rules={"PA": torch.tensor([3]), "LA": torch.tensor([0]),
+                              "RA": torch.tensor([0])}, hard=True)
+    o2 = net(t, d.seg, rules={"PA": torch.tensor([6]), "LA": torch.tensor([0]),
+                              "RA": torch.tensor([0])}, hard=True)
+    assert not torch.allclose(o1.rule_logits["LA"], o2.rule_logits["LA"])
+
+
+@pytest.mark.slow
+def test_factorial_group_covers_all_pa_la_pairs():
+    """全因子组：每个顶层点 9×3=27 条，边际长度 9/3。"""
+    spec, _ = _spec(constraints=ConstraintConfig(maintenance=False))
+    torch.manual_seed(0)
+    net = HierarchicalPolicy(seq_ma=True)
+    out = train_step(net, spec, None, M=2, G=2, seed=0, dt_events=DT,
+                     per_head=True, ma_only=True, factorial=True,
+                     only_head=("PA", "LA"),
+                     fixed_rules={"RA": 0}, pa_limit=9)
+    a = out["A"]
+    assert a["kind"] == "A_factorial"
+    assert a["n_pa"] == 9 and a["n_la"] == 3
+    assert len(a["matrices"]) == a["n_top"]
+    for mat in a["matrices"]:
+        assert len(mat) == 9 and len(mat[0]) == 3
+    assert len(a["pa_adv"][0]) == 9
+    assert len(a["la_adv"][0]) == 3
+    assert a["grad_norm"]["upper"] > 0.0
 
 
 @pytest.mark.slow
@@ -199,8 +340,8 @@ def test_segment_from_returns_the_branchs_own_decision_chain():
         assert br.decisions, "分支必须记下自己的决策链"
         no_ma = [d.kind for d in br.decisions if d.kind == "MA"]
         assert not no_ma, "分支里规则被**冻结** ⟹ 不该有顶层决策进链（前缀由脚本回放，也不进链）"
-        # ⚠️ 下层的每一条都必须带 `param_u` —— 少了它，这条分支的 logp 重算不了
-        assert all(d.param_u is not None for d in br.decisions), "下层决策缺 `param_u`"
+        # ⚠️ 下层的每一条都必须带**候选集** —— 少了它，这条分支的 logp 重算不了
+        assert all(d.cand is not None for d in br.decisions), "下层决策缺候选集"
         # 冻结 ⟹ 全程是那一条规则
         assert {(d.rule_pa, d.rule_la, d.rule_ra) for d in br.decisions} == {rule}
     # ⚠️ **v2 在这里断言"两条分支逐位相同（`B=0`）"—— v3 没有 `B`，那条不成立**：

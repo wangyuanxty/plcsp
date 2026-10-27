@@ -22,29 +22,73 @@ import numpy as np
 from .layout import Layout
 
 
-def build_corridor_graph(layout: Layout) -> nx.Graph:
+def build_corridor_graph(layout: Layout, directed: bool = False) -> nx.Graph:
     """格点图：节点带 pos 属性；横/竖相邻边，权重 = 欧氏段长 [m]。
 
     ⚠️ 另加**装卸站**：格点外的一个节点 + **一条**连接段边（接到 `GridSpec.lu_dock_node`）。
     装卸站**不是**格点交叉口——AGV 不在那里与别的车争用路口区段（见 `layout.LuPad`）。
+
+    ══ ⚠️ **`directed`（2026-10-17 加）—— 照原文 Fig. 4 的箭头** ══
+
+    **Fig. 4 的走廊不是全双向的**（第 14 页高倍渲染逐条读）：
+
+    ```
+    横向走廊：每条边**两端都有箭头**（◄ ►）   ⟹ **双向**
+    纵向走廊：**一整条只有一个方向**，且**逐列交替**
+              竖线 c = 0(最左) ↑ · 1 ↓ · 2 ↑ · 3 ↓ · 4 ↑
+    机台接入：机台的 dock 就在走廊节点上，无独立接入段
+    ```
+
+    `directed=False`（默认）⟹ **无向图，逐位等于旧行为**。
+    `directed=True` ⟹ `nx.DiGraph`：横向**双向**；纵向 **`c` 偶 ⟹ 向上（r+1 → r）· `c` 奇 ⟹ 向下（r → r+1）**。
+
+    **⟹ 距离矩阵变成非对称（`d(A→B) ≠ d(B→A)`），AGV 的「位置」带上方向性。**
+    **⚠️ 强连通性**：横向全双向 ⟹ 任何节点仍可达任何节点（先横到方向对的那列、再纵、再横回来）。
     """
     spec = layout.grid
-    g = nx.Graph()
+    g = nx.DiGraph() if directed else nx.Graph()
     for r in range(spec.n_rows + 1):
         for c in range(spec.n_cols + 1):
             g.add_node(spec.node_id(r, c), pos=spec.node_xy(r, c))
     for r in range(spec.n_rows + 1):
         for c in range(spec.n_cols + 1):
             u = spec.node_id(r, c)
-            if c + 1 <= spec.n_cols:                     # 横向
+            if c + 1 <= spec.n_cols:                     # 横向：**双向**
                 v = spec.node_id(r, c + 1)
-                g.add_edge(u, v, weight=abs(spec.node_xy(r, c + 1)[0] - spec.node_xy(r, c)[0]))
-            if r + 1 <= spec.n_rows:                     # 纵向
+                w = abs(spec.node_xy(r, c + 1)[0] - spec.node_xy(r, c)[0])
+                g.add_edge(u, v, weight=w)
+                if directed:
+                    g.add_edge(v, u, weight=w)
+            if r + 1 <= spec.n_rows:                     # 纵向：**单向，逐列交替**
                 v = spec.node_id(r + 1, c)
-                g.add_edge(u, v, weight=abs(spec.node_xy(r + 1, c)[1] - spec.node_xy(r, c)[1]))
+                w = abs(spec.node_xy(r + 1, c)[1] - spec.node_xy(r, c)[1])
+                if not directed:
+                    g.add_edge(u, v, weight=w)
+                elif c % 2 == 0:                         # 偶数列 ↑（下 → 上）
+                    g.add_edge(v, u, weight=w)
+                else:                                    # 奇数列 ↓（上 → 下）
+                    g.add_edge(u, v, weight=w)
     if layout.lu is not None:
         g.add_node(layout.lu.node, pos=(layout.lu.x, layout.lu.y))
-        g.add_edge(layout.lu.node, layout.lu.dock_node, weight=float(layout.lu.connector_m))
+        w = float(layout.lu.connector_m)
+        g.add_edge(layout.lu.node, layout.lu.dock_node, weight=w)
+        if directed:
+            g.add_edge(layout.lu.dock_node, layout.lu.node, weight=w)
+    # ⚠️ **机台接入点 = 横走廊中点**（`mid_edge_dock`，2026-10-17）——
+    #    每台机一个**新节点**，**双向**接到它横走廊上的两个路口（各半格）。
+    #    ⟹ 车到了机台，必须**先横着走到路口**，才能转进竖向走廊（照 Fig. 4）。
+    for mp in layout.machines:
+        if mp.dock_neighbors is None:
+            continue
+        a, b = int(mp.dock_neighbors[0]), int(mp.dock_neighbors[1])
+        xa, ya = g.nodes[a]["pos"]
+        xb, yb = g.nodes[b]["pos"]
+        g.add_node(mp.dock_node, pos=(0.5 * (xa + xb), 0.5 * (ya + yb)))
+        hw = 0.5 * abs(xb - xa)
+        g.add_edge(mp.dock_node, a, weight=hw)
+        g.add_edge(a, mp.dock_node, weight=hw)
+        g.add_edge(mp.dock_node, b, weight=hw)
+        g.add_edge(b, mp.dock_node, weight=hw)
     return g
 
 

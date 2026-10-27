@@ -48,9 +48,9 @@ from ..env.des import SimConfig, SimWorld, StepCounters
 from ..env.instances import Instance
 from ..env.layout import Layout
 from ..nn.features import NormContext
-from .agents import LA_CTX_DIM, HierarchicalPolicy
-from .replay import run_branch, segment_return
-from .rules import N_LA_RULES, N_PA_RULES, N_PM_RULES, SIGMA_DEFAULT
+from .agents import HierarchicalPolicy
+from .replay import SegmentReturn, run_branch, segment_return
+from .rules import N_LA_RULES, N_PA_RULES, N_PM_RULES
 from .rollout import Decision, NetPolicy, gated_by_constraints, net_device
 
 EPS = 1e-6
@@ -105,36 +105,84 @@ class Spec(NamedTuple):
 
 
 def base_chain(net: HierarchicalPolicy, spec: Spec, *, greedy: bool = False,
-               seed: int = 0, dt_events: int = 20, seed_chain: int = 0) -> NetPolicy:
+               seed: int = 0, dt_events: int = 20, seed_chain: int = 0,
+               force_top1: bool = False, fixed_rules: dict[str, int] | None = None,
+               pa_limit: int | None = None, exact_rule: bool = False,
+               tie_seed: int | None = None) -> NetPolicy:
     """跑一条**完整**的 base 链（顶层在链内自采规则）——两阶段都从它取 `Z_j` 与前缀。
 
     ⚠️ **`seed_chain` ≠ `seed`**：前者是「机障 ③ / AGV 故障 ⑨ 的实现」那条**场景**流，
     后者只喂 `NetPolicy.gen`（策略的采样流）。
     **默认 `0` = 与改动前逐位相同**（`docs/v3/progress-log.md` §15.3：写死 0 会让
     所有链共享同一个世界）。
+
+    `fixed_rules` / `pa_limit`：单训 PA 诊断用（固定 LA/RA、只在前 N 条 PA 规则里采）。
+    `exact_rule`：PA/LA 走 `rules.apply_pa_rule` + 环境 `tie_rng`（= CDR 路径，诊断）。
+    默认 `None` / `False` ⟹ 与改动前逐位相同。
     """
     p = NetPolicy(net, spec.inst, spec.layout, spec.ctx, greedy=greedy, seed=seed,
-                  dt_events=dt_events, seed_chain=seed_chain)
+                  dt_events=dt_events, seed_chain=seed_chain,
+                  force_top1=force_top1, fixed_rules=fixed_rules,
+                  pa_limit=pa_limit, exact_rule=exact_rule, tie_seed=tie_seed)
     p.world = spec.world()                                 # type: ignore[attr-defined]
+    # ⚠️ **三个头全固定 ⟹ 不挂 `policy_ma`**（2026-10-20）。
+    #    `des.run_gated` 用 `policy_ma is not None` 决定是否**开启机台扰动**
+    #    （`des.py:2300` 的 `machine_disturbance=`）⟹ 挂了 `policy_ma` 就换了一个世界，
+    #    与 CDR 基线（不带 `policy_ma`）不可比。全固定时规则本来就不变，回调是空转。
+    ma_cb = p.policy_ma if set(p.fixed_rules) < set(RULE_NAMES) else None
     p.metrics = p.world.run_gated(                          # type: ignore[attr-defined]
         seed_chain=p.seed_chain, policy_pa=p.policy_pa, policy_l=p.policy_l,
-        policy_ma=p.policy_ma, dt_events=dt_events,
+        policy_ma=ma_cb, dt_events=dt_events, tie_seed=p.tie_seed,
         # ⚠️ **按约束档撤回调**（2026-10-10）：约束关掉 ⟹ 那个决策点不存在 ⟹
         # 传 `policy_m` 会被 `run_gated` 当场拒绝。约束消融踩过。见 `gated_by_constraints`。
         **gated_by_constraints(p, spec.constraints))
     return p
 
 
-def _scalar(c: StepCounters, w: tuple[float, float, float]) -> float:
-    """段回报标量化：`Σ wᵢ(−fᵢ)`，`f = (完工工件数取负, 能耗, 拖期)`。**越大越好。**"""
-    f = (-float(c.done_jobs), float(c.energy_kwh), float(c.twt))
+def _scalar(sg: SegmentReturn, w: tuple[float, float, float]) -> float:
+    """段回报标量化：`Σ wᵢ(−fᵢ)`，`f = (段内已排程 makespan 增量, 能耗, 拖期)`。**越大越好。**
+
+    ══ 第一分量照对位论文（2026-10-11）══
+
+    **Shi et al., *Advanced Engineering Informatics* 65:103195 (2025)** §4.2.2：
+
+    > *"at each decision point t, the optimization degree reward signal related to MS
+    > (`ms_t`) is represented by **the difference in MS before and after state
+    > transition**"* —— `MS` = *"Makespan for all jobs in **the schedule**"*，
+    > 归一化见其 Eq. 50–51。
+
+    ⟹ **`f[0] = 段内「已排程部分 makespan」的增量** = `replay.SegmentReturn.d_ms`。
+    沿一条链**望远镜求和** = 终局 makespan ⟹ **最小化 Σ`d_ms` ≡ 最小化 makespan**。
+
+    ══ 为什么之前那几种代理都不行（`progress-log.md` §23 / §25）══
+
+    | 第一分量 | 病 |
+    |---|---|
+    | `done_jobs`（工件数） | 段内恒 0/1 ⟹ **方向反**：停表时刻固定时「省电 = 少干活」被奖励（§23.9） |
+    | `done_ops`（工序数） | 工序计数触发停表时**恒定**（`j=3` 八条规则都是 20）⟹ 瞎（§25.1） |
+    | `dt`（段时长） | 扰动触发停表时**恒定**（`j=0` 八条规则都是 10.74 min）⟹ 瞎（§25.1） |
+
+    **两个计数器各自只看得见 6 个顶层点里的 2 个**；`d_ms` 是**连续量**，
+    两种停表触发下都随规则变 —— 而且它**就是**目标本身。
+
+    ⚠️ **单位**：`d_ms` ~ 5–22 min，能耗 ~0.5 kWh，拖期 0–4 min。
+    等权下第一项占主导，与「makespan 是主目标」一致（`reward.EQUAL_WEIGHTS` 口径不变）。
+    """
+    f = (float(sg.d_ms), float(sg.energy_kwh), float(sg.twt))
     return float(sum(-wi * fi for wi, fi in zip(w, f)))
 
 
-def group_advantage(rewards: list[float]) -> np.ndarray:
-    """组内相对优势 `Â⁽ⁱ⁾ = (R⁽ⁱ⁾ − μ) / (σ + ε)`（设计 §4.1）。"""
+def group_advantage(rewards: list[float], scale: bool = True) -> np.ndarray:
+    """组内相对优势 `Â⁽ⁱ⁾ = (R⁽ⁱ⁾ − μ) / (σ + ε)`（设计 §4.1）。
+
+    ⚠️ **`scale=False`（2026-10-20 新增）只减均值、不除 σ**（demean）。
+    理由：z 化把幅度抹平，实测（§38.26）`EAJ+SMPT` 与 `SPT+SMPT` 的组优势只差 11%，
+    而同分布结果差 **28%** ⟹ 训练分不开这两条规则，策略漂到差的那条。
+    `scale=False` 保留幅度 ⟹ 差异大的决策权重大。
+    """
     r = np.asarray(rewards, dtype=np.float64)
-    return (r - r.mean()) / (r.std() + EPS)
+    d = r - r.mean()
+    return d / (r.std() + EPS) if scale else d
 
 
 def logp_terms(head: HierarchicalPolicy, decisions: list[Decision],
@@ -150,10 +198,9 @@ def logp_terms(head: HierarchicalPolicy, decisions: list[Decision],
         if d.kind not in kinds:
             continue
         t = torch.as_tensor(d.tok).unsqueeze(0).to(dev)
-        lc = None if d.la_ctx is None else torch.as_tensor(d.la_ctx)[None].to(dev)
         rules = _rules_of([d], dev)
-        o = head(t, d.seg, rules=rules, la_ctx=lc, hard=True)
-        out.append(_one_logp(o, d, 0))
+        o = head(t, d.seg, rules=rules, hard=True)
+        out.append(_one_logp(head, o, d, 0))
     if not out:
         return torch.zeros((), requires_grad=True)
     return torch.stack(out).sum()
@@ -182,15 +229,12 @@ def batched_forward(head: HierarchicalPolicy, decisions: list[Decision],
     if any(d.seg != seg for d in sel):
         raise ValueError("同一批里的 `seg` 不一致 —— 批量前向的前提是段结构恒定")
     # ⚠️ **设备跟随策略**（见 `rollout.net_device`）：搬到 `head` 参数所在的设备。
-    # `tok` 存在 `Decision` 里时恒为 **numpy（主机内存）** —— 所以每次重算都要搬一次。
     dev = net_device(head)
     tok = torch.as_tensor(np.stack([d.tok for d in sel])).to(dev)
-    lc = torch.as_tensor(np.stack([
-        d.la_ctx if d.la_ctx is not None else np.zeros(LA_CTX_DIM, dtype=np.float32)
-        for d in sel])).to(dev)
     # ⚠️ **逐行的规则**：v3 里一条链跨多个 ΔT ⟹ **批内每行的规则可能不同**。
     # `HierarchicalPolicy.forward` 支持逐行 `rules`（硬路由按行 gather）⟹ **仍是一次前向**。
-    return head(tok, seg, rules=_rules_of(sel, dev), la_ctx=lc, hard=True), sel
+    # ⚠️ **top-K 起，`la_ctx` 不进编码器前向** —— 它只给 LA 打分头用，见 `_one_logp`。
+    return head(tok, seg, rules=_rules_of(sel, dev), hard=True), sel
 
 
 RULE_NAMES: tuple[str, ...] = ("PA", "LA", "RA")
@@ -217,36 +261,90 @@ def rules_dict(rule: tuple[int, int, int]) -> dict[str, int]:
     return {k: int(v) for k, v in zip(RULE_NAMES, rule)}
 
 
-def _one_logp(o, d: Decision, i: int, sigma: float = SIGMA_DEFAULT) -> torch.Tensor:
+def _candidate_logits(head: HierarchicalPolicy, o, d: Decision, i: int) -> torch.Tensor:
+    """用**记录下来的**候选集重算该决策的 logits（带梯度）→ `(K,)` 或 `(2,)`。"""
+    cand = d.cand
+    if cand is None:
+        raise ValueError(f"决策 {d.kind} 缺候选集 —— logp 重算不了")
+    z = o.z[i:i + 1]
+    dev = z.device
+    rows_a = torch.as_tensor(cand.rows_a, device=dev, dtype=torch.long)[None]
+    feats = torch.as_tensor(cand.feats, device=dev, dtype=z.dtype)[None]
+    mask = torch.as_tensor(cand.mask, device=dev, dtype=torch.bool)[None]
+    if d.kind == "PA":
+        if cand.rows_b is None:
+            raise ValueError("PA 候选缺 `rows_b`（机台行）")
+        rows_b = torch.as_tensor(cand.rows_b, device=dev, dtype=torch.long)[None]
+        rule = torch.as_tensor([int(d.rule_pa)], device=dev, dtype=torch.long)
+        return head.score_pa(z, rows_a, rows_b, feats, rule, mask)[0]
+    if d.kind == "LA":
+        if d.la_ctx is None:
+            raise ValueError("LA 决策缺 `la_ctx` —— logp 重算不了")
+        lc = torch.as_tensor(d.la_ctx, device=dev, dtype=z.dtype)[None]
+        rule = torch.as_tensor([int(d.rule_la)], device=dev, dtype=torch.long)
+        return head.score_la(z, rows_a, feats, rule, lc, mask)[0]
+    if d.kind == "M":
+        rule = torch.as_tensor([int(d.rule_ra)], device=dev, dtype=torch.long)
+        return head.score_ra(z, rows_a, feats, rule, mask)[0]
+    raise ValueError(f"未知的下层决策种类 {d.kind!r}")
+
+
+def _one_logp(head: HierarchicalPolicy, o, d: Decision, i: int) -> torch.Tensor:
     """一次前向的输出 `o` 的第 `i` 行 → 该决策的 **logp（带梯度）**。
 
-    - **MA**：三个**独立**分类头的 `log_softmax` 之和（不是一个联合分类）
-    - **下层**：**连续** —— `log N(u; μ, σ)`，**`u` 才是动作**（设计 §6.1 / §13.3 ①）
+    - **MA**：三个**独立**分类头的 `log_softmax` 之和
+    - **PA / LA / RA**：候选集内的 `log_softmax`（`K_eff == 1` ⟹ `0`）
     """
     if d.kind == "MA":
         return sum(torch.log_softmax(o.rule_logits[k][i], dim=-1)[r]
                    for k, r in (("PA", int(d.rule_pa)), ("LA", int(d.rule_la)),
                                 ("RA", int(d.rule_ra))))
-    key = {"PA": "PA", "LA": "LA", "M": "RA"}[d.kind]
-    mu = o.param_mu[key][i]
-    if mu is None:
-        raise ValueError(f"决策 {d.kind} 重算时该头为 None（`la_ctx` 没给？）")
-    if d.param_u is None:
-        raise ValueError(f"决策 {d.kind} 没存 `param_u` —— 连续头的 logp 重算不了")
-    u = torch.as_tensor(np.asarray(d.param_u), dtype=mu.dtype, device=mu.device)
-    var = float(sigma) ** 2
-    return (-(u - mu) ** 2 / (2.0 * var)
-            - 0.5 * float(np.log(2.0 * np.pi * var))).sum()
+    if d.cand is None:
+        raise ValueError(f"决策 {d.kind} 缺候选集 —— logp 重算不了")
+    if int(np.count_nonzero(d.cand.mask)) <= 1:
+        return torch.zeros((), requires_grad=True, device=o.z.device)
+    logits = _candidate_logits(head, o, d, i)
+    return torch.log_softmax(logits, dim=-1)[int(d.cand.act)]
 
 
-def _logp_rows(o, sel: list[Decision]) -> list[torch.Tensor]:
-    """一次前向的输出 `o` → 按 `sel` 顺序逐条取 logp（**带梯度**）。
+def _entropy_one(head: HierarchicalPolicy, o, d: Decision, i: int) -> torch.Tensor:
+    """一个决策的**策略熵**（MAPPO 的熵正则项）。`K_eff == 1` 的强制决策记 0。
 
-    ⚠️ **批内每行的规则可以不同**（一条链跨多个 ΔT）⟹ `batched_forward` 传的是
-    **逐行** rules（`HierarchicalPolicy.forward` 按行硬路由）。
-    ⟹ **这里按行号取自己那一条即可**，不涉及任何重排。
+    ⚠️ MA 是三个**独立**分类头 ⟹ 熵是三个头之和，不是某一个头的熵。
+    ⚠️ 与 `_one_logp` 同一套 logits（含候选掩码），不另算一遍分布。
     """
-    return [_one_logp(o, d, i) for i, d in enumerate(sel)]
+    if d.kind == "MA":
+        return sum(torch.distributions.Categorical(
+            logits=o.rule_logits[k][i]).entropy() for k in RULE_NAMES)
+    if d.cand is None:
+        raise ValueError(f"决策 {d.kind} 缺候选集 —— 熵算不了")
+    if int(np.count_nonzero(d.cand.mask)) <= 1:
+        return torch.zeros((), device=o.z.device)
+    logits = _candidate_logits(head, o, d, i)
+    return torch.distributions.Categorical(logits=logits).entropy()
+
+
+def batched_terms_entropy(head: HierarchicalPolicy, decisions: list[Decision],
+                          kinds: tuple[str, ...]):
+    """一次前向 → `(逐决策 logp, 逐决策 V, 逐决策熵)`；**MAPPO 基线用**。
+
+    与 `batched_terms` 同一次前向、同一顺序；多出的熵只给 PPO 的熵正则。
+    """
+    o, sel = batched_forward(head, decisions, kinds)
+    if not sel:
+        return torch.zeros(0), None, torch.zeros(0)
+    lp = torch.stack(_logp_rows(head, o, sel))
+    if o.value is None:
+        raise ValueError("这个 net 没建 critic 头 —— 构造时须给 "
+                         "`HierarchicalPolicy(with_value=True)`")
+    ent = torch.stack([_entropy_one(head, o, d, i) for i, d in enumerate(sel)])
+    return lp, o.value[:, 0], ent
+
+
+def _logp_rows(head: HierarchicalPolicy, o,
+               sel: list[Decision]) -> list[torch.Tensor]:
+    """一次前向的输出 `o` → 按 `sel` 顺序逐条取 logp（**带梯度**）。"""
+    return [_one_logp(head, o, d, i) for i, d in enumerate(sel)]
 
 
 def batched_terms(head: HierarchicalPolicy, decisions: list[Decision],
@@ -262,7 +360,7 @@ def batched_terms(head: HierarchicalPolicy, decisions: list[Decision],
     o, sel = batched_forward(head, decisions, kinds)
     if not sel:
         return torch.zeros(0), None
-    lp = torch.stack(_logp_rows(o, sel))
+    lp = torch.stack(_logp_rows(head, o, sel))
     if not want_value:
         return lp, None
     if o.value is None:
@@ -298,6 +396,17 @@ def ma_logp_at(head: HierarchicalPolicy, d: Decision,
     组内 z 化后 `Σ_m Â_m ≡ 0` ⟹ `Σ_m Â_m·logp ≡ 0` ⟹ **损失恒为 0**。
     """
     dev = net_device(head)
+    if getattr(head, "seq_ma", False):
+        # 顺序条件：LA 的 logits 逐行条件在该行自己的 PA 上。
+        g = len(rules)
+        t = torch.as_tensor(d.tok).unsqueeze(0).repeat(g, 1, 1).to(dev)
+        rt = {k: torch.as_tensor([int(r[i]) for r in rules], device=dev)
+              for i, k in enumerate(RULE_NAMES)}
+        o = head(t, d.seg, rules=rt, hard=True)
+        return torch.stack([
+            sum(torch.log_softmax(o.rule_logits[k][i], dim=-1)[r]
+                for k, r in (("PA", int(rp)), ("LA", int(rl)), ("RA", int(rr))))
+            for i, (rp, rl, rr) in enumerate(rules)])
     t = torch.as_tensor(d.tok).unsqueeze(0).to(dev)
     o = head(t, d.seg, hard=True)
     return torch.stack([
@@ -306,15 +415,68 @@ def ma_logp_at(head: HierarchicalPolicy, d: Decision,
         for rp, rl, rr in rules])
 
 
-def _sample_rules(gen: torch.Generator) -> tuple[int, int, int]:
+def _sample_rules(gen: torch.Generator,
+                  n_pa: int = N_PA_RULES,
+                  fixed_ra: int | None = None) -> tuple[int, int, int]:
     """从**规则空间**里**均匀**采一组 `(rule_PA, rule_LA, rule_RA)`。
 
     ⚠️ **均匀采，不是按策略采** —— 阶段 A 的组是"同一状态下 G 个不同的目标"，
     谁好由**组内比较**决定；按策略采会把当前偏好掺进探索里（v2 同口径）。
+    `n_pa < 12` 时只采前 `n_pa` 条 PA（9 = 去掉 EDD 三条）。
+    `fixed_ra` 给定时 RA 不参与组变化（无保养档）。
     """
     def pick(n: int) -> int:
         return int(torch.randint(0, n, (1,), generator=gen))
-    return pick(N_PA_RULES), pick(N_LA_RULES), pick(N_PM_RULES)
+    pa, la = pick(int(n_pa)), pick(N_LA_RULES)
+    ra = pick(N_PM_RULES) if fixed_ra is None else int(fixed_ra)
+    return pa, la, ra
+
+
+def _per_head_rules(base_rule: tuple[int, int, int],
+                    n_pa: int = N_PA_RULES
+                    ) -> dict[str, list[tuple[int, int, int]]]:
+    """**逐头分组**：每次只变一个头，另外两个头固定在 `base_rule`。
+
+    → `{"PA": [n_pa 个三元组], "LA": [3 个], "RA": [3 个]}`。
+    每组都包含 `base_rule` 自己（变动头的值等于基准值那一项）。
+    `n_pa < N_PA_RULES` 时只枚举 PA 的前 `n_pa` 条（9 = 去掉 EDD 三条）。
+    """
+    out: dict[str, list[tuple[int, int, int]]] = {}
+    for key, n in (("PA", n_pa), ("LA", N_LA_RULES), ("RA", N_PM_RULES)):
+        k = RULE_NAMES.index(key)
+        arr = []
+        for v in range(n):
+            r = list(base_rule)
+            r[k] = v
+            arr.append(tuple(r))
+        out[key] = arr
+    return out
+
+
+def ma_head_logp_at(head: HierarchicalPolicy, d: Decision,
+                    rules: list[tuple[int, int, int]], key: str,
+                    n_valid: int | None = None,
+                    rules_ctx: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+    """`Z_j` 上**某一个头**对给定规则号的 logp → `(len(rules),)`。
+
+    ⚠️ 与 `ma_logp_at` 的区别：这里只取 `key` 那个头，**另外两个头的 logp 不进图**。
+    逐头分组更新时，这是隔离 credit assignment 的关键。
+    `n_valid` 给定时只对前 `n_valid` 条规则做 softmax（PA 9 条规则档）。
+    `rules_ctx` 给定时把它传给 `forward`（顺序条件头需要前一个头的规则）。
+    """
+    dev = net_device(head)
+    t = torch.as_tensor(d.tok).unsqueeze(0).to(dev)
+    o = (head(t, d.seg, rules=rules_ctx, hard=True) if rules_ctx is not None
+         else head(t, d.seg, hard=True))
+    k = RULE_NAMES.index(key)
+    lg = o.rule_logits[key][0]
+    if n_valid is not None:
+        n_valid = int(n_valid)
+        if not 1 <= n_valid <= lg.numel():
+            raise ValueError(f"n_valid={n_valid} 越界（logits 宽 {lg.numel()}）")
+        lg = lg[:n_valid]
+    idx = torch.as_tensor([int(r[k]) for r in rules], dtype=torch.long, device=dev)
+    return torch.log_softmax(lg, dim=-1)[idx]
 
 
 def goal_flat(rule: tuple[int, int, int]) -> int:
@@ -358,26 +520,41 @@ class Branch(NamedTuple):
 
 def segment_from(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, j: int, *,
                  rule: tuple[int, int, int], seed: int, greedy: bool,
-                 dt_events: int = 20, seed_chain: int = 0) -> Branch:
-    """**从 `Z_j` 起、用固定 `rule` 跑一段**（到 `Z_{j+1}`）→ 该分支的读数与决策链。
+                 dt_events: int = 20, seed_chain: int = 0,
+                 span: int = 1, terminal: bool = False,
+                 force_top1: bool = False,
+                 exact_rule: bool = False) -> Branch:
+    """**从 `Z_j` 起、用固定 `rule` 跑一段** → 该分支的读数与决策链。
+
+    `span` = 段跨几个 ΔT（顶层区间）。默认 1 = 跑到 `Z_{j+1}`（原行为）；
+    `span=3` = 跑到 `Z_{j+3}`。
+    `terminal=True` = **跑到局末**（`stop_after_ma=0`），忽略 `span`。
+    让规则差异（尤其是 LA / EDD 的整局收益）进入回报。
 
     回放 `Z_j` 之前的决策序列（不调策略），再让 `net` + **冻结规则**接下去。
     ⚠️ 返回的 `decisions` **只含分支那一段**（`inner.rec` 是从 `Z_j` 起才记的）——
     前缀由脚本回放、不进 `inner.rec` ✓。
     """
+    if span < 1:
+        raise ValueError(f"span 必须 >= 1，收到 {span}")
+    stop = 0 if terminal else j + 1 + span
     dec = base.rec.decisions
     prefix, _ = _prefix_to(dec, j)
     inner = NetPolicy(net, spec.inst, spec.layout, spec.ctx, rules=rules_dict(rule),
                       greedy=greedy, seed=seed, dt_events=dt_events, freeze_rules=True,
-                      seed_chain=seed_chain)
+                      seed_chain=seed_chain, force_top1=force_top1,
+                      exact_rule=exact_rule)
     _, counters = run_branch(spec.world(), prefix, inner,
-                             switch_after_ma=j, stop_after_ma=j + 2)
+                             switch_after_ma=j, stop_after_ma=stop)
     return Branch(counters=counters, decisions=inner.rec.decisions)
 
 
 def _run_all_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy,
                       plan: list[tuple[int, list[tuple[tuple[int, int, int], int, bool]]]], *,
-                      dt_events: int, pool) -> list[list[Branch]]:
+                      dt_events: int, pool, span: int = 1,
+                      terminal: bool = False,
+                      force_top1: bool = False,
+                      exact_rule: bool = False) -> list[list[Branch]]:
     """跑**整个阶段**的全部段 → 按 `plan` 的边界分组返回。
 
     `plan = [(j, [(rule, seed, greedy), ...]), ...]`。
@@ -394,13 +571,16 @@ def _run_all_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy,
     """
     if pool is None:
         return [[segment_from(net, spec, base, j, rule=r, seed=sd, greedy=gr,
-                              dt_events=dt_events, seed_chain=base.seed_chain)
+                              dt_events=dt_events, seed_chain=base.seed_chain,
+                              span=span, terminal=terminal,
+                              force_top1=force_top1, exact_rule=exact_rule)
                  for r, sd, gr in jobs]
                 for j, jobs in plan]
     flat: list[tuple] = []
     for j, jobs in plan:
         prefix, _ = _prefix_to(base.rec.decisions, j)
-        flat.extend((prefix, j, r, sd, gr, base.seed_chain) for r, sd, gr in jobs)
+        flat.extend((prefix, j, r, sd, gr, base.seed_chain, span, terminal,
+                     force_top1, exact_rule) for r, sd, gr in jobs)
     out = pool.segments(flat)
     branches = [Branch(counters=c, decisions=d) for c, d in out]
     res: list[list[Branch]] = []
@@ -416,7 +596,9 @@ def _run_all_segments(net: HierarchicalPolicy, spec: Spec, base: NetPolicy,
 # ══════════════════ 两个阶段 ══════════════════
 
 def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
-            M: int = 8, seed: int = 0, dt_events: int = 20, pool=None) -> dict:
+            M: int = 8, seed: int = 0, dt_events: int = 20, pool=None,
+            span: int = 1, force_top1: bool = False,
+            exact_rule: bool = False, adv_scale: bool = True) -> dict:
     """**阶段 B**：规则冻结在 base 链的 `rule*`（stop-gradient），M 条**只变执行**的轨迹。
 
     只更新**下层**（PA / LA / RA 的参数头）—— **顶层的 logp 不进图**。
@@ -427,12 +609,15 @@ def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
     # ⚠️ 先把**全部**顶层点的段列出来，再**一次**交给池（见 `_run_all_segments`）
     plan_b = [(j, [(_prefix_to(base.rec.decisions, j)[1], seed * 1000 + m, False)
                    for m in range(M)]) for j in range(n_top)]
-    all_b = _run_all_segments(net, spec, base, plan_b, dt_events=dt_events, pool=pool)
+    all_b = _run_all_segments(net, spec, base, plan_b, dt_events=dt_events,
+                              pool=pool, span=span, force_top1=force_top1,
+                              exact_rule=exact_rule)
     for j in range(n_top):
         before = base.ma_counters[j]
         runs = all_b[j]
         segs = [segment_return(before, br.counters) for br in runs]
-        adv = group_advantage([_scalar(sg, spec.w) for sg in segs])
+        adv = group_advantage([_scalar(sg, spec.w) for sg in segs],
+                              scale=adv_scale)
         for a, sg in zip(adv, segs):
             rows.append({"j": j, "adv": float(a), "jobs": sg.done_jobs,
                          "energy": sg.energy_kwh, "twt": sg.twt})
@@ -443,7 +628,12 @@ def phase_b(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
 
 
 def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
-            G: int = 8, seed: int = 0, dt_events: int = 20, pool=None) -> dict:
+            G: int = 8, seed: int = 0, dt_events: int = 20, pool=None,
+            span: int = 1, terminal_ma: bool = False,
+            force_top1: bool = False, ent_ma: float = 0.0,
+            n_pa: int | None = None,
+            fixed_ra: int | None = None,
+            exact_rule: bool = False, adv_scale: bool = True) -> dict:
     """**阶段 A**：下层**确定性**（连续头**取 μ，不采样**），每个顶层点采 G 组规则。
 
     只更新**顶层**（MA 的三个分类头）的 logp。
@@ -460,15 +650,18 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
     rules_by_j = []
     for j in range(n_top):
         gen = torch.Generator().manual_seed(seed * 1000 + j)
-        rules_by_j.append([_sample_rules(gen) for _ in range(G)])
+        rules_by_j.append([_sample_rules(gen, n_pa or N_PA_RULES, fixed_ra)
+                           for _ in range(G)])
     plan_a = [(j, [(r, 0, True) for r in rules_by_j[j]]) for j in range(n_top)]
-    all_a = _run_all_segments(net, spec, base, plan_a, dt_events=dt_events, pool=pool)
+    all_a = _run_all_segments(net, spec, base, plan_a, dt_events=dt_events,
+                              pool=pool, span=span, terminal=terminal_ma,
+                              force_top1=force_top1, exact_rule=exact_rule)
     for j in range(n_top):
         before = base.ma_counters[j]
         rules = rules_by_j[j]
         runs = all_a[j]
         rewards = [_scalar(segment_return(before, br.counters), spec.w) for br in runs]
-        adv = group_advantage(rewards)
+        adv = group_advantage(rewards, scale=adv_scale)
         seg_std.append(float(np.std(rewards)))
         # ⚠️ **顶层只更新 `Z_j` 那一个决策**（§6"只更新那一组规则的 logp"）——
         # 不是链上所有 MA 决策。`Z_j` 的决策在 **base 链**上。
@@ -479,10 +672,190 @@ def phase_a(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
     return {"loss": loss, "seg_std": seg_std, "n_top": n_top, "kind": "A"}
 
 
+def _maintenance_on(spec: Spec) -> bool:
+    """保养（RA）决策点是否存在。`constraints=None` = 默认档（开）。"""
+    return spec.constraints is None or bool(spec.constraints.maintenance)
+
+
+def _factorial_marginals(rewards: list[float], n_pa: int, n_la: int,
+                        scale: bool = True):
+    """27 条终局回报 → **PA 边际 / LA 边际**（全因子设计）。
+
+    `R[a,l]` 排成 `(n_pa, n_la)`：
+    - PA 边际 = 对 LA 取平均 → `(n_pa,)`
+    - LA 边际 = 对 PA 取平均 → `(n_la,)`
+    两个边际各自做组内 z 化。
+    """
+    r = np.asarray(rewards, dtype=np.float64).reshape(n_pa, n_la)
+    r_pa = r.mean(axis=1)
+    r_la = r.mean(axis=0)
+    return (r_pa, r_la, group_advantage(r_pa.tolist(), scale=scale),
+            group_advantage(r_la.tolist(), scale=scale), r)
+
+
+def phase_a_factorial(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
+                      seed: int = 0, dt_events: int = 20, pool=None,
+                      span: int = 1, terminal: bool = True,
+                      force_top1: bool = False,
+                      n_pa: int | None = None,
+                      exact_rule: bool = False,
+                      adv_scale: bool = True) -> dict:
+    """**PA×LA 全因子组**：每个顶层点跑全部 `n_pa × 3` 个组合。
+
+    与逐头分组的区别：
+    - 逐头：固定另一个头，只变一个 → **坐标上升**，会卡局部最优；
+    - 全因子：九乘三全部跑 → 边际优势，能看到联合最优。
+
+    只更新 PA/LA 两个头；RA 固定（无保养档）。
+    """
+    ma_idx = [i for i, d in enumerate(base.rec.decisions) if d.kind == "MA"]
+    n_top = len(ma_idx)
+    n_pa = int(n_pa or N_PA_RULES)
+    n_la = N_LA_RULES
+    if not 1 <= n_pa <= N_PA_RULES:
+        raise ValueError(f"n_pa={n_pa} 越界：应在 1..{N_PA_RULES}")
+    plan = []
+    base_rules = []
+    for j in range(n_top):
+        d = base.rec.decisions[ma_idx[j]]
+        br = (int(d.rule_pa), int(d.rule_la), int(d.rule_ra))
+        base_rules.append(br)
+        rules = [(a, la_i, br[2]) for a in range(n_pa) for la_i in range(n_la)]
+        plan.append((j, [(r, 0, True) for r in rules]))
+    all_runs = _run_all_segments(net, spec, base, plan, dt_events=dt_events,
+                                 pool=pool, span=span, terminal=terminal,
+                                 force_top1=force_top1, exact_rule=exact_rule)
+    loss = torch.zeros((), requires_grad=True)
+    matrices, pa_advs, la_advs = [], [], []
+    for j in range(n_top):
+        before = base.ma_counters[j]
+        d = base.rec.decisions[ma_idx[j]]
+        br = base_rules[j]
+        rewards = [_scalar(segment_return(before, run.counters), spec.w)
+                   for run in all_runs[j]]
+        if len(rewards) != n_pa * n_la:
+            raise RuntimeError(
+                f"全因子组回填错位：Z_{j} 应有 {n_pa * n_la} 条，拿到 {len(rewards)} 条")
+        _, _, adv_pa, adv_la, mat = _factorial_marginals(rewards, n_pa, n_la,
+                                                   scale=adv_scale)
+        pa_rules = [(a, br[1], br[2]) for a in range(n_pa)]
+        la_rules = [(br[0], la_i, br[2]) for la_i in range(n_la)]
+        lp_pa = ma_head_logp_at(net, d, pa_rules, "PA", n_valid=n_pa)
+        ctx = {k: torch.as_tensor([int(v)]) for k, v in
+               zip(RULE_NAMES, br)}
+        lp_la = ma_head_logp_at(net, d, la_rules, "LA", rules_ctx=ctx)
+        a_pa = torch.as_tensor(adv_pa, dtype=lp_pa.dtype, device=lp_pa.device)
+        a_la = torch.as_tensor(adv_la, dtype=lp_la.dtype, device=lp_la.device)
+        loss = loss - (a_pa * lp_pa).sum() - (a_la * lp_la).sum()
+        matrices.append(mat.tolist())
+        pa_advs.append(adv_pa.tolist())
+        la_advs.append(adv_la.tolist())
+    return {"loss": loss, "n_top": n_top, "kind": "A_factorial",
+            "n_pa": n_pa, "n_la": n_la, "matrices": matrices,
+            "pa_adv": pa_advs, "la_adv": la_advs}
+
+
+def phase_a_per_head(net: HierarchicalPolicy, spec: Spec, base: NetPolicy, *,
+                     seed: int = 0, dt_events: int = 20, pool=None,
+                     span: int = 1, terminal: bool = True,
+                     force_top1: bool = False,
+                     only_head: str | tuple[str, ...] | None = None,
+                     n_pa: int | None = None,
+                     exact_rule: bool = False,
+                     adv_scale: bool = True) -> dict:
+    """**逐头分组**的阶段 A：每个顶层点分三组，**每次只变一个头**。
+
+    | 组 | 变动 | 固定 | 成员数 |
+    |---|---|---|---:|
+    | PA | 12 个 PA 规则 | base 的 LA / RA | 12 |
+    | LA | 3 个 LA 规则 | base 的 PA / RA | 3 |
+    | RA | 3 个 RA 规则 | base 的 PA / LA | 3 |
+
+    ⚠️ **为什么需要它**：联合均匀采 8 组时，PA 对终局 MS 的影响盖过 LA/RA
+    （§38.15：LA 头 100% `MINCOST`）。逐头分组把另外两个头钉死 ⟹
+    每个头拿到的是**只属于它自己的**组内比较。
+
+    ⚠️ **保养关掉时（`spec.constraints.maintenance=False`）不建 RA 组**：
+    没有 RA 决策点，变 RA 规则不会改变任何读数 ⟹ 优势恒 0，白跑 3 段。
+
+    ⚠️ 段数从 `G=8` 变成 `12+3+3=18` 每组顶层点（PA 组占大头）。
+    保养关掉时是 `12+3=15`。
+    """
+    ma_idx = [i for i, d in enumerate(base.rec.decisions) if d.kind == "MA"]
+    n_top = len(ma_idx)
+    if only_head is not None:
+        keys = ((only_head,) if isinstance(only_head, str)
+                else tuple(only_head))
+        bad = [k for k in keys if k not in RULE_NAMES]
+        if bad:
+            raise ValueError(f"only_head={only_head!r} 含未知头 {bad}")
+        if not keys:
+            raise ValueError("only_head 不能是空序列")
+    else:
+        keys = RULE_NAMES if _maintenance_on(spec) else ("PA", "LA")
+    if n_pa is None:
+        n_pa = N_PA_RULES
+    n_pa = int(n_pa)
+    if not 1 <= n_pa <= N_PA_RULES:
+        raise ValueError(f"n_pa={n_pa} 越界：应在 1..{N_PA_RULES}")
+    plan: list[tuple[int, list[tuple[tuple[int, int, int], int, bool]]]] = []
+    rules_by_jk: dict[tuple[int, str], list[tuple[int, int, int]]] = {}
+    for j in range(n_top):
+        d = base.rec.decisions[ma_idx[j]]
+        by_key = _per_head_rules((int(d.rule_pa), int(d.rule_la),
+                                  int(d.rule_ra)), n_pa=n_pa)
+        jobs = []
+        for key in keys:
+            rules_by_jk[(j, key)] = by_key[key]
+            jobs.extend((r, 0, True) for r in by_key[key])
+        plan.append((j, jobs))
+    all_runs = _run_all_segments(net, spec, base, plan, dt_events=dt_events,
+                                 pool=pool, span=span, terminal=terminal,
+                                 force_top1=force_top1, exact_rule=exact_rule)
+    loss = torch.zeros((), requires_grad=True)
+    groups = []
+    for j in range(n_top):
+        if j >= len(ma_idx):
+            break
+        d = base.rec.decisions[ma_idx[j]]
+        before = base.ma_counters[j]
+        off = 0
+        for key in keys:
+            rules = rules_by_jk[(j, key)]
+            runs = all_runs[j][off:off + len(rules)]
+            off += len(rules)
+            rewards = [_scalar(segment_return(before, br.counters), spec.w)
+                       for br in runs]
+            adv = group_advantage(rewards, scale=adv_scale)
+            logps = ma_head_logp_at(
+                net, d, rules, key,
+                n_valid=(n_pa if key == "PA" else None))
+            loss = loss - (torch.as_tensor(adv) * logps).sum()
+            k = RULE_NAMES.index(key)
+            groups.append({"j": j, "head": key,
+                           "adv": [float(a) for a in adv],
+                           "rewards": [float(r) for r in rewards],
+                           "rule_ids": [int(r[k]) for r in rules]})
+        if off != len(all_runs[j]):
+            raise RuntimeError(
+                f"逐头分组回填错位：Z_{j} 切出 {off} 条，拿到 {len(all_runs[j])} 条")
+    return {"loss": loss, "n_top": n_top, "kind": "A_per_head",
+            "heads": list(keys), "groups": groups}
+
+
 def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer | None,
                *, M: int = 8, G: int = 8, seed: int = 0, dt_events: int = 20,
                lr: float = 1e-4, pool=None, loss_threads: int = 8,
-               chain_seed: int = 0) -> dict:
+               chain_seed: int = 0, span: int = 1,
+               terminal_ma: bool = False, force_top1: bool = False,
+               ma_only: bool = False, ent_ma: float = 0.0,
+               per_head: bool = False,
+               only_head: str | tuple[str, ...] | None = None,
+               fixed_rules: dict[str, int] | None = None,
+               pa_limit: int | None = None,
+               factorial: bool = False,
+               exact_rule: bool = False,
+               adv_scale: bool = True) -> dict:
     """一次**交替**：**先 A 后 B**（= 设计 §6 的次序；见模块 docstring）。
 
     每阶段各自：跑组 → 算优势 → **只对那一层**带梯度重算 → 反传 → 走一步。
@@ -499,12 +872,53 @@ def train_step(net: HierarchicalPolicy, spec: Spec, optim: torch.optim.Optimizer
     torch.set_num_threads(1)
     # ⚠️ **`chain_seed` = 这一步的世界**。整步（base + 全部段）**共用同一个场景** ——
     # 重放前缀要求如此。**场景多样性在步与步之间**（由调用方每步换一个）。
+    if factorial:
+        if not per_head:
+            raise ValueError("factorial 需要 per_head=True")
+        heads = ((only_head,) if isinstance(only_head, str)
+                 else tuple(only_head or ()))
+        if set(heads) != {"PA", "LA"}:
+            raise ValueError(
+                "factorial 只训练 PA/LA 两个头：only_head=('PA','LA')")
+    if exact_rule and not ma_only:
+        # ⚠️ **`exact_rule` 与阶段 B 不兼容**（2026-10-20）：本档下层执行的是**规则**，
+        #    打分头不参与 ⟹ 阶段 B 的 `logp`（记 0.0）没有分布含义，训它无意义。
+        raise ValueError("--exact-rule 只能与 --ma-only（或 --per-head/--heads）同用："
+                         "精确执行档没有下层打分头可训")
     base = base_chain(net, spec, greedy=False, seed=seed, dt_events=dt_events,
-                      seed_chain=chain_seed)
+                      seed_chain=chain_seed, fixed_rules=fixed_rules,
+                      pa_limit=pa_limit, exact_rule=exact_rule)
     out: dict = {"base_makespan": float(base.metrics["makespan"])}   # type: ignore[attr-defined]
     torch.set_num_threads(max(1, loss_threads) if pool is not None else prev)
     try:
-        for name, fn, kw in (("A", phase_a, {"G": G}), ("B", phase_b, {"M": M})):
+        if factorial:
+            phases = [("A", phase_a_factorial,
+                       {"span": span, "terminal": terminal_ma,
+                        "force_top1": force_top1, "n_pa": pa_limit,
+                        "exact_rule": exact_rule,
+                        "adv_scale": adv_scale})]
+        elif per_head:
+            # ⚠️ **逐头分组**：段数与 `G` 无关（PA 12 + LA 3 + RA 3）。
+            phases = [("A", phase_a_per_head,
+                       {"span": span, "terminal": terminal_ma,
+                        "force_top1": force_top1, "only_head": only_head,
+                        "n_pa": pa_limit, "exact_rule": exact_rule,
+                        "adv_scale": adv_scale})]
+        else:
+            phases = [("A", phase_a, {"G": G, "span": span,
+                                      "terminal_ma": terminal_ma,
+                                      "force_top1": force_top1,
+                                      "ent_ma": ent_ma,
+                                      "n_pa": pa_limit,
+                                      "fixed_ra": (fixed_rules or {}).get("RA"),
+                                      "exact_rule": exact_rule,
+                                      "adv_scale": adv_scale})]
+        if not ma_only and not factorial:
+            phases.append(("B", phase_b, {"M": M, "span": span,
+                                          "force_top1": force_top1,
+                                          "exact_rule": exact_rule,
+                                          "adv_scale": adv_scale}))
+        for name, fn, kw in phases:
             optim.zero_grad(set_to_none=True)
             res = fn(net, spec, base, seed=seed, dt_events=dt_events, pool=pool, **kw)
             res["loss"].backward()
@@ -529,7 +943,7 @@ def _grad_norm(net: HierarchicalPolicy, phase: str) -> dict:
         return float(np.sqrt(s))
     # ⚠️ **v3 的层界**：上层 = 那三个**分类头**（`select`）；
     # 下层 = 四个**参数头**（PA 的作业侧 / 机台侧 + LA + RA）。
-    lower = (net.pa_job, net.pa_mach, net.la, net.ra)
+    lower = (net.scorer_pa, net.scorer_la, net.scorer_ra)
     upper = (net.select,)
     return {"upper": norm(upper), "lower": norm(lower),
             "expect": ("lower" if phase == "B" else "upper")}

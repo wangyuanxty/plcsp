@@ -56,21 +56,23 @@ from .train import Spec, base_chain, rules_dict
 _W: dict = {}
 
 
-def _get_net(spec: Spec, with_value: bool):
-    """子进程里的网络缓存 —— 按 `with_value` 键。
+def _get_net(spec: Spec, with_value: bool, seq_ma: bool = False):
+    """子进程里的网络缓存 —— 按 `(with_value, seq_ma)` 键。
 
     ⚠️ **2026-10-10：键由 `(n_chargers, with_value)` 简化为 `with_value`** ——
-    充电头删了之后，本网络**不再随布局变宽度**（`HierarchicalPolicy()` 无必需参数），
-    故同一个进程里的网络结构只由 `with_value` 决定。`spec` 参数保留（调用点按位传参）。
+    充电头删了之后，本网络**不再随布局变宽度**（`HierarchicalPolicy()` 无必需参数）。
+
+    ⚠️ **2026-10-19：加 `seq_ma`** —— 顺序条件 MA 的 `select` 结构不同，
+    必须按这个键分开缓存；否则子进程会按独立头加载、`load_state_dict` 立刻炸。
 
     ⚠️ **缓存结构、不缓存权重**：参数每步都在变（父进程 `optim.step()`），
     故每次任务都 `load_state_dict`（≈5 ms，相对一条 0.15–0.6 s 的链/段可忽略）。
     """
-    key = bool(with_value)
+    key = (bool(with_value), bool(seq_ma))
     net = _W.get(key)
     if net is None:
         torch.set_num_threads(1)          # ⚠️ 每进程 1 线程（见模块 docstring）
-        net = HierarchicalPolicy(with_value=key)
+        net = HierarchicalPolicy(with_value=key[0], seq_ma=key[1])
         _W[key] = net
     return net
 
@@ -104,8 +106,8 @@ def _worker(job):
 
     ⚠️ 每任务都 `load_state_dict`：参数每步都在变，缓存网络结构、**不缓存权重**。
     """
-    state, spec, with_value, i, seed, dt_events, seed_chain = job
-    net = _get_net(spec, with_value)
+    state, spec, with_value, seq_ma, i, seed, dt_events, seed_chain = job
+    net = _get_net(spec, with_value, seq_ma)
     net.load_state_dict(state)
     p = base_chain(net, spec, greedy=False, seed=seed * 1000 + i,
                    dt_events=dt_events, seed_chain=seed_chain)
@@ -127,16 +129,18 @@ def _seg_worker(chunk):
     ⚠️ **按批送**（不是一个任务一条段）：`state_dict` 约 2.4 MB，逐条送的话
     400 条段要传近 1 GB；按 `n_workers` 批送只要 ~40 MB。
     """
-    state, spec, with_value, jobs = chunk
-    net = _get_net(spec, with_value)
+    state, spec, with_value, seq_ma, jobs = chunk
+    net = _get_net(spec, with_value, seq_ma)
     net.load_state_dict(state)
     out = []
-    for prefix, j, rule, seed, greedy, dt_events, seed_chain in jobs:
+    for prefix, j, rule, seed, greedy, dt_events, seed_chain, span, terminal, ft1, er in jobs:
         inner = NetPolicy(net, spec.inst, spec.layout, spec.ctx, rules=rules_dict(rule),
                           greedy=greedy, seed=seed, dt_events=dt_events,
-                          freeze_rules=True, seed_chain=seed_chain)
+                          freeze_rules=True, seed_chain=seed_chain,
+                          force_top1=ft1, exact_rule=er)
+        stop = 0 if terminal else j + 1 + span
         _, counters = run_branch(spec.world(), prefix, inner,
-                                 switch_after_ma=j, stop_after_ma=j + 2)
+                                 switch_after_ma=j, stop_after_ma=stop)
         out.append((counters, inner.rec.decisions))
     return out
 
@@ -189,8 +193,9 @@ class ChainPool:
             raise ValueError("并行档只跑 CPU —— 先把 `net` 留在 CPU，或改用顺序档 + `--device cuda`")
         state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
         with_value = net.value_head is not None
-        jobs = [(state, self.spec, with_value, i, seed, self.dt_events, seed_chain)
-                for i in range(n)]
+        seq_ma = bool(getattr(net, "seq_ma", False))
+        jobs = [(state, self.spec, with_value, seq_ma, i, seed, self.dt_events,
+                 seed_chain) for i in range(n)]
         out = list(self.ex.map(_worker, jobs))
         return [Chain(float(R), f, dec) for R, f, dec in out]
 
@@ -228,8 +233,13 @@ class SegmentPool:
         self.ex = ProcessPoolExecutor(max_workers=self.n_workers, mp_context=self._ctx)
 
     def segments(self, jobs: list[tuple]) -> list[tuple]:
-        """`jobs = [(prefix, j, rule, seed, greedy, seed_chain), ...]`
+        """`jobs = [(prefix, j, rule, seed, greedy, seed_chain, span, terminal, ft1, er), ...]`
         → `[(StepCounters, decisions), ...]`。
+
+        `span` = 段跨几个 ΔT（默认 1 = 到 `Z_{j+1}`）。
+        `terminal=True` = **跑到局末**（`stop_after_ma=0`），忽略 `span`。
+        `force_top1=True` = 下层取规则 top-1，绕过打分头。
+        `er`（`exact_rule`，2026-10-20）= PA/LA 直接走 `rules.apply_pa_rule`。
 
         **返回顺序与 `jobs` 一致**（分块是轮转的，回填时按原下标复位）。
         """
@@ -240,9 +250,12 @@ class SegmentPool:
             return []
         state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
         with_value = net.value_head is not None
-        full = [(p, j, g, s, gr, self.dt_events, sc) for (p, j, g, s, gr, sc) in jobs]
+        seq_ma = bool(getattr(net, "seq_ma", False))
+        full = [(p, j, g, s, gr, self.dt_events, sc, sp, tm, ft, er)
+                for (p, j, g, s, gr, sc, sp, tm, ft, er) in jobs]
         chunks = _chunk_round_robin(full, self.n_workers)
-        payload = [(state, self.spec, with_value, c) for _idx, c in chunks]
+        payload = [(state, self.spec, with_value, seq_ma, c)
+                   for _idx, c in chunks]
         res = list(self.ex.map(_seg_worker, payload))
         # ⚠️ **按记录的原下标复位**（轮转分块打乱了顺序，直接拼接会错位）
         out: list = [None] * len(jobs)

@@ -39,3 +39,18 @@
   旧线保持可跑，只作对照，不再改。）
 - **跑墙钟读数前先确认机器独占**（`Get-Process python`）。并发下的数字不能采信（§22.5）。
 - 提交格式 `<type>: <description>`。不添加署名或生成标识。
+
+## 4. v5 默认实验口径（无特殊规定时）
+
+- 编码器：`--encoder_type settrans`（job 和 machine 都用 ST）。
+- 特征：`--st_token_context 1 --st_task_features 1` = 33 维；
+  `--st_edge_features 0`（edge 4 维暂不开，除非明确要求）。
+- 权重：`--random_weight_type 01`（随机 λ）。
+- 学习率：`--LR 1e-3`（论文 Adam `lr = 1e-3`）。
+  未显式指定时，默认 `1e-3`。
+  ⚠️ 论文 Adam `eps = 1e-10`；代码默认 `lr_eps = 1e-5`，
+  要复现论文口径必须显式写 `--lr_eps 1e-10`。
+- 训练预算：论文 1000 iterations；默认按论文，除非显式指定。
+- 默认无 AGV；无分层（`--hier 0`）。
+- 特殊实验（原始 E2E 偏好嵌入、encoder 消融、固定 λ 对照）
+  必须显式写全参数，不能套默认。

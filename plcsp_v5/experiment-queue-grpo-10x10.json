@@ -1,0 +1,70 @@
+{
+ "max_parallel": 1,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-24 E2E GRPO 10x10x2 pilot, 1 seed, 200 ep, G=8, no AGV",
+ "jobs": [
+  {
+   "id": "G10_e2e_s1",
+   "script": "Run.py",
+   "priority": 10,
+   "args": [
+    "--n_job",
+    "10",
+    "--n_machine",
+    "10",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "grpo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "eval",
+    "--seed",
+    "1",
+    "--train_seed",
+    "1",
+    "--run_tag",
+    "e2e_grpo_J10M10E2_randlam_s1_remote"
+   ],
+   "notes": "E2E (GIN+GAT) GRPO, sign-fixed, 10x10x2, seed1, 200 ep, G=8, no AGV"
+  },
+  {
+   "id": "eval_G10_e2e_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 100,
+   "after": [
+    "G10_e2e_s1"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "10",
+    "--n_machine",
+    "10",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_grpo_J10M10E2_randlam_s1_remote"
+   ],
+   "notes": "seed3 eval of G10_e2e_s1"
+  }
+ ]
+}

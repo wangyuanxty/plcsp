@@ -1,0 +1,192 @@
+{
+ "max_parallel": 3,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-24 E2E PPO control for GRPO: same 6x6x2, 200 ep, buffer/resample 8, LR 1e-3, random lambda, no AGV, 3 seeds",
+ "jobs": [
+  {
+   "id": "P_e2e_s1",
+   "script": "Run.py",
+   "priority": 11,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "ppo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "01",
+    "--seed",
+    "1",
+    "--train_seed",
+    "1",
+    "--run_tag",
+    "e2e_ppo_J6M6E2_randw_lr1e3_bs8_s1_remote"
+   ],
+   "notes": "E2E PPO control for GRPO: 6x6x2, seed=1, 200 ep, G=8, LR 1e-3, random lambda, no AGV"
+  },
+  {
+   "id": "eval_P_e2e_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 101,
+   "after": [
+    "P_e2e_s1"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_ppo_J6M6E2_randw_lr1e3_bs8_s1_remote"
+   ],
+   "notes": "seed3 eval of P_e2e_s1"
+  },
+  {
+   "id": "P_e2e_s2",
+   "script": "Run.py",
+   "priority": 12,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "ppo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "01",
+    "--seed",
+    "2",
+    "--train_seed",
+    "2",
+    "--run_tag",
+    "e2e_ppo_J6M6E2_randw_lr1e3_bs8_s2_remote"
+   ],
+   "notes": "E2E PPO control for GRPO: 6x6x2, seed=2, 200 ep, G=8, LR 1e-3, random lambda, no AGV"
+  },
+  {
+   "id": "eval_P_e2e_s2",
+   "script": "eval_st_seed3.py",
+   "priority": 102,
+   "after": [
+    "P_e2e_s2"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_ppo_J6M6E2_randw_lr1e3_bs8_s2_remote"
+   ],
+   "notes": "seed3 eval of P_e2e_s2"
+  },
+  {
+   "id": "P_e2e_s3",
+   "script": "Run.py",
+   "priority": 13,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "ppo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "01",
+    "--seed",
+    "3",
+    "--train_seed",
+    "3",
+    "--run_tag",
+    "e2e_ppo_J6M6E2_randw_lr1e3_bs8_s3_remote"
+   ],
+   "notes": "E2E PPO control for GRPO: 6x6x2, seed=3, 200 ep, G=8, LR 1e-3, random lambda, no AGV"
+  },
+  {
+   "id": "eval_P_e2e_s3",
+   "script": "eval_st_seed3.py",
+   "priority": 103,
+   "after": [
+    "P_e2e_s3"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_ppo_J6M6E2_randw_lr1e3_bs8_s3_remote"
+   ],
+   "notes": "seed3 eval of P_e2e_s3"
+  }
+ ]
+}

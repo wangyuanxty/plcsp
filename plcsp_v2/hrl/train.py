@@ -82,6 +82,17 @@ class Spec(NamedTuple):
     逐位不变（`world()` 传 `constraints=None` ⟹ `SimWorld` 用默认档）。
     """
 
+    bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
+    """三目标的 `(lo, hi)` —— **min–max 归一化**口径（照 Shi et al., AEI 65:103195 (2025) 式 51/53）。
+
+    ⚠️ **`None`（默认）= 用原始量纲，逐位等于今日读数**（既有读数靠这一条）。
+    给了 bounds ⟹ 标量化**前**先把每个目标按自己的可达范围拉到 `[0,1]`。
+    见 `env.reward.normalize_minmax` 与 `progress-log.md` §147。
+
+    **为什么要它**：原始量纲下三个目标各占的份额由**单位**决定（能耗只占 3%），
+    而 `1/f^ref` 又走到另一个极端（标称 89%、实际驱动 19%）。
+    """
+
     def world(self) -> SimWorld:
         return SimWorld(self.inst, self.layout, self.dm, self.cfg, graph=self.graph,
                         constraints=self.constraints)

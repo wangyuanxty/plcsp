@@ -58,6 +58,28 @@ def sweep_cdr(world_factory: Callable[[], object], seed_chain: int = 0,
             for pair in cdr_pairs(n_pa_rules)}
 
 
+def objective_bounds(world_factory: Callable[[], object],
+                     n_pa_rules: int = N_PA_RULES,
+                     seed_chain: int = 0,
+                     ) -> tuple[tuple[float, float, float],
+                                tuple[float, float, float]]:
+    """跑一遍固定规则集 ⟹ 三目标的 `(min, max)`。**min–max 归一化**用。
+
+    照 **Shi et al., *Advanced Engineering Informatics* 65:103195 (2025)** Eq. 51/53 的
+    精神：极值取**观测极值**，不引理论下界。
+
+    ⚠️ **极值来自「固定规则集」**，不是全局下界 ⟹ 归一化后的 0/1 是
+    "在固定规则能达到的范围内"的两端，**不是物理下/上界**。这条要写进论文。
+    ⚠️ 成本 ≈ **0.7 s**（36 条组合，MK01 · 本机实测）⟹ 可在 `build()` 里现算。
+    """
+    from ..env.reward import objective_vector
+    rows = sweep_cdr(world_factory, seed_chain=seed_chain, n_pa_rules=n_pa_rules)
+    vals = [objective_vector(m) for m in rows.values()]
+    lo = tuple(min(v[i] for v in vals) for i in range(3))
+    hi = tuple(max(v[i] for v in vals) for i in range(3))
+    return lo, hi            # type: ignore[return-value]
+
+
 def summarise(rows: dict[tuple[str, str], dict],
               keys: Iterable[str] = ("makespan", "logistics_cost")) -> list[tuple]:
     """`{(pa, la): metrics}` → 按 `keys` 排序的表（每行 `(pa, la, *values)`），**越小越前**。

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from .instances import Instance
+from .layout import Layout
 from .snapshot import MachineState, Snapshot
 
 INF = float("inf")
@@ -87,16 +88,24 @@ class PAJob(NamedTuple):
     ready_at: float
     """该作业**可开工**的最早时刻（`EAJ` 的自变量）。
 
-    口径：
-    - `oi == 0` ⟹ 作业在装卸站待运，`now`；
-    - 前道（`oi-1`）**已完成**（`oi-1 < done_oi`）⟹ 工件已可运，`now`；
-    - 前道**未完成** ⟹ `now + 该机台的在制标称剩余 + 输入缓冲积压`（= 那台机器清空的时刻，
-      是完工时刻的**上界**）。
+    **口径见 `estimate_ready_at`（2026-10-12 重写）**：三支（在车上 / 前道未完工 /
+    已可运）分别定 `avail`，**每支都再加运输段** `min_{候选机台} leg(件所在处 → 机台装卸点)`。
 
-    ⚠️ **在途作业按 `now` 计**（乐观）——见 §72 的登记：**这条"不可知"其实是假的**，
-    快照里有 `on_agv` + 车 `node`/`status`，可以反推 ETA。**未修，登记在 §72.1。**"""
+    旧口径（`now + 前道机台的物理 remaining+backlog`，**不加运输**）实测几乎没有分辨力
+    ——池内 85.1% 等于 `now`、极差 2.79 min、不同取值 1.94 个 ⟹ `EAJ` 退化成
+    「在 ~9 个并列里随机抽」。**读数与判据见 `progress-log` §37.10。**"""
     due: float
     """⑧ 交期；`+inf` = 该实例无交期（`JobState.due` 的 0.0 哨兵已就地转成 `inf`）。"""
+    transportable_at: float
+    """件的**最早可运输时刻** `ct_{i,OP_i(t)}`（**≡ AEI2025 的 f33**，`citation-cards.md:1546`）。
+
+    ⚠️ **与 `ready_at` 不是一个量**：`ready_at` = `transportable_at + min_{候选机台} leg`
+    = **可开工**；本字段 = **可运输**（不含到机台的那一段）。
+
+    ⚠️ **2026-10-15 新增**：`des._pa_dispatch` 此前把 `ready_at` 当可运输时刻喂给 LA
+    ⟹ **口径错位**（Rule 3 的第 0 级因此多触发）。见 `transport_point`。
+    **必填，不给默认值** —— 默认值会让漏填点静默拿到 0.0。
+    """
 
 
 class PAMachine(NamedTuple):
@@ -129,6 +138,107 @@ def advance_avail(avail: float, now: float, proc: float) -> float:
     return max(avail, now) + proc
 
 
+def estimate_ready_at(snap: Snapshot, inst: Instance, j: int, oi: int, done: int,
+                      alts: tuple[tuple[int, float], ...], plans, pa_mct,
+                      layout: Layout, leg_min: Callable[[int, int], float]) -> float:
+    """作业 `j` 的第 `oi` 道工序**最早能开工**的时刻（`EAJ` 的自变量）。
+
+    ══ 2026-10-12 重写（修 §37.10 查实的洞）══
+
+    旧口径是 `now + 前道所在机台的物理 remaining+backlog`，实测**几乎没有分辨力**：
+
+    | 量（`Exp(16/140)`，744 个决策点，池均值 10.77） | 旧口径 |
+    |---|---|
+    | 池内 `ready_at == now` 的占比 | **85.1%** |
+    | 池内 `ready_at` 极差 | **2.79 min**（对 ~150 min 的 makespan 是 1.9%） |
+    | 池内不同取值个数 | **1.94** |
+    | 后果：`EAJ` 有效候选数 | **2.05**（并列最优 9.08 个） |
+
+    ⟹ `EAJ` 名义上是「最早可开工」，实际退化成「在 ~9 个并列候选里随机抽」，
+    **而它恰恰是最强的基线族**（`EAJ+SMPT` / `EAJ+EAM` 是 27 条里前两名）。
+
+    ══ 三支口径（都加运输段）══
+
+    | 情形 | `avail`（件什么时候**可运**） | `src`（从哪儿运） |
+    |---|---|---|
+    | **① 在车上**（`on_agv >= 0`） | `now` —— 件已在车上 | **车当前位置** `vehicles[v].node` |
+    | **② 前道未完工**（`oi-1 >= done`） | `max(now, pa_mct[k_prev])` —— **计划账本** | 前道那台机的装卸点 |
+    | **③ 前道已完工 / 首道** | `now` | `at_machine` 的装卸点，否则装卸站 |
+
+    然后 `ready_at = avail + min_{候选机台} leg(src → 该机台装卸点)`。
+
+    ⚠️ **② 改用计划账本**（原来是物理 `remaining+backlog`）：账本才看得见「已预留、
+    尚未入目标机台缓冲」的件（实测 MK01 有 33% 的派工时刻处在该情形，见
+    `build_pa_view` 的注释与 `progress-log` §71.1）。物理量在那些时刻是**瞎的**。
+
+    ⚠️ **运输段取候选机台上的 `min`** —— 派工时目标机台**还没定**（规则同时选件与机台），
+    故与 `EAJ` 里 `min_m avail_at` 的乐观口径**同一条**。
+
+    ⚠️ **①的近似**：`VehicleState` 只有 `status`/`node`/`queued`，**没有目的地** ⟹
+    载着本件的车要去哪台机**读不出来**。故按「从车当前位置到最近的候选机台」估。
+    这对 `status==2`（负载行驶）是合理估计，对 `status==1`（空载去取货）**偏乐观**。
+    这一条是**登记的近似，不是原文/实测口径**；要精确必须让车暴露当前任务的目的地。
+    """
+    now = float(snap.now)
+    js = snap.jobs[j]
+    lu = int(layout.grid.lu_dock_node)
+    if js.on_agv >= 0 and js.on_agv < len(snap.vehicles):
+        src = int(snap.vehicles[js.on_agv].node)
+        src = lu if src < 0 else src
+        avail = now
+    elif oi > 0 and oi - 1 >= done:
+        # ② 前道未完工：等它**在计划账本里**清空（含在途预留）
+        row = plans[j] if j in plans else []
+        k_prev = row[oi - 1] if oi - 1 < len(row) else None
+        if k_prev is not None and 0 <= k_prev < len(snap.machines):
+            src = int(layout.machines[k_prev].dock_node)
+            avail = max(now, float(pa_mct[k_prev])) if k_prev < len(pa_mct) else now
+        else:                                   # 前道没记机台（防御性）⟹ 退回乐观
+            src, avail = lu, now
+    else:
+        # ③ 件已可运：从它现在所在处出发
+        src = (int(layout.machines[js.at_machine].dock_node)
+               if 0 <= js.at_machine < inst.n_machines else lu)
+        avail = now
+    if alts:
+        avail += min(float(leg_min(src, int(layout.machines[m].dock_node)))
+                     for m, _t in alts)
+    return avail
+
+
+def transport_point(snap: Snapshot, inst: Instance, j: int, oi: int, done: int,
+                    plans, pa_mct, layout: Layout) -> tuple[float, int]:
+    """件的**最早可运输时刻**与运出起点 → `(avail, src)`。**不含**到目标机台的那一段。
+
+    ⚠️ **`avail` 就是原文 Rule 3 的 `ct_{i,OP_i(t)}`** ——
+    *"the earliest transportable time of assigned operation"*（LA 的状态特征 f33，
+    见 `docs/citation-cards.md:1546`）。三支的定法与 `estimate_ready_at` 的表逐字相同。
+
+    ⚠️ **为什么单独拆出来**（2026-10-15）：`estimate_ready_at` 返回的是
+    `avail + min_{候选机台} leg(src → 该机台装卸点)` —— 那是「**可开工**」。
+    而 `des._pa_dispatch` 曾把**那个**值当「可运输时刻」喂给 LA ⟹ **口径错位**
+    （`ready_at` 偏晚一个运输段 ⟹ 更多车"赶得上" ⟹ Rule 3 第 0 级多触发）。
+
+    ⚠️ **拆出来而不是改 `estimate_ready_at` 的返回值** —— 后者被 `EAJ` 用，
+    改它会动 v3 主线。**本函数是新增，不改任何既有口径。**
+    """
+    now = float(snap.now)
+    js = snap.jobs[j]
+    lu = int(layout.grid.lu_dock_node)
+    if js.on_agv >= 0 and js.on_agv < len(snap.vehicles):
+        avail = now
+    elif oi > 0 and oi - 1 >= done:
+        row = plans[j] if j in plans else []
+        k_prev = row[oi - 1] if oi - 1 < len(row) else None
+        if k_prev is not None and 0 <= k_prev < len(snap.machines):
+            avail = max(now, float(pa_mct[k_prev])) if k_prev < len(pa_mct) else now
+        else:
+            avail = now
+    else:
+        avail = now
+    return float(avail), lu
+
+
 @dataclass(frozen=True)
 class PAView:
     """PA 一次派工决策的完整输入。"""
@@ -142,18 +252,33 @@ class PAView:
     可为 `None`：规则的单测只需 `now/jobs/machines` 三项就能构造一份纯规则视图，
     不必造一张完整快照（`build_pa_view` 生产路径上恒非 None）。"""
 
-def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min) -> PAView:
+def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min,
+                  layout: Layout, leg_min: Callable[[int, int], float],
+                  *, blind_eaj: bool = False, blind_minu: bool = False) -> PAView:
     """活快照 + 实例 + 计划表 + **PA 账本** → `PAView`（**纯函数**）。
 
     `plans[j][oi]` = PA 已写下的机台预留（`None` = 尚未派）；本函数**只读**它。
     ⚠️ 每个作业的 `oi` = **最低的、`plans[j][oi]` 尚未定**的下标（原文口径，见 `PAJob.oi`）——
     **不是 `done_ops`**。
     `pa_mct` / `pa_assigned_min` = 跨批账本（`stats` 里的两个逐机台列表，见 `PAMachine`）。
+    `layout` / `leg_min` = **2026-10-12 新增，必传** —— `estimate_ready_at` 要算运输段。
+    与 `LAView.leg_min` 同源（`SimWorld.leg_min`），不另造距离口径。
 
     ⚠️ **账本必须跨批存活**——这正是本口径相对"只读物理量"的全部好处：
     实测 MK01 有 **18/55 = 33%** 的派工时刻存在"已预留、尚未入目标机台缓冲"的件，
     只看物理量的口径在那些时刻是**瞎的**（见 `docs/progress-log.md` §71.1）。
+
+    ⚠️ **2026-10-12：`layout`/`leg_min` 改成必传，不留默认值。** 留默认 ⟹ 测试走旧口径、
+    生产走新口径 ⟹ **两条路径静默分叉**，正是本仓明令禁止的那种失败方式。
     """
+    # ⚠️ **盲化开关**（2026-10-17，用户提出的泄露检验的**分层版**）：
+    #   `blind_eaj`  ⟹ `ready_at` / `transportable_at` 计算时用**全 0** 的 `pa_mct`
+    #                  （**不动** `PAMachine.avail_at` ⟹ `EAM`、`MINU` 的分母不受影响）
+    #   `blind_minu` ⟹ `PAMachine.assigned_min` 用**全 0**
+    #                  ⟹ `MINU = 0 / den` 恒为 0，退化成「全并列 → 平局随机」
+    #   **两者默认 `False` ⟹ 逐位不变。**
+    mct_ready = ([0.0] * len(pa_mct)) if blind_eaj else pa_mct
+    assigned = ([0.0] * len(pa_assigned_min)) if blind_minu else pa_assigned_min
     jobs: list[PAJob] = []
     for j, ops in enumerate(inst.jobs):
         js = snap.jobs[j]
@@ -163,7 +288,8 @@ def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min
         due = js.due if js.due > 0.0 else INF
         if oi >= len(ops):                     # 全部工序都已分配 ⟹ 不进池（原文 `OP_i == J_i+1`）
             jobs.append(PAJob(oi=oi, done_oi=done, alts=(), apt=0.0, rem_apt=0.0,
-                              ready_at=snap.now, due=due))
+                              ready_at=snap.now, due=due,
+                              transportable_at=float(snap.now)))
             continue
         # ② 有限缓冲（清单第 1 条）：**输入缓冲已满的机台不进候选**。
         # ⚠️ 越界下标**放行**（沿用本函数既有的 `0 <= k < len(snap.machines)` 守卫风格）——
@@ -173,21 +299,23 @@ def build_pa_view(snap: Snapshot, inst: Instance, plans, pa_mct, pa_assigned_min
                      or machine_has_room(snap.machines[int(m)]))
         # APT：逐道工序在**各自候选机台**上的平均时长（AEI2025 的 APT_ij）
         apts = [sum(t for _m, t in ops[o]) / len(ops[o]) for o in range(oi, len(ops))]
-        ready = snap.now
-        if oi > 0 and oi - 1 >= done:          # 前道未完成 ⟹ 等到那台机清空
-            k_prev = row[oi - 1]
-            if k_prev is not None and 0 <= k_prev < len(snap.machines):
-                m_prev = snap.machines[k_prev]
-                ready += float(m_prev.remaining_min) + float(m_prev.backlog_min)
+        ready = estimate_ready_at(snap, inst, j, oi, done, alts,
+                                  plans, mct_ready, layout, leg_min)
+        # ⚠️ **可运输时刻另算一次**（2026-10-15）：`ready_at` 是「可**开工**」，
+        #    给 LA 的 f33 要的是「可**运输**」。见 `transport_point` 与 `PAJob.transportable_at`。
+        #    ⚠️ **不用 `ready_at` 反推**（减 `min leg`）—— `transport_point` 的分支与
+        #    `estimate_ready_at` 各算一次，宁可多算也不能凭假设相减。
+        tb = transport_point(snap, inst, j, oi, done, plans, mct_ready, layout)[0]
         jobs.append(PAJob(oi=oi, done_oi=done, alts=alts, apt=float(apts[0]),
-                          rem_apt=float(sum(apts)), ready_at=ready, due=due))
+                          rem_apt=float(sum(apts)), ready_at=ready, due=due,
+                          transportable_at=float(tb)))
     machines = tuple(
         PAMachine(
             # **≡ AEI2025 的 `MCT_k(t)`**：逐机账本，**纯计划口径**。
             # ⚠️ 曾取 `max(账本, 物理清空时刻)`——2026-10-08 第三次核后**去掉物理项**：
             # 实测（MK01，4 条 EAM 规则 × 6 seed）两者**逐位相同**，而原文是纯计划 ⟹ 无代价对齐。
             avail_at=(pa_mct[i] if i < len(pa_mct) else 0.0),
-            assigned_min=float(pa_assigned_min[i]) if i < len(pa_assigned_min) else 0.0)
+            assigned_min=float(assigned[i]) if i < len(assigned) else 0.0)
         for i, m in enumerate(snap.machines))
     return PAView(now=float(snap.now), jobs=tuple(jobs), machines=machines, snap=snap)
 
@@ -232,6 +360,31 @@ class LAView:
     规则不另造距离量。"""
     snap: Snapshot | None = None
     """全量活状态（规则不用它；留给步 4 的编码器）。"""
+    tie_rng: object | None = None
+    """**LA 的平局随机源**（2026-10-15 加）—— `np.random.Generator` 或 `None`。
+
+    ⚠️ **为什么需要它**：`cand_v` 里常有多台车打分**完全并列**。车队**完全同构**
+    （`AgvSpec` 只剩 `id`），且全部在 L/U 起步 ⟹ **车号是任意标签**。
+    按车号打破平局 = 制造一个**任意偏置**，不是打破平局。
+
+    **实测（`EAJ+EAM` · `scale 12.5` · 140 个决策点）：**
+
+    | | t=0 的 **16 次**投放 | 全程**有平局**的决策 | MS 代价 |
+    |---|---|---|---|
+    | **`MINCOST`** | **全给 V0（16/16）** | **76.4%** | 585.6 → **489.2（−16%）** |
+    | `MINU` | **全给 V0（16/16）** | 27.1% | 平局不是它的病因（加随机反而更差） |
+    | `LATEST_IN_TIME` | 分散 | 52.9% | 无显著影响 |
+
+    见 `docs/v3/open-question-nhdrl.md` §4.28。
+
+    ⚠️ **口径照 PA 层**：`des.py:1762` 对 PA 的 `tie_rng` 逐字写着
+    *"照 AEI2025 的**随机平局**"* ⟹ **本仓已认定原文的平局是随机的**。
+    **LA 层此前漏了这条 —— 这是遗漏，不是设计。**
+
+    ⚠️ **`None` = 旧口径（车号最小）**；`SimConfig.la_tie_random` 决定是否填。
+    **2026-10-18 起默认填**（随机平局）。`None` 只留给显式对照。
+    **种子必须独立成子流**（`des.LA_TIE_SEED`），**不得借 `PA_TIE_SEED`** —— 同一条纪律。
+    """
 
     def empty_leg(self, aid: int) -> float:
         """第 `aid` 台车跑完**空载段**（当前停位 → 取货点）所需时长 [min]。"""

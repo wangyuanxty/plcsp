@@ -15,6 +15,9 @@ testing_log*.txt
 *_run.log
 *.log
 
+# Queue logs
+queue_logs/
+
 # Caches
 __pycache__/
 *.py[cod]

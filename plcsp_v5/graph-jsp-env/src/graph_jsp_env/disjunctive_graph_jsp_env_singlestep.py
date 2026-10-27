@@ -16,6 +16,10 @@ from graph_jsp_env.disjunctive_graph_jsp_visualizer import DisjunctiveGraphJspVi
 from graph_jsp_env.disjunctive_graph_logger import log
 
 from algorithm.ppo_trick import RewardScaling
+try:
+    from constraints import sample_repair
+except ImportError:
+    from plcsp_v5.constraints import sample_repair
 
 
 
@@ -195,6 +199,12 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
         """
         
         self.configs = Variant(**configs)  # 将字典转换为Variant实例
+        # [v5] Stage-0 machine failure: repair delay on the selected machine.
+        self.machine_failure = bool(getattr(self.configs, 'machine_failure', 0))
+        self.machine_mtbf = float(getattr(self.configs, 'machine_mtbf', 100.0))
+        self.machine_mttr = float(getattr(self.configs, 'machine_mttr', 10.0))
+        self.failure_seed = int(getattr(self.configs, 'failure_seed', 0))
+        self.failure_rng = np.random.default_rng(self.failure_seed)
         
         # Note: None-fields will be populated in the 'load_instance' method  没有字段将在'load_instance'方法中填充，都是传进来的？
         # load_instance方法中的自定义变量
@@ -1495,8 +1505,14 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
         node = self.G.nodes[task_id]  # 获取当前的选择的action，即+1转换成DG上对应的那一个task
         node["machine"] = m_id
         node["color"] = self.machine_colors[m_id]
-        node["duration"] = dur
-        duration = node["duration"]  # 当前节点的处理时间 （node字典的duration属性）
+        repair = 0.0
+        if self.machine_failure and dur > 0:
+            repair = sample_repair(
+                self.failure_rng, dur, self.machine_mtbf, self.machine_mttr)
+        node["repair_time"] = repair
+        node["processing_duration"] = dur
+        node["duration"] = dur + repair
+        duration = node["duration"]  # 当前节点的处理时间（含故障修复）
 
         """更新完当前节点，然后再，更新同一个job中的平行边的权重(直接遍历！)"""
         self._update_parallel_edge_inSameJob()

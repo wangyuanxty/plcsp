@@ -15,10 +15,26 @@ from trainer.DGenv_func import (
     split_edge_matrices,
     task_context_features,
 )
+try:
+    from hierarchy.rules import (agv_rule_bias, job_rule_bias,
+                                 machine_rule_bias, top_state_features)
+except ImportError:
+    from plcsp_v5.hierarchy.rules import (
+        agv_rule_bias, job_rule_bias, machine_rule_bias, top_state_features)
+try:
+    from constraints import sample_repair, buffer_mask_for_env
+except ImportError:
+    from plcsp_v5.constraints import sample_repair, buffer_mask_for_env
 
 
-def va_select_agv(ppo, agvs, pickup, dropoff, tt, edge_info, now, greedy=True):
-    """Choose an AGV with the learned actor. WAIT maps to the earliest-free AGV."""
+def va_select_agv(ppo, agvs, pickup, dropoff, tt, edge_info, now, greedy=True,
+                  agv_rule=False, rule_id=None, rule_alpha=0.0,
+                  top_rule_arm=False):
+    """Choose an AGV with the learned actor or a dispatch rule.
+
+    ``top_rule_arm`` uses the top-level AGV rule directly (0 earliest-free,
+    1 nearest, 2 random).  Otherwise ``rule_id`` biases the actor logits.
+    """
     if not agvs:
         return None, 0.0
     n_agv = len(agvs)
@@ -46,26 +62,77 @@ def va_select_agv(ppo, agvs, pickup, dropoff, tt, edge_info, now, greedy=True):
     src_idx = [k for k, a in enumerate(agvs) if a.edge == pickup_edge]
     if not src_idx:
         raise ValueError(f"workshop edge {pickup_edge} has no AGV")
+    if top_rule_arm and rule_id is not None:
+        rid = int(rule_id) % 3
+        if rid == 0:
+            action = min(src_idx, key=lambda k: (agvs[k].free_time, k))
+        elif rid == 1:
+            action = min(src_idx,
+                         key=lambda k: (_travel(agvs[k].location, pickup), k))
+        else:
+            action = random.choice(src_idx)
+        agv = agvs[action]
+        wait = max(0.0, agv.free_time - now)
+        return agv, wait
+    if agv_rule:
+        action = min(src_idx, key=lambda k: (agvs[k].free_time, k))
+        agv = agvs[action]
+        wait = max(0.0, agv.free_time - now)
+        return agv, wait
     n_avail = sum(1 for k in src_idx
                   if agvs[k].free_time <= now + 1e-9)
     ctx = context_features(pickup, dropoff, pickup_edge, dropoff_edge,
                            _travel, now, n_avail, n_agv)[None, ...]
-    mask = available_mask(agvs, now, edge=pickup_edge)[None, ...]
+    mask = available_mask(agvs, edge=pickup_edge)[None, ...]
+    logit_bias = None
+    if rule_id is not None:
+        logit_bias = agv_rule_bias(
+            feat, mask, np.asarray([int(rule_id) % 3]),
+            alpha=rule_alpha, device=device)
     feat_t = torch.from_numpy(feat).float().to(device)
     ctx_t = torch.from_numpy(ctx).float().to(device)
     mask_t = torch.from_numpy(mask).bool().to(device)
     with torch.no_grad():
-        prob, _ = ppo.agv_actor(feat_t, ctx_t, mask_t)
+        prob, _ = ppo.agv_actor(feat_t, ctx_t, mask_t,
+                                logit_bias=logit_bias)
         if greedy:
             action = int(torch.argmax(prob, dim=-1).item())
         else:
             action = int(torch.distributions.Categorical(
                 probs=prob).sample().item())
-    if action >= n_agv:
+    if action < 0 or action >= n_agv or action not in src_idx:
         action = min(src_idx, key=lambda k: agvs[k].free_time)
     agv = agvs[action]
     wait = max(0.0, agv.free_time - now)
     return agv, wait
+
+
+def _scheduled_now(env):
+    """Latest finish time among scheduled operations (0 before any)."""
+    finished = [float(n.get('finish_time') or 0.0)
+                for _, n in env.G.nodes(data=True) if n.get('scheduled')]
+    return max(finished) if finished else 0.0
+
+
+def _top_agv_stats(agvs, env):
+    """AGV busy fraction and normalized mean wait for the top-level state."""
+    now = _scheduled_now(env)
+    if not agvs:
+        return np.asarray([[0.0, 0.0]], dtype=np.float32)
+    busy = float(np.mean([a.free_time > now + 1e-9 for a in agvs]))
+    wait = float(np.mean([max(0.0, a.free_time - now) for a in agvs]))
+    return np.asarray([[busy, wait / max(1.0, now)]], dtype=np.float32)
+
+
+def _weighted_cost_env(env, configs, n_job, n_machine):
+    """Weighted objective of one validation env (same as training)."""
+    mk = float(env.makespan_previous_step)
+    pec = float(env.total_e1_previous_step) / (n_job * n_machine)
+    trans = float(env.trans_t_previous_step)
+    idle = float(env.idle_t_previous_step)
+    return (float(configs['weight_mk']) * mk
+            + float(configs['weight_ec']) * (pec + idle)
+            + float(configs['weight_tt']) * trans)
 
 
 def read_MIP_result_from_csv(filepath):
@@ -114,7 +181,7 @@ def read_MIP_result_from_csv(filepath):
     return cost_dict
 
 
-def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_type, greedy=True, args=None):
+def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_type, greedy=True, args=None, top_ctl=None, pref_emb=None, phase_weights=None):
     """
     1、传入ppo是因为当前训练的网络的参数都在此中，验证时要看当前的网络的效果
     加载选择m的环境
@@ -195,6 +262,10 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
     # TODO 新增task_fea的12特征版本=va_tasks_fea_1101, 整形一个bs=1，shape=（bs*task，12）
     # TODO 当前ENV的reset函数会返回self._state_array() = 其中有变量是对当前样本的ft和pt的idea矩阵（j*m）
     """
+    if phase_weights is not None:
+        va_env.configs.weight_mk = float(phase_weights[0][0])
+        va_env.configs.weight_ec = float(phase_weights[0][1])
+        va_env.configs.weight_tt = float(phase_weights[0][2])
     _, _, _, va_adj, _, va_machine_fea2, va_tasks_fea_1101, \
         ft_idea_refer, pt_idea_refer = va_env.reset(Random_weight_type="eval")  # 初始化ft和it的状态 TODO 1108-验证的时候，采用的不是随机权重，而是固定的权重
 
@@ -208,14 +279,19 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
     agvs = []
     if use_agv:
         try:
-            from agv.state import AgvState, split_cross_edge
+            from agv.state import (AgvState, split_cross_edge,
+                                   transport_timing)
         except ImportError:
-            from plcsp_v5.agv.state import AgvState, split_cross_edge
+            from plcsp_v5.agv.state import (AgvState, split_cross_edge,
+                                            transport_timing)
         n_edge = len(va_edge_info)
         for k in range(n_agv):
             edge = k % n_edge
             agvs.append(AgvState(idx=k, edge=edge,
                                  location=int(va_edge_info[edge][0])))
+
+    _agv_failure_rng = np.random.default_rng(
+        int(configs.get('failure_seed', 0)) + 2000)
 
     
     """++++++++++++++++++++++++++++++++++++++++++
@@ -254,9 +330,60 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
 
     va_rewards = []
     va_h_mch_pooled = None # 在while之前初始化，只赋值一次！为了保证进入到选择operation的网络时是None的，用可学习的参数；后续都是实际的m的全图特征
-    
+
+    # [v5 hier] greedy top-level rule policy during validation
+    top_enabled = top_ctl is not None
+    _top_step = 0
+    _top_rule = None
+    _top_job = _top_machine = _top_agv = None
+    if top_enabled:
+        _agv_stats = _top_agv_stats(agvs, va_env)
+        _trend = np.zeros(1, dtype=np.float32)
+        _top_last_cost = _weighted_cost_env(
+            va_env, configs, n_job, n_machine)
+        _top_state = top_state_features(
+            va_tasks_fea_1101, va_candidate, va_mask, va_machine_fea2,
+            0, n_total_task, n_machine, n_job,
+            weights=(configs['weight_mk'], configs['weight_ec'],
+                     configs['weight_tt']),
+            agv_stats=_agv_stats, cost_trend=_trend,
+            device=device)
+        _top_rule, _, _ = top_ctl.act(_top_state, greedy=True, store=False)
+        _top_job, _top_machine = _top_rule[:, 0], _top_rule[:, 1]
+        _top_agv = (_top_rule[:, 2] if _top_rule.size(1) > 2 else None)
+
+    _low_step = 0
     while True:
+        if phase_weights is not None:
+            if _low_step == n_total_task // 3:
+                va_env.reward_random_weight = np.asarray(
+                    phase_weights[1], dtype=np.float32)
+            elif _low_step == 2 * n_total_task // 3:
+                va_env.reward_random_weight = np.asarray(
+                    phase_weights[2], dtype=np.float32)
         with torch.no_grad():
+            if (top_enabled and _top_step > 0
+                    and _top_step % int(args['hier_interval']) == 0):
+                _agv_stats = _top_agv_stats(agvs, va_env)
+                _cost_now = _weighted_cost_env(
+                    va_env, configs, n_job, n_machine)
+                _trend = np.asarray(
+                    [(_cost_now - _top_last_cost)
+                     / max(_cost_now, 1.0)], dtype=np.float32)
+                _top_last_cost = _cost_now
+                _top_state = top_state_features(
+                    va_tasks_fea_1101, va_candidate, va_mask,
+                    va_machine_fea2, _top_step,
+                    n_total_task, n_machine, n_job,
+                    weights=(configs['weight_mk'], configs['weight_ec'],
+                             configs['weight_tt']),
+                    agv_stats=_agv_stats, cost_trend=_trend,
+                    device=device)
+                _top_rule, _, _ = top_ctl.act(
+                    _top_state, greedy=True, store=False)
+                _top_job, _top_machine = _top_rule[:, 0], _top_rule[:, 1]
+                _top_agv = (_top_rule[:, 2]
+                            if _top_rule.size(1) > 2 else None)
             """先选择一个task节点！task_idx = (bs=1,)"""
             use_task = bool(args.get('st_task_features', 0))
             use_edge = bool(args.get('st_edge_features', 0))
@@ -279,6 +406,12 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
             else:
                 va_trans = va_idle = None
 
+            job_bias = None
+            if top_enabled:
+                job_bias = job_rule_bias(
+                    va_tasks_fea_1101, va_candidate, va_mask, _top_job,
+                    n_machine, args['hier_alpha'], device=device)
+
             va_task_index, va_action_index, _, _, h_g_o_pooled, _ = ppo.job_actor(
                         x_fea=va_tasks_fea_1101,  # TODO task节点的最新的12特征  # bs * task * 12
                         graph_pool_avg=va_graph_pool_avg,  # 全局只有一个
@@ -290,7 +423,9 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
                         use_greedy=greedy,  # validate的时候需要使用greedy，只选择最大max概率的！!!!!!!!!!!
                         trans_wrk=va_trans,
                         idle_wrk=va_idle,
-                        task_ctx=va_task_ctx
+                        task_ctx=va_task_ctx,
+                        score_bias=job_bias,
+                        pref_emb=pref_emb
                         )
 
             # TODO: 选择machine的mask, bs_task_m 选择变为 batch_1_m（扩维然后expand, batch=1 = 1 * 1 * m
@@ -309,6 +444,21 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
                     if _prev.get("scheduled") and int(_prev["machine"]) >= 0:
                         prev_m = int(_prev["machine"])
                         now_ready = float(_prev["finish_time"])
+            va_mask_machine_original = va_mask_machine_batch_
+            _buffer_cap = int(args.get('buffer_capacity', 0))
+            if _buffer_cap > 0:
+                _bm = buffer_mask_for_env(
+                    va_env, int(va_task_index.data.item()),
+                    _buffer_cap, n_machine)
+                _bm_t = torch.from_numpy(_bm).bool().to(
+                    device).reshape(1, 1, n_machine)
+                va_mask_machine_batch_ = va_mask_machine_batch_ | _bm_t
+                _all_blocked = va_mask_machine_batch_.all(
+                    dim=-1, keepdim=True)
+                va_mask_machine_batch_ = torch.where(
+                    _all_blocked, va_mask_machine_original,
+                    va_mask_machine_batch_)
+
             va_m_fea1 = va_cal_cur_task_machine_feature(
                 va_task_index, va_mask_machine_batch_, va_tasks_fea_1101,
                 va_ability_t, va_ability_p, va_ability_tt, va_edge_info,
@@ -330,12 +480,20 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
             va_m_fea3 = torch.tensor(
                 va_m_fea3, dtype=torch.float).unsqueeze(0).to(device)
 
+            machine_bias = None
+            if top_enabled:
+                machine_bias = machine_rule_bias(
+                    va_m_fea1, va_mask_machine_batch_, _top_machine,
+                    args['hier_alpha'], device=device)
+
             # 返回的是batch * m的选择m的概率 + 返回所有m节点的全局嵌入（求均值）：batch * hidden_dim
             va_mch_prob, va_h_mch_pooled, _ = ppo.machine_actor_gcn(machine_fea_1=va_m_fea1,   # 当前task的m的候选特征，作为自注意力的目标节点
                                                                     machine_fea_2=va_machine_fea2,
                                                                     h_pooled_o=h_g_o_pooled,
                                                                     machine_mask=va_mask_machine_batch_,
-                                                                    machine_fea_3=va_m_fea3)  # 选择m的action，选择概率最高的！
+                                                                    machine_fea_3=va_m_fea3,
+                                                                    score_bias=machine_bias,
+                                                                    pref_emb=pref_emb)  # 选择m的action，选择概率最高的！
             
         """选择m_id"""
         if greedy:
@@ -360,36 +518,87 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
                 if _drop in [int(x) for x in _members]:
                     _dropoff_edge = _e
                     break
-            _agv, _wait_src = va_select_agv(
+            _top_agv_rule = (bool(args.get('agv_top_rule', 0))
+                             and _top_agv is not None)
+            _agv_rid = (int(_top_agv[0].item())
+                        if _top_agv is not None else None)
+            _agv, _ = va_select_agv(
                 ppo, agvs, prev_m, _drop, va_ability_tt,
-                va_edge_info, now_ready, greedy)
+                va_edge_info, now_ready, greedy,
+                agv_rule=bool(args.get('agv_rule', 0)),
+                rule_id=_agv_rid,
+                rule_alpha=float(args.get('hier_alpha', 0.0)),
+                top_rule_arm=_top_agv_rule)
+            def _travel_agv(a, b):
+                if a < 0 or b < 0:
+                    return 0.0
+                return float(va_ability_tt[int(a)][int(b)])
+
             if _pickup_edge == _dropoff_edge:
-                _travel = _total
-                _wait = _wait_src
-                _agv.free_time = now_ready + _wait + _travel
-                _agv.location = _drop
+                _repair = 0.0
+                if configs.get('agv_failure', 0):
+                    _repair = sample_repair(
+                        _agv_failure_rng, _total,
+                        configs.get('agv_mtbf', 100.0),
+                        configs.get('agv_mttr', 10.0))
+                _timing = transport_timing(
+                    _agv, prev_m, _drop, now_ready, _total, _travel_agv,
+                    src_repair=_repair)
+                _travel = _timing["loaded"]
+                _wait = _timing["wait"]
+                _agv.free_time = _timing["src_free"]
+                _agv.location = _timing["src_location"]
+                _agv.travelled += _timing["src_travelled"]
             else:
                 _t_src, _d_eff, _t_dst = split_cross_edge(
                     _total, cross_delay, cross_leg_ratio)
-                _src_arrival = now_ready + _wait_src + _t_src
-                _boundary = _src_arrival + _d_eff
+                _repair = 0.0
+                if configs.get('agv_failure', 0):
+                    _repair = sample_repair(
+                        _agv_failure_rng, _t_src,
+                        configs.get('agv_mtbf', 100.0),
+                        configs.get('agv_mttr', 10.0))
                 _dst_agvs = [a for a in agvs if a.edge == _dropoff_edge]
                 if not _dst_agvs:
                     raise ValueError(
                         f"workshop edge {_dropoff_edge} has no AGV")
-                _dst = min(_dst_agvs, key=lambda a: a.free_time)
-                _wait_dst = max(0.0, _dst.free_time - _boundary)
-                _travel = _t_src + _t_dst
-                _wait = _wait_src + _d_eff + _wait_dst
-                _agv.free_time = _src_arrival
-                _agv.location = -1  # at the workshop boundary
-                _dst.free_time = _boundary + _wait_dst + _t_dst
-                _dst.location = _drop
+                _boundary_machine = int(va_edge_info[_dropoff_edge][0])
+                if (configs.get('agv_dst_actor', 1)
+                        and not configs.get('agv_rule', 0)
+                        and hasattr(ppo, 'agv_actor')):
+                    _src_start = max(now_ready, float(_agv.free_time))
+                    _boundary_time = (_src_start
+                                      + _travel_agv(_agv.location, prev_m)
+                                      + _t_src + _d_eff)
+                    _dst, _ = va_select_agv(
+                        ppo, agvs, _boundary_machine, _drop,
+                        va_ability_tt, va_edge_info, _boundary_time,
+                        greedy, agv_rule=False,
+                        rule_id=_agv_rid,
+                        rule_alpha=float(args.get('hier_alpha', 0.0)),
+                        top_rule_arm=_top_agv_rule)
+                else:
+                    _dst = min(_dst_agvs, key=lambda a: a.free_time)
+                _timing = transport_timing(
+                    _agv, prev_m, _drop, now_ready, _total, _travel_agv,
+                    dst=_dst, cross_delay=cross_delay,
+                    leg_ratio=cross_leg_ratio,
+                    boundary_machine=_boundary_machine,
+                    src_repair=_repair)
+                _travel = _timing["loaded"]
+                _wait = _timing["wait"]
+                _agv.free_time = _timing["src_free"]
+                _agv.location = _timing["src_location"]
+                _agv.travelled += _timing["src_travelled"]
+                _dst.free_time = _timing["dst_free"]
+                _dst.location = _timing["dst_location"]
+                _dst.travelled += _timing["dst_travelled"]
             _edge = (int(va_joint_actions[0]), int(va_joint_actions[0]) + 1)
             va_env.G.graph["transport_override"] = {_edge: _travel}
             va_env.G.graph["transport_wait_override"] = {_edge: _wait}
         _, o_r, o_done, _, rmk, ridle, renergy_m, renergy_transM, _, _, \
-            va_adj_, _, va_machine_fea2_, va_tasks_fea_1101_ = va_env.step(joint_action=va_joint_actions)  # 传入的都要是从0开始的！！action = task_id - 1 TODO 改名输出了m_fea2_ + 新增了task_1101_的输出
+            va_adj_, _, va_machine_fea2_, va_tasks_fea_1101_ = va_env.step(joint_action=va_joint_actions)
+        _low_step += 1  # 传入的都要是从0开始的！！action = task_id - 1 TODO 改名输出了m_fea2_ + 新增了task_1101_的输出
         if use_agv:
             va_env.G.graph.pop("transport_override", None)
             va_env.G.graph.pop("transport_wait_override", None)
@@ -433,6 +642,9 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
         va_candidate = va_candidate_
         va_mask = va_mask_
         va_machine_fea2 = va_machine_fea2_   # TODO m_fea2_新名称，注意改写！
+
+        if top_enabled:
+            _top_step += 1
 
         """现在只关注DGFJSPEnv的done + r + 4指标"""
         if o_done:
@@ -687,14 +899,19 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
     agvs = []
     if use_agv:
         try:
-            from agv.state import AgvState, split_cross_edge
+            from agv.state import (AgvState, split_cross_edge,
+                                   transport_timing)
         except ImportError:
-            from plcsp_v5.agv.state import AgvState, split_cross_edge
+            from plcsp_v5.agv.state import (AgvState, split_cross_edge,
+                                            transport_timing)
         n_edge = len(va_edge_info)
         for k in range(n_agv):
             edge = k % n_edge
             agvs.append(AgvState(idx=k, edge=edge,
                                  location=int(va_edge_info[edge][0])))
+
+    _agv_failure_rng = np.random.default_rng(
+        int(configs.get('failure_seed', 0)) + 2000)
 
     
     """++++++++++++++++++++++++++++++++++++++++++
@@ -799,31 +1016,71 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
                 if _drop in [int(x) for x in _members]:
                     _dropoff_edge = _e
                     break
-            _agv, _wait_src = va_select_agv(
+            _agv, _ = va_select_agv(
                 ppo, agvs, prev_m, _drop, va_ability_tt,
-                va_edge_info, now_ready, greedy)
+                va_edge_info, now_ready, greedy,
+                agv_rule=bool(args.get('agv_rule', 0)))
+            def _travel_agv(a, b):
+                if a < 0 or b < 0:
+                    return 0.0
+                return float(va_ability_tt[int(a)][int(b)])
+
             if _pickup_edge == _dropoff_edge:
-                _travel = _total
-                _wait = _wait_src
-                _agv.free_time = now_ready + _wait + _travel
-                _agv.location = _drop
+                _repair = 0.0
+                if configs.get('agv_failure', 0):
+                    _repair = sample_repair(
+                        _agv_failure_rng, _total,
+                        configs.get('agv_mtbf', 100.0),
+                        configs.get('agv_mttr', 10.0))
+                _timing = transport_timing(
+                    _agv, prev_m, _drop, now_ready, _total, _travel_agv,
+                    src_repair=_repair)
+                _travel = _timing["loaded"]
+                _wait = _timing["wait"]
+                _agv.free_time = _timing["src_free"]
+                _agv.location = _timing["src_location"]
+                _agv.travelled += _timing["src_travelled"]
             else:
                 _t_src, _d_eff, _t_dst = split_cross_edge(
                     _total, cross_delay, cross_leg_ratio)
-                _src_arrival = now_ready + _wait_src + _t_src
-                _boundary = _src_arrival + _d_eff
+                _repair = 0.0
+                if configs.get('agv_failure', 0):
+                    _repair = sample_repair(
+                        _agv_failure_rng, _t_src,
+                        configs.get('agv_mtbf', 100.0),
+                        configs.get('agv_mttr', 10.0))
                 _dst_agvs = [a for a in agvs if a.edge == _dropoff_edge]
                 if not _dst_agvs:
                     raise ValueError(
                         f"workshop edge {_dropoff_edge} has no AGV")
-                _dst = min(_dst_agvs, key=lambda a: a.free_time)
-                _wait_dst = max(0.0, _dst.free_time - _boundary)
-                _travel = _t_src + _t_dst
-                _wait = _wait_src + _d_eff + _wait_dst
-                _agv.free_time = _src_arrival
-                _agv.location = -1  # at the workshop boundary
-                _dst.free_time = _boundary + _wait_dst + _t_dst
-                _dst.location = _drop
+                _boundary_machine = int(va_edge_info[_dropoff_edge][0])
+                if (configs.get('agv_dst_actor', 1)
+                        and not configs.get('agv_rule', 0)
+                        and hasattr(ppo, 'agv_actor')):
+                    _src_start = max(now_ready, float(_agv.free_time))
+                    _boundary_time = (_src_start
+                                      + _travel_agv(_agv.location, prev_m)
+                                      + _t_src + _d_eff)
+                    _dst, _ = va_select_agv(
+                        ppo, agvs, _boundary_machine, _drop,
+                        va_ability_tt, va_edge_info, _boundary_time,
+                        greedy, agv_rule=False)
+                else:
+                    _dst = min(_dst_agvs, key=lambda a: a.free_time)
+                _timing = transport_timing(
+                    _agv, prev_m, _drop, now_ready, _total, _travel_agv,
+                    dst=_dst, cross_delay=cross_delay,
+                    leg_ratio=cross_leg_ratio,
+                    boundary_machine=_boundary_machine,
+                    src_repair=_repair)
+                _travel = _timing["loaded"]
+                _wait = _timing["wait"]
+                _agv.free_time = _timing["src_free"]
+                _agv.location = _timing["src_location"]
+                _agv.travelled += _timing["src_travelled"]
+                _dst.free_time = _timing["dst_free"]
+                _dst.location = _timing["dst_location"]
+                _dst.travelled += _timing["dst_travelled"]
             _edge = (int(va_joint_actions[0]), int(va_joint_actions[0]) + 1)
             va_env.G.graph["transport_override"] = {_edge: _travel}
             va_env.G.graph["transport_wait_override"] = {_edge: _wait}

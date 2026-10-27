@@ -36,10 +36,16 @@ def cdr_policies(pa_name: str, la_name: str):
     return pa_rule_policy(pa_name), la_rule_policy(la_name)
 
 
-def run_cdr(world, pa_name: str, la_name: str, seed_chain: int = 0) -> dict:
-    """跑一条 CDR。`world` 由调用方现建（`SimWorld` **一局一用**，不可复用）。"""
+def run_cdr(world, pa_name: str, la_name: str, seed_chain: int = 0,
+            tie_seed: int | None = None) -> dict:
+    """跑一条 CDR。`world` 由调用方现建（`SimWorld` **一局一用**，不可复用）。
+
+    ⚠️ `tie_seed`（2026-10-20）：平局流与场景流分开。`None` ⟹ 跟随 `seed_chain`
+    （逐位等于改动前）。评测精度用：同一场景跑多条平局流。
+    """
     pol_pa, pol_l = cdr_policies(pa_name, la_name)
-    return world.run_gated(seed_chain=seed_chain, policy_pa=pol_pa, policy_l=pol_l)
+    return world.run_gated(seed_chain=seed_chain, policy_pa=pol_pa, policy_l=pol_l,
+                           tie_seed=tie_seed)
 
 
 def sweep_cdr(world_factory: Callable[[], object], seed_chain: int = 0,

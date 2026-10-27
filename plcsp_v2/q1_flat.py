@@ -65,12 +65,40 @@ TARGET_FAILURES = 4.0
 ⟹ **默认档下 ⑨ 几乎不发生**，"故障下稳不稳"就测了个空。"""
 
 
+def _reward_spec(inst, lay, g, dm, cfg, cons, reward_norm: str):
+    """→ `(w, bounds)`。`bounds=None` ⟹ `scalar_reward` 用原始量纲，**逐位不变**。
+
+    | `reward_norm` | `w` | `bounds` |
+|---|---|---|
+    | `"ref"`（**默认**） | `reward_weights(f^ref)` —— 现行口径 | `None` |
+    | `"minmax"` | `EQUAL_WEIGHTS` | 36 条固定规则上的观测极值 |
+
+    ⚠️ **为什么要 minmax**：原始量纲下能耗只占 3%，而 `1/f^ref` 走到另一个极端
+    （标称 89%、实际驱动 19%）—— 两条都让「三目标」名不副实。
+    见 `progress-log.md` §147 与 `docs/v2/current-state.md`。
+    """
+    if reward_norm == "ref":
+        return reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple()), None
+    if reward_norm != "minmax":
+        raise ValueError(f"reward_norm 只接受 ref/minmax，收到 {reward_norm!r}")
+    from .env.des import SimWorld
+    from .env.reward import EQUAL_WEIGHTS
+    from .hrl.cdr import objective_bounds
+
+    def _wf():                   # ⚠️ 每条都要**新建**世界（`SimWorld` 持活对象）
+        return SimWorld(inst, lay, dm, cfg, graph=g, constraints=cons)
+
+    lo, hi = objective_bounds(_wf)
+    return EQUAL_WEIGHTS, (lo, hi)
+
+
 def build(seed: int, *, tau: float | None = None, disturb: bool = False,
           n_agv: int = 3, with_value: bool = False, device: str = "cpu",
           instance: str = "mk01", pm_interval: float | None = None,
           target_failures: float | None = None, agv_n_failures: int = 0,
           finite_buffer: bool = True, constraints: ConstraintConfig | None = None,
-          sim_overrides: dict | None = None, layout_seed: int | None = None):
+          sim_overrides: dict | None = None, layout_seed: int | None = None,
+          reward_norm: str = "ref"):
     """→ `(spec, net)`。**两臂走同一个 `build`** ⟹ 实例/布局/编码器/约束档全同。
 
     `tau=None`（默认）⟹ **查逐实例标定表**（`due_dates.TF_RDD`，2026-10-09 起 10/10 可用）。
@@ -149,11 +177,11 @@ def build(seed: int, *, tau: float | None = None, disturb: bool = False,
     cons = (constraints if constraints is not None
             else ConstraintConfig(finite_buffer=bool(finite_buffer)))
     ctx = norm_context(inst, lay, reference_makespan(inst, cfg), cfg, constraints=cons)
-    w = reward_weights(ReferenceObjectives.of(inst, cfg).as_tuple())
+    w, bnd = _reward_spec(inst, lay, g, dm, cfg, cons, reward_norm)
     # ⚠️ **2026-10-10：⑪ 去后构造网络不再要 `n_chargers`**（充电头是唯一随布局变宽的头）。
     net = HierarchicalPolicy(with_value=with_value)
     # ⚠️ **设备跟随策略**（`rollout.net_device`）：搬一次，之后 rollout/重算自己按参数所在设备走。
-    return Spec(inst, lay, g, dm, cfg, ctx, w, cons), net.to(device)
+    return Spec(inst, lay, g, dm, cfg, ctx, w, cons, bnd), net.to(device)
 
 
 def constraints_from_ckpt(ck: dict) -> ConstraintConfig:
@@ -367,6 +395,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--layout-seed", type=int, default=None,
                     help="⭐ 布局种子。None = 用训练 seed（旧行为）。"
                          "**消融实验应当固定它** —— 否则标准误里混的是布局方差（§130.3）")
+    ap.add_argument("--reward-norm", default="ref", choices=("ref", "minmax"),
+                    help="目标归一化口径。ref（默认）= 现行 1/f^ref，逐位不变；"
+                         "minmax = 每目标按 36 条规则的可达范围归一 + 等权"
+                         "（照 Shi et al., AEI 65:103195 (2025) 式 51/53）。"
+                         "⚠️ 两者结论会**翻转**，见 progress-log.md §147")
     ap.add_argument("--instance", default="mk01", help="mk01–mk10")
     ap.add_argument("--tau", type=float, default=None,
                     help="交期 τ；None = 查逐实例标定表（10/10 可用）")
@@ -425,6 +458,7 @@ def main(argv: list[str] | None = None) -> int:
                         eval_every=a.eval_every, eval_n=a.eval_n, rec=rec,
                         device=a.device, workers=a.workers, save_dir=a.save_dir,
                         env={"instance": a.instance, "layout_seed": a.layout_seed, "tau": a.tau,
+                             "reward_norm": a.reward_norm,
                              "pm_interval": a.pm_interval,
                              "target_failures": a.target_failures,
                              "agv_n_failures": a.agv_n_failures,

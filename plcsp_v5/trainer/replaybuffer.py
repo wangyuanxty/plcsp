@@ -19,8 +19,10 @@ class ReplayBuffer:
     def __init__(self, args):  # args是我定义的全局参数，用parse传入的
 
         """会有total_step是因为我每一step都记录进buffer,然后buffer_size= 5 倍大小的episode（记录5轮episode，每轮都有task个step）"""
-        
+
         self.total_task = args['n_job'] * args['n_machine'] # 一个episode会遍历所有的task
+        self.use_task_features = bool(args.get('st_task_features', 0))
+        self.use_edge_features = bool(args.get('st_edge_features', 0))
         self.total_step = args['buffer_size'] * self.total_task   # buffer多大，所以维度就是多大
         
         """
@@ -94,6 +96,40 @@ class ReplayBuffer:
         self.agv_valid = torch.zeros((self.total_step, args['env_batch']), dtype=torch.bool)
         self.agv_v = torch.zeros((self.total_step, args['env_batch'], 2), dtype=torch.float)
 
+        # [v5] destination-workshop AGV decision (cross-workshop legs)
+        self.agv_dst_feat = np.zeros((self.total_step, args['env_batch'],
+                                      args.get('n_agv', 6), 11),
+                                     dtype=np.float32)
+        self.agv_dst_ctx = np.zeros((self.total_step, args['env_batch'], 6),
+                                    dtype=np.float32)
+        self.agv_dst_mask = torch.zeros((self.total_step, args['env_batch'],
+                                         args.get('n_agv', 6)),
+                                        dtype=torch.bool)
+        self.a_agv_dst = torch.zeros((self.total_step, args['env_batch']),
+                                     dtype=torch.long)
+        self.a_agv_dst_logprob = torch.zeros(
+            (self.total_step, args['env_batch']), dtype=torch.float)
+        self.agv_dst_valid = torch.zeros((self.total_step, args['env_batch']),
+                                         dtype=torch.bool)
+        self.agv_dst_v = torch.zeros((self.total_step, args['env_batch'], 2),
+                                     dtype=torch.float)
+
+        # [v5 hier] fixed rule biases applied to the low-level logits
+        self.job_bias = np.zeros(
+            (self.total_step, args['env_batch'], args['n_job']),
+            dtype=np.float32)
+        self.machine_bias = np.zeros(
+            (self.total_step, args['env_batch'], args['n_machine']),
+            dtype=np.float32)
+        self.rule_id = np.zeros(
+            (self.total_step, args['env_batch'], 3), dtype=np.int64)
+        self.agv_bias = np.zeros(
+            (self.total_step, args['env_batch'], args.get('n_agv', 6)),
+            dtype=np.float32)
+        self.agv_dst_bias = np.zeros(
+            (self.total_step, args['env_batch'], args.get('n_agv', 6)),
+            dtype=np.float32)
+
         self.count_operation = 0
         self.count_operation_ = 0  # todo 1113-只针对记录v_才使用！
 
@@ -105,8 +141,14 @@ class ReplayBuffer:
                         agv_feat=None, agv_ctx=None, agv_mask=None,
                         a_agv=None, a_agv_logprob=None, agv_valid=None,
                         agv_v=None, mch_fea3=None,
+                        agv_dst_feat=None, agv_dst_ctx=None,
+                        agv_dst_mask=None, a_agv_dst=None,
+                        a_agv_dst_logprob=None, agv_dst_valid=None,
+                        agv_dst_v=None,
                         task_ctx=None, task_ctx_=None,
-                        trans=None, idle=None, trans_=None, idle_=None):  # 除了action相关是张量，其他的都是数组！（多此一举，可以直接初始化一个张量矩阵！）
+                        trans=None, idle=None, trans_=None, idle_=None,
+                        job_bias=None, machine_bias=None, rule_id=None,
+                        agv_bias=None, agv_dst_bias=None):  # 除了action相关是张量，其他的都是数组！（多此一举，可以直接初始化一个张量矩阵！）
         self.adj[self.count_operation] = adj
         self.tasks_fea[self.count_operation] = fea
         self.candidate[self.count_operation] = candidate
@@ -170,6 +212,28 @@ class ReplayBuffer:
             self.agv_valid[self.count_operation] = agv_valid
             if agv_v is not None:
                 self.agv_v[self.count_operation] = agv_v
+            if agv_dst_feat is not None:
+                self.agv_dst_feat[self.count_operation] = agv_dst_feat
+                self.agv_dst_ctx[self.count_operation] = agv_dst_ctx
+                self.agv_dst_mask[self.count_operation] = agv_dst_mask
+                self.a_agv_dst[self.count_operation] = a_agv_dst
+                self.a_agv_dst_logprob[self.count_operation] = a_agv_dst_logprob
+                self.agv_dst_valid[self.count_operation] = agv_dst_valid
+                if agv_dst_v is not None:
+                    self.agv_dst_v[self.count_operation] = agv_dst_v
+        if job_bias is not None:
+            self.job_bias[self.count_operation] = job_bias
+        if machine_bias is not None:
+            self.machine_bias[self.count_operation] = machine_bias
+        if rule_id is not None:
+            rid = np.asarray(rule_id)
+            if rid.ndim == 1:
+                rid = rid[:, None]
+            self.rule_id[self.count_operation, :, :rid.shape[1]] = rid
+        if agv_bias is not None:
+            self.agv_bias[self.count_operation] = agv_bias
+        if agv_dst_bias is not None:
+            self.agv_dst_bias[self.count_operation] = agv_dst_bias
         self.count_operation += 1  # 记录缓存次数的变量在此！！！
 
         # self.h_mch_pooled[self.count] = h_mch_pooled
@@ -246,12 +310,18 @@ class ReplayBuffer:
         machine_v_ = self.machine_v_.to(device)  # 已经是张量tensor了！
 
 
-        task_ctx = torch.tensor(self.task_ctx, dtype=torch.float).to(device)
-        task_ctx_ = torch.tensor(self.task_ctx_, dtype=torch.float).to(device)
-        trans = torch.tensor(self.trans, dtype=torch.float).to(device)
-        idle = torch.tensor(self.idle, dtype=torch.float).to(device)
-        trans_ = torch.tensor(self.trans_, dtype=torch.float).to(device)
-        idle_ = torch.tensor(self.idle_, dtype=torch.float).to(device)
+        if self.use_task_features:
+            task_ctx = torch.tensor(self.task_ctx, dtype=torch.float).to(device)
+            task_ctx_ = torch.tensor(self.task_ctx_, dtype=torch.float).to(device)
+        else:
+            task_ctx = task_ctx_ = None
+        if self.use_edge_features:
+            trans = torch.tensor(self.trans, dtype=torch.float).to(device)
+            idle = torch.tensor(self.idle, dtype=torch.float).to(device)
+            trans_ = torch.tensor(self.trans_, dtype=torch.float).to(device)
+            idle_ = torch.tensor(self.idle_, dtype=torch.float).to(device)
+        else:
+            trans = idle = trans_ = idle_ = None
 
         return adj, tasks_fea, candidate, mask_operation, a_operation, a_logprob_operation,\
                adj_, tasks_fea_, candidate_, mask_operation_, r_operation, done_operation, \

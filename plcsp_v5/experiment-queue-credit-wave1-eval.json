@@ -1,0 +1,99 @@
+{
+ "max_parallel": 3,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-26 early seed3 test for completed credit wave 1: local s1, coma s1, local s2.",
+ "jobs": [
+  {
+   "id": "E_wave1_local_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 3.1,
+   "after": [],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_credit_wave1"
+   },
+   "args": [
+    "--n_job", "6",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "settrans",
+    "--machine_intra_attn", "1",
+    "--hier", "1",
+    "--hier_interval", "8",
+    "--hier_alpha", "0.5",
+    "--top_credit", "local",
+    "--use_agv", "1",
+    "--n_agv", "6",
+    "--cross_delay", "5",
+    "--cross_leg_ratio", "0.5",
+    "--agv_dst_actor", "1",
+    "--agv_rule", "0",
+    "--agv_top_rule", "0",
+    "--run_tag", "plancredit_local_E4b_J6M6E2_s1_remote"
+   ],
+   "notes": "local s1 seed3 test"
+  },
+  {
+   "id": "E_wave1_coma_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 3.2,
+   "after": [],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_credit_wave1"
+   },
+   "args": [
+    "--n_job", "6",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "settrans",
+    "--machine_intra_attn", "1",
+    "--hier", "1",
+    "--hier_interval", "8",
+    "--hier_alpha", "0.5",
+    "--top_credit", "coma",
+    "--use_agv", "1",
+    "--n_agv", "6",
+    "--cross_delay", "5",
+    "--cross_leg_ratio", "0.5",
+    "--agv_dst_actor", "1",
+    "--agv_rule", "0",
+    "--agv_top_rule", "0",
+    "--run_tag", "plancredit_coma_E4b_J6M6E2_s1_remote"
+   ],
+   "notes": "coma s1 seed3 test"
+  },
+  {
+   "id": "E_wave1_local_s2",
+   "script": "eval_st_seed3.py",
+   "priority": 3.3,
+   "after": [],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_credit_wave1"
+   },
+   "args": [
+    "--n_job", "6",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "settrans",
+    "--machine_intra_attn", "1",
+    "--hier", "1",
+    "--hier_interval", "8",
+    "--hier_alpha", "0.5",
+    "--top_credit", "local",
+    "--use_agv", "1",
+    "--n_agv", "6",
+    "--cross_delay", "5",
+    "--cross_leg_ratio", "0.5",
+    "--agv_dst_actor", "1",
+    "--agv_rule", "0",
+    "--agv_top_rule", "0",
+    "--run_tag", "plancredit_local_E4b_J6M6E2_s2_remote"
+   ],
+   "notes": "local s2 seed3 test"
+  }
+ ]
+}

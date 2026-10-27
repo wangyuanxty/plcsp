@@ -56,6 +56,17 @@ def test_wait_is_added_to_start_time_only():
     assert find_transportT(g, 1, 2, TRAVEL, _configs()) == 3.0
 
 
+def test_cross_edge_start_uses_loaded_override_not_table():
+    g = _graph()
+    # Cross-edge: the table value 3 includes the fixed delay; the AGV
+    # loaded leg is 1 and the wait override already contains the delay.
+    # Charging both would count the delay twice.
+    g.graph["transport_override"] = {(1, 2): 1.0}
+    g.graph["transport_wait_override"] = {(1, 2): 4.0}
+
+    assert find_max_arrivaTime_for_currentNode(g, 2, TRAVEL, _configs()) == 15.0
+
+
 def test_scheduled_node_keeps_its_paid_wait():
     g = _graph()
     g.nodes[2]["scheduled"] = True

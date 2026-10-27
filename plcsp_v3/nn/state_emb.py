@@ -119,6 +119,9 @@ def machine_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
             _safe(1.0 - m.pm_used_min / max(ctx.pm_interval, 1e-9), 0.0, 1.0),  # 5 pm_left
             (m.fail_rate / max(ctx.max_fail_rate, 1e-9)
              if ctx.constraints.machine_failure else 0.0),          # 6 fail_rate（③ 关恒 0）
+            ctx.node_xy[ctx.mach_dock_nodes[i]][0] / ctx.bbox_diag,  # 7 node_x
+            ctx.node_xy[ctx.mach_dock_nodes[i]][1] / ctx.bbox_diag,  # 8 node_y
+            ctx.dist_lu[i],                                          # 9 dist_lu
         )
     return out
 
@@ -198,11 +201,26 @@ def vehicle_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
 
 
 def global_features(snap: Snapshot, ctx: NormContext) -> np.ndarray:
-    """(1, 3)。顺序 = FEATURE_NAMES["G"]，**不得改序**（有测试按名核对）。"""
+    """(1, 6)。顺序 = FEATURE_NAMES["G"]，**不得改序**（有测试按名核对）。
+
+    ⚠️ **2026-10-11：末位追加 3–5 `mean/min/max_k MCT_k(t)`**（`progress-log.md` §32）。
+    `MCT_k` = 机台 k 上**最后一台已分配工序的完工时刻** = `now + remaining_min + backlog_min`。
+    口径照 **Shi et al., AEI 65:103195 (2025)** 的状态特征 f5–f7
+    （*"average/minimum/maximum of earliest available time of real machines"*）。
+    归一化仍用实例静态量 `m_ref`（仿真前即知，训练与推理一致）。
+    ⚠️ **加它的理由是「对齐原文的状态定义」，不是「缺了它所以学不动」** ——
+    实测加完也没改善（§32.3）。
+    """
+    mct = [float(snap.now) + float(m.remaining_min) + float(m.backlog_min)
+           for m in snap.machines]
     return np.array([[
         _safe(snap.now / ctx.m_ref, 0.0, 4.0),                      # 0 time_progress
         snap.n_done / max(ctx.n_jobs, 1),                           # 1 done_frac
         _safe(snap.in_flight / max(ctx.max_queued, 1), 0.0, 4.0),   # 2 in_flight
+        # 3–5：已排程部分的完工时刻（Shi 2025 的 f5–f7）
+        _safe(float(np.mean(mct)) / ctx.m_ref, 0.0, 4.0),            # 3 mct_mean
+        _safe(float(np.min(mct)) / ctx.m_ref, 0.0, 4.0),             # 4 mct_min
+        _safe(float(np.max(mct)) / ctx.m_ref, 0.0, 4.0),             # 5 mct_max
     ]], dtype=np.float32)
 
 

@@ -13,6 +13,7 @@ plcsp/figs/
 __pycache__/
 *.pyc
 *.pyo
+.coverage
 
 # ── LaTeX 编译产物（源文件入库，中间产物不入库）──
 # `paper/*.pdf` 只匹配 paper/ 直属层，figures/ 里的矢量图不受影响，必须入库
@@ -38,9 +39,12 @@ paper/*.run.xml
 
 # ── Claude Code：提交项目共享配置，忽略机器本地配置 ──
 .claude/settings.local.json
+# 项目本地 skill 体积大（>50 MB），不入库
+.claude/skills/
 
 # ── 编辑器/系统 ──
 .vscode/
 .idea/
 Thumbs.db
 desktop.ini
+plcsp_v4/training_results/

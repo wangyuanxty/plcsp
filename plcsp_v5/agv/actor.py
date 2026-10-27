@@ -1,8 +1,8 @@
-"""Stage-0 AGV actor: a Set Transformer over AGV tokens plus a WAIT token.
+"""Stage-0 AGV actor: a Set Transformer over AGV tokens.
 
-Action space: ``0 .. n_agv-1`` select an AGV, ``n_agv`` means WAIT.
-The WAIT token is always available, so the masked softmax never sees an
-all ``-inf`` row when every AGV is busy.
+Action space: ``0 .. n_agv-1`` selects an AGV. Busy AGVs stay selectable;
+choosing one pays the wait in the environment. The mask only filters AGVs
+from other workshops. Callers must leave at least one AGV unmasked.
 """
 from __future__ import annotations
 
@@ -31,8 +31,6 @@ class AgvActor_SetTransformer(nn.Module):
             num_heads=num_heads,
             num_seeds=1,
         )
-        self.wait_token = nn.Parameter(torch.zeros(1, 1, self.input_dim))
-        nn.init.normal_(self.wait_token, std=0.02)
         self.score = nn.Sequential(
             nn.Linear(hidden * 2, hidden),
             nn.GELU(),
@@ -45,34 +43,32 @@ class AgvActor_SetTransformer(nn.Module):
         )
 
     def forward(self, agv_feat: torch.Tensor, ctx: torch.Tensor,
-                avail_mask: torch.Tensor):
+                avail_mask: torch.Tensor,
+                logit_bias: torch.Tensor | None = None):
         """Return ``(prob, value)``.
 
         agv_feat : (B, N, feat_dim)
         ctx      : (B, ctx_dim)
         avail_mask: (B, N) bool, True = selectable
-        prob     : (B, N+1)  last entry is WAIT
+        logit_bias: optional (B, N) additive rule prior
+        prob     : (B, N)
         value    : (B, 2)    local critic for (makespan, idle time)
         """
         batch, n_agv, _ = agv_feat.shape
         ctx_rep = ctx.unsqueeze(1).expand(batch, n_agv, -1)
-        tokens = torch.cat([agv_feat, ctx_rep], dim=-1)
+        tokens = torch.cat([agv_feat, ctx_rep], dim=-1)    # (B, N, D)
 
-        wait = self.wait_token.expand(batch, 1, -1)
-        tokens = torch.cat([tokens, wait], dim=1)          # (B, N+1, D)
-
-        h, pooled = self.encoder(tokens)                    # (B, N+1, H), (B, H)
+        h, pooled = self.encoder(tokens)                    # (B, N, H), (B, H)
         pooled_rep = pooled.unsqueeze(1).expand_as(h)
         scores = self.score(torch.cat([h, pooled_rep], dim=-1)).squeeze(-1)
+        if logit_bias is not None:
+            scores = scores + logit_bias.to(
+                device=scores.device, dtype=scores.dtype)
 
-        wait_mask = torch.zeros(batch, 1, dtype=torch.bool,
-                                device=agv_feat.device)
-        mask = torch.cat([~avail_mask.bool(), wait_mask], dim=1)
+        mask = ~avail_mask.bool()                           # True = masked
+        all_masked = mask.all(dim=1, keepdim=True)
+        mask = mask & ~all_masked
         scores = scores.masked_fill(mask, float("-inf"))
         prob = F.softmax(scores, dim=-1)
         value = self.critic(pooled)
         return prob, value
-
-    @staticmethod
-    def wait_index(n_agv: int) -> int:
-        return n_agv

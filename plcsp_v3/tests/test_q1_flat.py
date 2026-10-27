@@ -54,6 +54,9 @@ def test_evaluate_spreads_the_n_chains_across_scenarios():
         f"跨场景后标准误不该还是 0（实测 makespan={new['makespan']}）——"
         "三个场景给出逐位相同的读数？")
     old = evaluate(net, spec, n=3, seed=0, dt_events=DT, spread_chains=False)
-    assert old["makespan_se"] == 0.0, (
-        "旧口径下 `n` 条链应当**逐位相同**（`se` 恒 0）—— 这条钉住历史口径，"
+    # ⚠️ **2026-10-19**：MA 的输入改成四段均值拼接（512 维）后，CPU 多线程的
+    # 浮点归约次序会让"逐位相同"的链在末位差 ~1e-14。判据仍是"se 实际为 0"，
+    # 用 1e-9 容差；大于它才说明确定性真的坏了。
+    assert abs(old["makespan_se"]) < 1e-9, (
+        "旧口径下 `n` 条链的 makespan 应当相同（`se` ≈ 0）—— 这条钉住历史口径，"
         "若它变了说明别处动了确定性")

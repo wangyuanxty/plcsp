@@ -78,6 +78,15 @@ ABLATION_GROUPS: dict[str, ConstraintConfig] = {
     "Full": _FULL,
     "-物流": _FULL.with_off("agv_failure"),
     "-生产": _FULL.with_off("finite_buffer", "machine_failure", "maintenance"),
+    # ⚠️ **复现 Shi et al. 2025（AEI 65:103195）的口径**（2026-10-14 加）。
+    #   依据是该文 **PDF 第 5 页的假设列表**，逐字：
+    #   > **(4) Machine breakdowns, path conflicts, and AGV charging are ignored.**
+    #   ⟹ **机台故障必须关。**
+    #   ⚠️ **⑫ 预防性维护是我们 v3 自己的扩展**（不是原文的），复现时也要关。
+    #   ⚠️ 原文的扰动**只有**物流设备故障：*"每个实例的故障总次数在 1–8 随机；
+    #      故障随机指派给某台 AGV；每次修理时间在 5–10 随机"*（见 `agv_n_failures`）。
+    "SHI2025": _FULL.with_off("machine_failure", "maintenance"),
+
     "-信息": _FULL.with_off("due_dates"),
     # ⚠️ **`None` = 五条全关** —— 必须**逐条列全**。
     # 2026-10-10 的教训：② 的默认值翻成 `True` 之后，本组**漏列 `finite_buffer`**

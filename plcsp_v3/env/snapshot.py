@@ -142,3 +142,23 @@ class Snapshot:
     # ⚠️ 与 `VehicleState.queued`（长度）同源但**不同用途**：那个是"本车还有多少待办"，
     # 这个是"待办的是哪些件"——缺了它，候选批次无法枚举（见 `QueuedTask`）。
     queued_tasks: tuple[QueuedTask, ...] = ()
+    # ══ **NHDRL 状态特征要的四个账本**（照 Shi et al., AEI 65 (2025) 103195 的定义）══
+    #
+    # 逐机台（长度 = `n_machines`，与 `machines` 同序）：
+    #   `assigned_min[k]`  = `Σ_i Σ_{j≤OP_i(t)} λ_ijk·pt_ijk`   机台 k 上**已派工时**
+    #   `mct_assigned[k]`  = `MCT_k(t)`                          机台 k 的**最早可用时刻**
+    # 逐车（长度 = `n_agv`，与 `vehicles` 同序）：
+    #   `agv_act[v]`       = `ACT_v(t)`                          车 v 的**最早可用时刻**
+    #   `agv_busy_min[v]`  = `AW_v(t)`                           车 v 的**累计行驶工时**
+    #
+    # ⟹ `MU_k = assigned_min/mct_assigned`，`AU_v = agv_busy_min/agv_act`（除零见 `_safe`）。
+    # 空元组 = 该档还没派过 / 还没跑过（**真值，不是哨兵**）。
+    assigned_min: tuple[float, ...] = ()
+    mct_assigned: tuple[float, ...] = ()
+    agv_act: tuple[float, ...] = ()
+    ms_plan: float = 0.0
+    """**已 assign 工序的预计完工最大值**（Shi Eq.50–51 的 `MS`）。
+
+    每次 PA 派工（含 LA 订车、末工序回站段）推进；`d_ms = Δms_plan`。
+    离线路径不推进 ⟹ 0（调用方回退旧投影）。
+    """

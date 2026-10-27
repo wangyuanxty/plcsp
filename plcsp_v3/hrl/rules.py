@@ -166,6 +166,11 @@ def pa_job_score(rule: str, view: PAView, job: int,
     `lam = (λ₁, λ₂)`：**v3 的超参数**。`(0, 0)` ⟹ **逐位等于 v2 的原规则**
     （走下面的快路，既有读数靠这条 —— 设计 §13.2 断言 1）。
 
+    ⚠️ **2026-10-12：上述"逐位等于 v2"对 `EAJ` 已不成立。** `ready_at` 重写后
+    `EAJ` 的取值与 v2 不同（v2 的 `rule_views.py` **未动**，其读数仍可复算）。
+    影响：`EAJ` 与 `wait` 辅量。**`SPT`/`SRPT`/`EDD` 仍逐位等于 v2。**
+    原因与判据见 `env/rule_views.estimate_ready_at` 与 `progress-log` §37.10/§37.11。
+
     非零时：`score = X + λ₁·Y₁ + λ₂·Y₂`（`X`/`Y` 见 `PA_JOB_MIX`）。
     ⚠️ **`λ` 必须落在 `[0, LAMBDA_MAX]`** —— 无界会让各规则趋同（见 `LAMBDA_MAX`）。
 
@@ -575,7 +580,20 @@ def la_rule_policy(rule: int | str,
     def policy(view: LAView, cand_v: Sequence[int]) -> int:
         if not cand_v:
             raise ValueError("LA 候选集为空——派车决策点不该出现（全车队恒可候选）")
-        return int(min(cand_v,
-                       key=lambda a: (la_score(name, view, int(a), lam), int(a))))
+        # ⚠️ **平局处理**（2026-10-15 修）：此前是
+        #     `min(cand_v, key=lambda a: (la_score(...), int(a)))`
+        #     —— 平局按**车号升序**，而**车号是任意标签**（车队完全同构、全部在 L/U 起步）
+        #     ⟹ 制造任意偏置。实测 t=0 的 16 次投放**全给 V0**、`MINCOST` 全程 76.4% 有平局、
+        #     MS 差 **16%**。见 `rule_views.LAView.tie_rng` 与 §4.28。
+        # ⚠️ **`view.tie_rng is None` ⟹ 旧口径（车号最小）** ⟹ v3 主线逐位不变。
+        scored = [(la_score(name, view, int(a), lam), int(a)) for a in cand_v]
+        best = min(s for s, _ in scored)
+        tied = [a for s, a in scored if s == best]
+        if len(tied) == 1:
+            return int(tied[0])
+        rng = getattr(view, "tie_rng", None)
+        if rng is None:
+            return int(min(tied))
+        return int(tied[int(rng.integers(0, len(tied)))])
 
     return policy

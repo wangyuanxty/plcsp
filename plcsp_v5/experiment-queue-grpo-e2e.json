@@ -1,0 +1,192 @@
+{
+ "max_parallel": 3,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-24 E2E (GIN+GAT) GRPO after cost-sign fix; 6x6x2, 3 seeds, 200 ep, G=8, no AGV",
+ "jobs": [
+  {
+   "id": "G_e2e_s1",
+   "script": "Run.py",
+   "priority": 11,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "grpo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "eval",
+    "--seed",
+    "1",
+    "--train_seed",
+    "1",
+    "--run_tag",
+    "e2e_grpo_J6M6E2_randlam_s1_remote"
+   ],
+   "notes": "E2E (GIN+GAT) GRPO, sign-fixed, seed=1, 200 ep, G=8, no AGV"
+  },
+  {
+   "id": "eval_G_e2e_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 101,
+   "after": [
+    "G_e2e_s1"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_grpo_J6M6E2_randlam_s1_remote"
+   ],
+   "notes": "seed3 eval of G_e2e_s1"
+  },
+  {
+   "id": "G_e2e_s2",
+   "script": "Run.py",
+   "priority": 12,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "grpo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "eval",
+    "--seed",
+    "2",
+    "--train_seed",
+    "2",
+    "--run_tag",
+    "e2e_grpo_J6M6E2_randlam_s2_remote"
+   ],
+   "notes": "E2E (GIN+GAT) GRPO, sign-fixed, seed=2, 200 ep, G=8, no AGV"
+  },
+  {
+   "id": "eval_G_e2e_s2",
+   "script": "eval_st_seed3.py",
+   "priority": 102,
+   "after": [
+    "G_e2e_s2"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_grpo_J6M6E2_randlam_s2_remote"
+   ],
+   "notes": "seed3 eval of G_e2e_s2"
+  },
+  {
+   "id": "G_e2e_s3",
+   "script": "Run.py",
+   "priority": 13,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "e2e",
+    "--algo",
+    "grpo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "eval",
+    "--seed",
+    "3",
+    "--train_seed",
+    "3",
+    "--run_tag",
+    "e2e_grpo_J6M6E2_randlam_s3_remote"
+   ],
+   "notes": "E2E (GIN+GAT) GRPO, sign-fixed, seed=3, 200 ep, G=8, no AGV"
+  },
+  {
+   "id": "eval_G_e2e_s3",
+   "script": "eval_st_seed3.py",
+   "priority": 103,
+   "after": [
+    "G_e2e_s3"
+   ],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "e2e_grpo_J6M6E2_randlam_s3_remote"
+   ],
+   "notes": "seed3 eval of G_e2e_s3"
+  }
+ ]
+}

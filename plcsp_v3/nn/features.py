@@ -23,7 +23,7 @@ from ..env.des import SimConfig
 from ..env.instances import Instance
 from ..env.layout import Layout
 
-F_M, F_B, F_V, F_G = 7, 8, 7, 3
+F_M, F_B, F_V, F_G = 10, 8, 7, 6
 # ⚠️ 2026-10-08（v2）：④ 返工删 ⟹ `F_B` 9→8；⑩ 异构车队+拼批删 ⟹ `F_V` 11→9
 # （去掉 `capacity` / `speed_factor` 两维，车队同构单车单载）。
 # ⚠️ **`F_MAX` 因此由 11 降到 9** —— 这是 v2 第一次改 token 宽度。
@@ -33,7 +33,7 @@ F_M, F_B, F_V, F_G = 7, 8, 7, 3
 # ⚠️ **2026-10-10（v2）：⑪ 充电机制删 ⟹ V 段末位去掉 `battery`**（F_V 8→7），
 # **C 段（桩 token）整段去掉**（F_C 4→无）。⚠️ 四段制 M/B/V/G **不变**；
 # `F_MAX` = max(7, 8, 7, 3) = **8** —— **不变**（V 段变窄不影响统一宽度，B 段才是最宽的）。
-F_MAX = max(F_M, F_B, F_V, F_G)               # **8**（v2；原 11）—— 补齐后的统一宽度
+F_MAX = max(F_M, F_B, F_V, F_G)               # **10**（M 段加坐标 + 到 L/U 距离）
 
 # 各段在补齐张量 (N, F_MAX) 里占的列；超出部分恒为 0
 SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
@@ -45,7 +45,10 @@ SEG_SLICE: dict[str, slice] = {"M": slice(0, F_M), "B": slice(0, F_B),
 # **一律末位追加 / 末位删除**——既有列的下标是 ckpt 与测试的契约，不得插队。
 FEATURE_NAMES: dict[str, tuple[str, ...]] = {
     "M": ("backlog", "in_queue", "out_queue", "busy", "remaining_frac",
-          "pm_left", "fail_rate"),
+          "pm_left", "fail_rate",
+          # ⚠️ **2026-10-18 末位追加**：机台坐标 + 到 L/U 的距离。
+          #    此前 M 段没有任何几何量；跨实例/跨布局时策略看不到机台远近。
+          "node_x", "node_y", "dist_lu"),
     "B": ("progress", "remaining_work", "due_margin", "finished",
           "at_machine", "in_transit", "on_agv", "weight"),
     # ⚠️ **2026-10-10：V 段末位 `battery` 已删**（⑪ 充电机制整条移除）。
@@ -55,7 +58,17 @@ FEATURE_NAMES: dict[str, tuple[str, ...]] = {
     # ⚠️ **2026-10-10：C 段（桩 token）整段删除**（⑪ 充电机制整条移除）。
     # 它 2026-10-09 才加进来，唯一的消费者是充电头 `RA·充电`（设计 §10 的掩码表）；
     # 机制删了，桩不再进 token 序列。
-    "G": ("time_progress", "done_frac", "in_flight"),
+    # ⚠️ **2026-10-11：G 段末位追加 `mean/min/max_k MCT_k(t)`**（`progress-log.md` §32）。
+    # 口径照 **Shi et al., AEI 65:103195 (2025)** 的状态特征 f5–f7：
+    # *"average/minimum/maximum of earliest available time of real machines"*，
+    # 而 `MCT_k(t)` = *"the completion time of the last operation assigned to machine k at t"*。
+    # **对位论文的 HA-DQN（Complex & Intelligent Systems 2025, 11:210）同款**：
+    # 其状态特征 #1 就是 `CM(t) = max E_{i,e,l}(t)`，**且奖励 = 它的增量**。
+    # 加它的理由是**对齐原文的状态定义**（复现的可信度），**不是"缺了它所以学不动"**。
+    # ⚠️ **实测：加完也没改善** —— 监督实验的测试准确率仍等于常数基线（§32.3）。
+    # **末位追加，既有 3 列下标不变**（ckpt 与测试的契约）。
+    "G": ("time_progress", "done_frac", "in_flight",
+          "mct_mean", "mct_min", "mct_max"),
 }
 
 
@@ -80,12 +93,15 @@ class NormContext:
     # ⚠️ **v2：⑩ 去后 `max_capacity` 已删**（2026-10-08）—— 车队同构单车单载，载量维不存在
     max_queued: int
     node_xy: tuple[tuple[float, float], ...]   # 通道节点坐标（V 段 x/y 用）
+    mach_dock_nodes: tuple[int, ...]           # 逐机台的 dock 节点号（M 段坐标用）
+    dist_lu: tuple[float, ...]                 # 逐机台到 L/U 的距离（已按 bbox_diag 归一）
     constraints: ConstraintConfig              # 建它的那一份约束（与仿真同源）
 
 
 def norm_context(inst: Instance, layout: Layout, m_ref: float,
                  cfg: SimConfig | None = None,
-                 constraints: ConstraintConfig | None = None) -> NormContext:
+                 constraints: ConstraintConfig | None = None,
+                 dm: "np.ndarray | None" = None) -> NormContext:
     """由实例 + 布局 + 配置算出全部归一化标度。
 
     ⚠️ 本函数是 `NormContext` 的**唯一构造入口**，与 `NormContext` 同模块——标度口径与
@@ -121,4 +137,25 @@ def norm_context(inst: Instance, layout: Layout, m_ref: float,
         # `VehicleState.node` 取坐标，AGV 在站上时没有它就会 IndexError。
         node_xy=(tuple(spec.node_xy(*spec.node_rc(i)) for i in range(spec.n_nodes))
                  + (() if layout.lu is None else ((layout.lu.x, layout.lu.y),))),
+        mach_dock_nodes=tuple(int(m.dock_node) for m in layout.machines),
+        dist_lu=_dist_lu(layout, diag, dm),
         constraints=cons)
+
+
+def _dist_lu(layout: Layout, bbox: float, dm: "np.ndarray | None") -> tuple[float, ...]:
+    """逐机台到 L/U 的距离（已按 bbox_diag 归一）。
+
+    优先用仿真同一张 `dm`（米）；没有 `dm` 时退回网格上的 Manhattan 距离。
+    """
+    if layout.lu is None:
+        return tuple(0.0 for _ in layout.machines)
+    lu_node = int(layout.lu.dock_node)
+    if dm is not None:
+        return tuple(float(dm[int(m.dock_node), lu_node]) / bbox
+                     for m in layout.machines)
+    lx, ly = float(layout.lu.x), float(layout.lu.y)
+    spec = layout.grid
+    return tuple(
+        (abs(spec.node_xy(*spec.node_rc(int(m.dock_node)))[0] - lx)
+         + abs(spec.node_xy(*spec.node_rc(int(m.dock_node)))[1] - ly)) / bbox
+        for m in layout.machines)

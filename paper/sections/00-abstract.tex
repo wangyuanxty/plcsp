@@ -1,20 +1,17 @@
-Production--logistics collaborative scheduling couples a flexible job shop
-with a fleet of automated guided vehicles. We formulate the two layers as a
-single decision chain and train it with group-relative policy optimization, so
-that every production and logistics decision in an episode contributes to one
-log-probability and one advantage. The policy is a standard Transformer over a
-token sequence with a candidate-scoring head per decision kind, and ten
-constraints are modelled as independent switches, each with a mechanism that
-gives the policy something to act on. We measure the method on MK01 of the MKT
-benchmark against a rule baseline, a single-objective version of itself, and
-NSGA-II. On the fully constrained problem it dominates all twelve
-out-of-sample points of the metaheuristic front; on the unconstrained problem
-the metaheuristic is marginally ahead. Three further results are reported.
-First, the aggregate energy consumption commonly reported in this literature is
-close to rank-equivalent with the makespan, because the terms that dominate it
-are linear in the horizon by construction, so energy adds a third dimension
-only under a net account that removes those terms. Second, an ablation over the
-advantage shows that subtracting a group-mean baseline has a measurable effect
-while dividing by the group standard deviation does not. Third, a hypothesis
-that single-objective ablation systematically misses mechanisms did not survive
-its test.
+Flexible job shops with several workshops and one vehicle fleet per workshop
+must decide, for every operation, when it starts, on which machine it runs,
+and which vehicle moves it. The three decisions are coupled, and an energy-aware objective makes idle
+machines and empty vehicle travel matter even when they do not change the
+makespan. We present a controller with three policy heads. The operation and
+machine heads use a dual Set Transformer; the machine encoder groups its
+features into three views and applies attention within a machine before
+attention across machines. The low-level heads are trained with a shared
+group-relative advantage and no value critic. A top-level policy selects a
+rule prior for each head every few steps. The controller builds a schedule in a single pass
+and is fast enough for interactive use. It is not the best method in
+objective value: a genetic algorithm and a mixed-integer baseline return
+better schedules when they are given more computation. The contribution is a
+multi-agent controller that makes the production and transport decisions
+together, at near-interactive speed. The encoder and the multi-actor update
+improve over their baselines, and the controller is compared with rule-based,
+metaheuristic, mixed-integer, and published DRL baselines.

@@ -1,0 +1,70 @@
+{
+ "max_parallel": 1,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-24 hybrid_full (GIN job + ST machine) mask-fixed, moved from local to remote; 6x6x2, 1 seed, 400 ep, buffer 5",
+ "jobs": [
+  {
+   "id": "H_hybrid_full_s1",
+   "script": "Run.py",
+   "priority": 10,
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "hybrid_full",
+    "--algo",
+    "ppo",
+    "--episode_num",
+    "400",
+    "--LR",
+    "3e-4",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--buffer_size",
+    "5",
+    "--resample_freq",
+    "5",
+    "--seed",
+    "1",
+    "--train_seed",
+    "1",
+    "--random_weight_type",
+    "01",
+    "--run_tag",
+    "hybrid_full_J6M6E2_maskfix_s1_remote"
+   ],
+   "notes": "GIN job + ST machine actor/critic, mask-fixed, 6x6x2, seed1, 400 ep, LR 3e-4, buffer 5, no AGV"
+  },
+  {
+   "id": "eval_H_hybrid_full_s1",
+   "script": "eval_st_seed3.py",
+   "priority": 100,
+   "after": [
+    "H_hybrid_full_s1"
+   ],
+   "env": {
+    "EVAL_ENCODER": "hybrid_full",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job",
+    "6",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--run_tag",
+    "hybrid_full_J6M6E2_maskfix_s1_remote"
+   ],
+   "notes": "seed3 eval of H_hybrid_full_s1"
+  }
+ ]
+}

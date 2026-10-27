@@ -35,9 +35,16 @@ def test_feature_widths_and_column_order_are_frozen():
     ⚠️ **2026-10-10：⑪ 充电机制整条删除**（用户裁定，见 `des.SimConfig` 顶部那处删除标记）。
     V 段末位 `battery` 随之删（F_V 8 → 7），**C 段（桩 token）整段删除**（`F_C` 不再存在）。
     末位删除 ⟹ 前 7 列下标不变；C 段本来就排在最后，删它不动 M/B/V/G 的段序。
+
+    ⚠️ **2026-10-11：G 段末位追加 `mean/min/max_k MCT_k(t)`**（F_G 3 → 6，`progress-log.md` §32）。
+    口径照 **Shi et al., AEI 65:103195 (2025)** 的状态特征 f5–f7。**末位追加** ⟹ 前 3 列下标不变；
+    `F_MAX` 仍为 8（B 段最宽）。**改这条就是破坏 ckpt 兼容**，故一并改这里。
+
+    ⚠️ **2026-10-18：M 段末位追加 `node_x/node_y/dist_lu`**（F_M 7 → 10，F_MAX 8 → 10）。
+    跨实例/跨布局时机台几何第一次进入输入；末位追加 ⟹ 前 7 列下标不变。
     """
-    assert (F_M, F_B, F_V, F_G) == (7, 8, 7, 3)
-    assert F_MAX == max(F_M, F_B, F_V, F_G) == 8
+    assert (F_M, F_B, F_V, F_G) == (10, 8, 7, 6)
+    assert F_MAX == max(F_M, F_B, F_V, F_G) == 10
     for k, n in (("M", F_M), ("B", F_B), ("V", F_V), ("G", F_G)):
         assert len(FEATURE_NAMES[k]) == n, k
         assert SEG_SLICE[k] == slice(SEG_SLICE[k].start, SEG_SLICE[k].start + n)
@@ -121,5 +128,3 @@ def test_cuda_graph_wrapper_is_inert_on_cpu():
     # 比"静默不生效"更强：想用 CUDA 图必须自己拿 CUDA 张量来。
     with pytest.raises(ValueError, match="只接受 CUDA 张量"):
         CudaGraphForward(lambda t: t + 1.0, x)
-
-

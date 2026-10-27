@@ -141,7 +141,8 @@ class Operation_Actor_SetTransformer(nn.Module):
 
     def forward(self, x_fea, graph_pool_avg, padded_nei, adj, candidate,
                 h_g_m_pooled, mask_operation, use_greedy=False,
-                trans_wrk=None, idle_wrk=None, task_ctx=None):
+                trans_wrk=None, idle_wrk=None, task_ctx=None,
+                score_bias=None, pref_emb=None):
         x = _as_tensor(x_fea, torch.float32)
         candidate = _as_tensor(candidate, torch.long)
         mask = _as_tensor(mask_operation, torch.bool)
@@ -174,6 +175,9 @@ class Operation_Actor_SetTransformer(nn.Module):
 
         feat = torch.cat([candidate_feature, h_pool_rep, m_pool_rep], dim=-1)
         scores = self.o_policy(feat).squeeze(-1)                 # (B, n_job)
+        if score_bias is not None:  # [v5 hier] fixed top-level rule bias
+            scores = scores + score_bias.to(
+                device=scores.device, dtype=scores.dtype)
         scores = scores.masked_fill(mask, float('-inf'))
         prob = F.softmax(scores, dim=-1)
 
@@ -195,15 +199,35 @@ class Machine_Actor_SetTransformer(nn.Module):
         self.machine_ctx_dim = 8 if configs.get('st_full_context') else 3
         self.use_machine_id = bool(configs.get('machine_id_emb', 0))
         self.no_attn = bool(configs.get('machine_no_attn', 0))
+        self.logit_scale = float(configs.get('machine_logit_scale', 1.0))
+        self.use_bn = bool(configs.get('machine_bn', 0))
+        self.use_intra = bool(configs.get('machine_intra_attn', 1))
+        if self.use_bn:
+            self.machine_bn = nn.BatchNorm1d(hidden).to(device)
         if self.use_machine_id:
             self.machine_id_emb = nn.Embedding(
                 self.n_machine, hidden).to(device)
-        self.input_proj = nn.Sequential(
-            nn.Linear((10 if configs.get('use_agv') else 6) + 8
-                      + self.machine_ctx_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-        ).to(device)
+        if self.use_intra:
+            self.m1_proj = nn.Linear(
+                10 if configs.get('use_agv') else 6, hidden, bias=False).to(device)
+            self.m2_proj = nn.Linear(8, hidden, bias=False).to(device)
+            self.m3_proj = nn.Linear(
+                self.machine_ctx_dim, hidden, bias=False).to(device)
+            self.token_encoder = SetTransformerEncoder(
+                input_dim=hidden,
+                hidden_dim=hidden,
+                num_layers=1,
+                num_heads=2,
+                num_seeds=1,
+                project_input=False,
+            ).to(device)
+        else:
+            self.input_proj = nn.Sequential(
+                nn.Linear((10 if configs.get('use_agv') else 6) + 8
+                          + self.machine_ctx_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+            ).to(device)
         self.encoder = SetTransformerEncoder(
             input_dim=hidden,
             hidden_dim=hidden,
@@ -219,7 +243,7 @@ class Machine_Actor_SetTransformer(nn.Module):
             configs['critic_hidden_dim'], 2).to(device)
 
     def forward(self, machine_fea_1, machine_fea_2, h_pooled_o, machine_mask,
-                machine_fea_3=None):
+                machine_fea_3=None, score_bias=None, pref_emb=None):
         m1 = _as_tensor(machine_fea_1, torch.float32)
         m2 = _as_tensor(machine_fea_2, torch.float32)
         mask = _as_tensor(machine_mask, torch.bool).squeeze(1)   # (B, m)
@@ -229,7 +253,15 @@ class Machine_Actor_SetTransformer(nn.Module):
                              device=m1.device, dtype=m1.dtype)
         else:
             m3 = _as_tensor(machine_fea_3, torch.float32)
-        feat = self.input_proj(torch.cat([m1, m2, m3], dim=-1))
+        if self.use_intra:
+            tokens = torch.stack(
+                [self.m1_proj(m1), self.m2_proj(m2), self.m3_proj(m3)],
+                dim=2)                                   # (B, m, 3, H)
+            b, m, t, h = tokens.shape
+            _, fused = self.token_encoder(tokens.reshape(b * m, t, h))
+            feat = fused.reshape(b, m, h)
+        else:
+            feat = self.input_proj(torch.cat([m1, m2, m3], dim=-1))
         if self.use_machine_id:
             ids = torch.arange(self.n_machine, device=feat.device)
             feat = feat + self.machine_id_emb(ids).unsqueeze(0)
@@ -238,12 +270,19 @@ class Machine_Actor_SetTransformer(nn.Module):
             h_pool = feat.mean(dim=1)
         else:
             h_nodes, h_pool = self.encoder(feat)                     # (B,m,H), (B,H)
+        if self.use_bn:
+            b, m, h = h_nodes.shape
+            h_nodes = self.machine_bn(h_nodes.reshape(-1, h)).reshape(b, m, h)
         h_pool_rep = h_pool.unsqueeze(1).expand_as(h_nodes)
         o_pool = _as_tensor(h_pooled_o, torch.float32)
         o_pool_rep = o_pool.unsqueeze(1).expand_as(h_nodes)
 
         feat2 = torch.cat([h_nodes, h_pool_rep, o_pool_rep], dim=-1)
         scores = self.m_policy(feat2).squeeze(-1)                # (B, m)
+        scores = scores * self.logit_scale
+        if score_bias is not None:  # [v5 hier] fixed top-level rule bias
+            scores = scores + score_bias.to(
+                device=scores.device, dtype=scores.dtype)
         scores = scores.masked_fill(mask, float('-inf'))
         prob = F.softmax(scores, dim=-1)
         machine_v = self.machine_critic(h_pool)
@@ -279,12 +318,23 @@ class Global_Critic_SetTransformer(nn.Module):
         ).to(device)
         self.machine_ctx_dim = 8 if self.use_full_context else 3
         mh = configs['machine_hidden_dim']
-        self.input_proj = nn.Sequential(
-            nn.Linear((10 if configs.get('use_agv') else 6) + 8
-                      + self.machine_ctx_dim, mh),
-            nn.GELU(),
-            nn.Linear(mh, mh),
-        ).to(device)
+        self.use_intra = bool(configs.get('machine_intra_attn', 1))
+        if self.use_intra:
+            self.m1_proj = nn.Linear(
+                10 if configs.get('use_agv') else 6, mh, bias=False).to(device)
+            self.m2_proj = nn.Linear(8, mh, bias=False).to(device)
+            self.m3_proj = nn.Linear(
+                self.machine_ctx_dim, mh, bias=False).to(device)
+            self.token_encoder = SetTransformerEncoder(
+                input_dim=mh, hidden_dim=mh, num_layers=1, num_heads=2,
+                num_seeds=1, project_input=False).to(device)
+        else:
+            self.input_proj = nn.Sequential(
+                nn.Linear((10 if configs.get('use_agv') else 6) + 8
+                          + self.machine_ctx_dim, mh),
+                nn.GELU(),
+                nn.Linear(mh, mh),
+            ).to(device)
         self.use_machine_id = bool(configs.get('machine_id_emb', 0))
         self.no_attn = bool(configs.get('machine_no_attn', 0))
         if self.use_machine_id:
@@ -310,7 +360,8 @@ class Global_Critic_SetTransformer(nn.Module):
 
     def forward(self, x_fea, graph_pool_avg, adj, candidate,
                 machine_fea1, machine_fea2, machine_fea3=None,
-                trans_wrk=None, idle_wrk=None, task_ctx=None):
+                trans_wrk=None, idle_wrk=None, task_ctx=None,
+                pref_emb=None):
         x = _as_tensor(x_fea, torch.float32)
         candidate = _as_tensor(candidate, torch.long)
         m1 = _as_tensor(machine_fea1, torch.float32)
@@ -339,7 +390,15 @@ class Global_Critic_SetTransformer(nn.Module):
         else:
             attn_bias = None
         _, h_task = self.task_enc(x, attn_bias=attn_bias)
-        feat = self.input_proj(torch.cat([m1, m2, m3], dim=-1))
+        if self.use_intra:
+            tokens = torch.stack(
+                [self.m1_proj(m1), self.m2_proj(m2), self.m3_proj(m3)],
+                dim=2)                                   # (B, m, 3, H)
+            b, m, t, h = tokens.shape
+            _, fused = self.token_encoder(tokens.reshape(b * m, t, h))
+            feat = fused.reshape(b, m, h)
+        else:
+            feat = self.input_proj(torch.cat([m1, m2, m3], dim=-1))
         if self.use_machine_id:
             ids = torch.arange(self.n_machine, device=feat.device)
             feat = feat + self.machine_id_emb(ids).unsqueeze(0)
@@ -368,12 +427,23 @@ class Global_Critic_Hybrid(nn.Module):
         self.use_full_context = bool(configs.get('st_full_context', 0))
         self.machine_ctx_dim = 8 if self.use_full_context else 3
         mh = configs['machine_hidden_dim']
-        self.input_proj = nn.Sequential(
-            nn.Linear((10 if configs.get('use_agv') else 6) + 8
-                      + self.machine_ctx_dim, mh),
-            nn.GELU(),
-            nn.Linear(mh, mh),
-        ).to(device)
+        self.use_intra = bool(configs.get('machine_intra_attn', 1))
+        if self.use_intra:
+            self.m1_proj = nn.Linear(
+                10 if configs.get('use_agv') else 6, mh, bias=False).to(device)
+            self.m2_proj = nn.Linear(8, mh, bias=False).to(device)
+            self.m3_proj = nn.Linear(
+                self.machine_ctx_dim, mh, bias=False).to(device)
+            self.token_encoder = SetTransformerEncoder(
+                input_dim=mh, hidden_dim=mh, num_layers=1, num_heads=2,
+                num_seeds=1, project_input=False).to(device)
+        else:
+            self.input_proj = nn.Sequential(
+                nn.Linear((10 if configs.get('use_agv') else 6) + 8
+                          + self.machine_ctx_dim, mh),
+                nn.GELU(),
+                nn.Linear(mh, mh),
+            ).to(device)
         self.use_machine_id = bool(configs.get('machine_id_emb', 0))
         self.no_attn = bool(configs.get('machine_no_attn', 0))
         if self.use_machine_id:
@@ -392,7 +462,8 @@ class Global_Critic_Hybrid(nn.Module):
 
     def forward(self, x_fea, graph_pool_avg, adj, candidate,
                 machine_fea1, machine_fea2, machine_fea3=None,
-                trans_wrk=None, idle_wrk=None, task_ctx=None):
+                trans_wrk=None, idle_wrk=None, task_ctx=None,
+                pref_emb=None):
         x = _as_tensor(x_fea, torch.float32)
         candidate = _as_tensor(candidate, torch.long)
         m1 = _as_tensor(machine_fea1, torch.float32)
@@ -412,7 +483,15 @@ class Global_Critic_Hybrid(nn.Module):
         h_pool, _ = self.encoder(x=x, graph_pool=graph_pool_avg,
                                  padded_nei=None, adj=adj_sp)
 
-        feat = self.input_proj(torch.cat([m1, m2, m3], dim=-1))
+        if self.use_intra:
+            tokens = torch.stack(
+                [self.m1_proj(m1), self.m2_proj(m2), self.m3_proj(m3)],
+                dim=2)                                   # (B, m, 3, H)
+            b, m, t, h = tokens.shape
+            _, fused = self.token_encoder(tokens.reshape(b * m, t, h))
+            feat = fused.reshape(b, m, h)
+        else:
+            feat = self.input_proj(torch.cat([m1, m2, m3], dim=-1))
         if self.use_machine_id:
             ids = torch.arange(self.n_machine, device=feat.device)
             feat = feat + self.machine_id_emb(ids).unsqueeze(0)
@@ -478,7 +557,8 @@ class Global_Critic_JobST_MachineGAT(nn.Module):
 
     def forward(self, x_fea, graph_pool_avg, adj, candidate,
                 machine_fea1, machine_fea2, machine_fea3=None,
-                trans_wrk=None, idle_wrk=None, task_ctx=None):
+                trans_wrk=None, idle_wrk=None, task_ctx=None,
+                pref_emb=None):
         x = _as_tensor(x_fea, torch.float32)
         if x.dim() == 2:
             x = x.reshape(candidate.size(0), self.n_total_task, -1)

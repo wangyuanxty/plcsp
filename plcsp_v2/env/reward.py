@@ -92,8 +92,41 @@ def reward_weights(f_ref: tuple[float, float, float]) -> tuple[float, float, flo
     return tuple(x / s for x in inv)
 
 
+EQUAL_WEIGHTS = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+"""min–max 口径下的默认权重（三目标等权）。
+
+照 **Shi et al., *Advanced Engineering Informatics* 65:103195 (2025)** 的做法：
+先把每个目标 min–max 归一到 `[0,1]`（该文 Eq. 51/53），再乘权重。
+等权有先例：**Liu et al., *IEEE Transactions on Cybernetics* 56(5):2583–2594 (2026)**
+默认 `1:1:1` 并扫 7 组。
+
+⚠️ **为什么不用 `reward_weights` 的 `1/f^ref`**（2026-10-10 更正）：
+那个规则在**参考点的数值**上做到等贡献，但**组内 z 化把均值消掉** ⟹ 真正进梯度的只有
+**组内变化**，而变化的灵敏度是 `wᵢ × 该目标的离散度` —— 后者从没被设计过。
+实测（MK01 · 36 条固定规则）：`twt` 名义权重 **5.3%**，实际贡献 **240%** 的净赢。
+全库 104 篇里**没有一篇**用 `1/f_ref`（见 `progress-log.md` §147）。
+"""
+
+
+def normalize_minmax(
+        f: tuple[float, float, float],
+        bounds: tuple[tuple[float, float, float], tuple[float, float, float]],
+) -> tuple[float, float, float]:
+    """`f̃ᵢ = (fᵢ − loᵢ) / (hiᵢ − loᵢ)` —— 每个目标按**自己的可达范围**归一。
+
+    照 **Shi et al., AEI 65:103195 (2025)** Eq. 51/53（原文用**运行观测极值**）。
+    ⚠️ **某一维 `hi <= lo` 时该维取 0**：常量维没有信息，不产生梯度。**不静默给 NaN**
+    （快速失败纪律：NaN 会一路顺到优势里，变成无声的坏读数）。
+    """
+    low, high = bounds
+    return tuple(0.0 if top <= bot else (x - bot) / (top - bot)
+                 for x, bot, top in zip(f, low, high))
+
+
 def scalar_reward(f: tuple[float, float, float], w: tuple[float, float, float],
-                  prefs: tuple[float, float, float] | None = None) -> float:
+                  prefs: tuple[float, float, float] | None = None,
+                  bounds: tuple[tuple[float, float, float],
+                               tuple[float, float, float]] | None = None) -> float:
     """Σ wᵢ(−fᵢ)。`prefs`（spec §6.1 预留的签名）：给定时**取代** `w`（不是相乘）。
 
     A 阶段用它表达"单目标配置"——one-hot `(1,0,0)` = 纯 makespan；`None` = 用 f^ref 派生的 `w`
@@ -101,7 +134,10 @@ def scalar_reward(f: tuple[float, float, float], w: tuple[float, float, float],
     （makespan ~10²、energy ~10¹、TWT ~10¹）不进优势，只改目标的相对权重。
     """
     ww = prefs if prefs is not None else w
-    return float(sum(-wi * fi for wi, fi in zip(ww, f)))
+    # ⚠️ `bounds=None`（默认）⟹ 用原始量纲，**逐位等于今日读数**。
+    # 给了 bounds ⟹ 先 min–max 归一（照 Shi 2025 式 51/53），再乘权重。
+    ff = f if bounds is None else normalize_minmax(f, bounds)
+    return float(sum(-wi * fi for wi, fi in zip(ww, ff)))
 
 
 def _ref_cfg_key(cfg) -> tuple:

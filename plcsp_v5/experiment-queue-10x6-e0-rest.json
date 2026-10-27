@@ -1,0 +1,153 @@
+{
+ "max_parallel": 2,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "10x6 E0 s2/s3 non-RS; E0 s1 already running outside this queue",
+ "jobs": [
+  {
+   "id": "T_E0_J10M6E2_s2_10x6",
+   "script": "Run.py",
+   "priority": 7.0,
+   "args": [
+    "--n_job",
+    "10",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "settrans",
+    "--machine_intra_attn",
+    "1",
+    "--st_token_context",
+    "1",
+    "--st_task_features",
+    "1",
+    "--st_edge_features",
+    "0",
+    "--algo",
+    "grpo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "eval",
+    "--seed",
+    "2",
+    "--train_seed",
+    "2",
+    "--run_tag",
+    "plan10_E0_J10M6E2_s2_remote"
+   ],
+   "notes": "10x6 E0: settrans, GRPO, no AGV, no RS",
+   "after": []
+  },
+  {
+   "id": "E_E0_J10M6E2_s2_10x6",
+   "script": "eval_st_seed3.py",
+   "priority": 52.0,
+   "after": [
+    "T_E0_J10M6E2_s2_10x6"
+   ],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6"
+   },
+   "args": [
+    "--n_job",
+    "10",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--machine_intra_attn",
+    "1",
+    "--run_tag",
+    "plan10_E0_J10M6E2_s2_remote"
+   ],
+   "notes": "seed3 eval of 10x6 E0"
+  },
+  {
+   "id": "T_E0_J10M6E2_s3_10x6",
+   "script": "Run.py",
+   "priority": 8.0,
+   "args": [
+    "--n_job",
+    "10",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--encoder_type",
+    "settrans",
+    "--machine_intra_attn",
+    "1",
+    "--st_token_context",
+    "1",
+    "--st_task_features",
+    "1",
+    "--st_edge_features",
+    "0",
+    "--algo",
+    "grpo",
+    "--episode_num",
+    "200",
+    "--buffer_size",
+    "8",
+    "--resample_freq",
+    "8",
+    "--LR",
+    "1e-3",
+    "--use_lr_decay",
+    "0",
+    "--eval_sample",
+    "100",
+    "--random_weight_type",
+    "eval",
+    "--seed",
+    "3",
+    "--train_seed",
+    "3",
+    "--run_tag",
+    "plan10_E0_J10M6E2_s3_remote"
+   ],
+   "notes": "10x6 E0: settrans, GRPO, no AGV, no RS",
+   "after": []
+  },
+  {
+   "id": "E_E0_J10M6E2_s3_10x6",
+   "script": "eval_st_seed3.py",
+   "priority": 53.0,
+   "after": [
+    "T_E0_J10M6E2_s3_10x6"
+   ],
+   "env": {
+    "EVAL_ENCODER": "settrans",
+    "EVAL_OUTPUT_SUFFIX": "_10x6"
+   },
+   "args": [
+    "--n_job",
+    "10",
+    "--n_machine",
+    "6",
+    "--n_edge",
+    "2",
+    "--machine_intra_attn",
+    "1",
+    "--run_tag",
+    "plan10_E0_J10M6E2_s3_remote"
+   ],
+   "notes": "seed3 eval of 10x6 E0"
+  }
+ ]
+}

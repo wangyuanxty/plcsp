@@ -123,3 +123,40 @@ def gen_random(n_jobs: int, n_machines: int, seed: int, n_alt: int = 2,
         jobs.append(job_ops)
     return Instance(n_jobs=n_jobs, n_machines=n_machines, jobs=jobs,
                     source=f"random n={n_jobs} m={n_machines} seed={seed}")
+
+
+def gen_mk_like(seed: int, *, jobs_lo: int = 10, jobs_hi: int = 20,
+                m_lo: int = 4, m_hi: int = 15,
+                ops_lo: int = 3, ops_hi: int = 15,
+                alts_lo: int = 1, alts_hi: int = 6,
+                pt_lo: float = 1.0, pt_hi: float = 19.0) -> Instance:
+    """**MK 范围的随机实例**（跨实例训练用）。
+
+    逐实例抽：
+
+    ```
+    工件   U{10..20}       （MK 的 10/15/20）
+    机台   U{4..15}        （MK 的 4/5/6/8/10/15）
+    工序   U{3..15}/工件   （MK 的 3–15）
+    候选   U{1..6}/工序    （MK 的 1–6）
+    工时   U{1..19}        （MK 的 1–19）
+    ```
+
+    ⚠️ 这是**分布覆盖**，不是逐实例复刻 MK。测试集仍是 MK01–10。
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    n_jobs = int(rng.integers(jobs_lo, jobs_hi + 1))
+    n_machines = int(rng.integers(m_lo, m_hi + 1))
+    jobs = []
+    for _ in range(n_jobs):
+        n_ops = int(rng.integers(ops_lo, ops_hi + 1))
+        job_ops = []
+        for _ in range(n_ops):
+            k = int(rng.integers(alts_lo, min(alts_hi, n_machines) + 1))
+            picked = rng.choice(n_machines, size=k, replace=False)
+            job_ops.append([(int(m), float(rng.uniform(pt_lo, pt_hi)))
+                            for m in picked])
+        jobs.append(job_ops)
+    return Instance(n_jobs=n_jobs, n_machines=n_machines, jobs=jobs,
+                    source=f"mk_like seed={seed} n={n_jobs} m={n_machines}")

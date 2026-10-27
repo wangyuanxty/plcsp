@@ -1,0 +1,91 @@
+{
+ "max_parallel": 2,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-26 10x6 all-GNN (e2e, GIN/GAT) completion: seeds 2 and 3. Seed 1 already exists (test 613.98). Queued after the hybrid queue.",
+ "jobs": [
+  {
+   "id": "G10x6_e2e_s2",
+   "script": "Run.py",
+   "priority": 6.1,
+   "after": [],
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "e2e",
+    "--algo", "grpo",
+    "--episode_num", "200",
+    "--buffer_size", "8",
+    "--resample_freq", "8",
+    "--LR", "1e-3",
+    "--use_lr_decay", "0",
+    "--eval_sample", "100",
+    "--random_weight_type", "eval",
+    "--seed", "2",
+    "--train_seed", "2",
+    "--run_tag", "e2e_grpo_J10M6E2_randlam_s2_remote"
+   ],
+   "notes": "all-GNN GRPO 10x6 seed2, same protocol as G10x6_e2e_s1"
+  },
+  {
+   "id": "eval_G10x6_e2e_s2",
+   "script": "eval_st_seed3.py",
+   "priority": 50.1,
+   "after": ["G10x6_e2e_s2"],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--run_tag", "e2e_grpo_J10M6E2_randlam_s2_remote"
+   ],
+   "notes": "seed3 eval of G10x6_e2e_s2"
+  },
+  {
+   "id": "G10x6_e2e_s3",
+   "script": "Run.py",
+   "priority": 6.2,
+   "after": [],
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--encoder_type", "e2e",
+    "--algo", "grpo",
+    "--episode_num", "200",
+    "--buffer_size", "8",
+    "--resample_freq", "8",
+    "--LR", "1e-3",
+    "--use_lr_decay", "0",
+    "--eval_sample", "100",
+    "--random_weight_type", "eval",
+    "--seed", "3",
+    "--train_seed", "3",
+    "--run_tag", "e2e_grpo_J10M6E2_randlam_s3_remote"
+   ],
+   "notes": "all-GNN GRPO 10x6 seed3, same protocol as G10x6_e2e_s1"
+  },
+  {
+   "id": "eval_G10x6_e2e_s3",
+   "script": "eval_st_seed3.py",
+   "priority": 50.2,
+   "after": ["G10x6_e2e_s3"],
+   "env": {
+    "EVAL_ENCODER": "e2e",
+    "EVAL_OUTPUT_SUFFIX": "_seed3"
+   },
+   "args": [
+    "--n_job", "10",
+    "--n_machine", "6",
+    "--n_edge", "2",
+    "--run_tag", "e2e_grpo_J10M6E2_randlam_s3_remote"
+   ],
+   "notes": "seed3 eval of G10x6_e2e_s3"
+  }
+ ]
+}

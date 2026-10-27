@@ -280,15 +280,18 @@ def test_energy_golden_after_the_idle_endpoint_fix():
     **为什么要有这条**：`test_idle_energy_stops_at_each_resource_last_activity` 只守**不变式**
     （`idle ≤ makespan − proc`），**改错了数值它不会红**。这条钉住**具体数值**。
 
+    ⚠️ **2026-10-18：A 组修正进 v3 主线后，AGV 能耗从 0.4873 变为 0.4868667。**
+    机床与车间固定项未变；变的是 `skip_same_machine_move`（少一次同机台订车）。
+
     ⚠️ 用 `approx`（默认相对容差 1e-6）而不是 `==`：这些是聚合浮点，逐位相等不是契约；
     **任何真实的改动都会远大于 1e-6**，所以它照样能抓住回归。
     """
     inst = _inst("mk01")
     m = rollout(inst, seed_layout=0, seed_chain=0)
     b = m["energy_breakdown"]
-    assert m["energy"] == pytest.approx(4.33808)
+    assert m["energy"] == pytest.approx(4.337646666666666)
     assert b["machine_kwh"] == pytest.approx(3.3640466666666664)
-    assert b["agv_kwh"] == pytest.approx(0.4873)
+    assert b["agv_kwh"] == pytest.approx(0.4868666666666667)
     assert b["shop_kwh"] == pytest.approx(0.4867333333333333)       # = 0.4 × makespan / 60
     # 待机总时长：**这个数是口径的直接体现** —— 旧口径（算到 makespan）会是 **438 min**
     # （6 台 × 73.01），现口径是 173.14 ⟹ 降到 **39.5%**。
@@ -402,8 +405,10 @@ def test_scaled_mtbf_and_disturbance_metrics_are_exposed():
     # TC 报告桥 = c·V + uc·行驶时间
     from plcsp_v3.env.des import (AEI2025_AGV_ACTIVATION_COST as C,
                                   AEI2025_UNIT_TRANSPORT_COST as UC)
+    # ⚠️ **2026-10-14：口径加了装卸工时**（原文假设 (3)：装卸**计入运输时间**）⟹
+    #    `TC = c·Σy_v + uc·(行驶 + **装卸** + at)`。不加这一项，本仓的 TC 被低估 4.8 倍。
     assert m["logistics_cost"] == pytest.approx(
-        C * m["n_agv"] + UC * m["travel_time_total"])
+        C * m["n_agv"] + UC * (m["travel_time_total"] + m["agv_handling_min"]))
 
 
 # ══════════════════ env/rule_views.py + hrl/ ══════════════════
@@ -466,7 +471,10 @@ def test_agv_breakdown_scenarios_sc1_sc2_sc3_all_occur():
     （= 车队合计 ÷ 车数 ÷ makespan）。实测 MK01 约 **7%**；我曾错算成 42%（漏除车数）。
     """
     inst = load_mk("mk01")
-    cfg = SimConfig(agv_mtbf=20.0, agv_mttr=3.0)      # 强制频繁故障
+    # ⚠️ **2026-10-14**：`agv_mttr`（固定值）已删 —— 修复时长现在逐次从
+    #   `U{agv_mttr_lo, agv_mttr_hi}` 抽（原文：*"between 5 and 10"*）。
+    #   本测试要「修得快 ⟹ 故障密」，故把区间压成一点。
+    cfg = SimConfig(agv_mtbf=20.0, agv_mttr_lo=3.0, agv_mttr_hi=3.0)
     lay = layout_mod.sample_layout(inst.n_machines, seed=0, n_agv=cfg.n_agv)
     g = corridors.build_corridor_graph(lay)
     dm = corridors.dock_distance_matrix(g)

@@ -1,0 +1,54 @@
+{
+ "max_parallel": 3,
+ "min_free_gb": 3.0,
+ "poll_seconds": 20.0,
+ "stop_on_failure": false,
+ "note": "2026-10-26 10x6 main model: RS + local credit, 3 seeds. Queued after the e2e 10x6 queue.",
+ "jobs": [
+  {"id": "T_local_J10M6E2_s1", "script": "Run.py", "priority": 6.1, "after": [], "args": [
+   "--n_job","10","--n_machine","6","--n_edge","2","--encoder_type","settrans",
+   "--machine_intra_attn","1","--hier","1","--hier_interval","8","--hier_alpha","0.5",
+   "--top_credit","local","--use_agv","1","--n_agv","6","--cross_delay","5",
+   "--cross_leg_ratio","0.5","--agv_dst_actor","1","--agv_rule","0","--agv_top_rule","0",
+   "--st_token_context","1","--st_task_features","1","--st_edge_features","0",
+   "--algo","grpo","--episode_num","200","--buffer_size","8","--resample_freq","8",
+   "--LR","1e-3","--use_lr_decay","0","--eval_sample","100","--random_weight_type","eval",
+   "--seed","1","--train_seed","1","--run_tag","plancredit_local_J10M6E2_s1_remote"]},
+  {"id": "E_local_J10M6E2_s1", "script": "eval_st_seed3.py", "priority": 50.1, "after": ["T_local_J10M6E2_s1"], "env": {"EVAL_ENCODER":"settrans","EVAL_OUTPUT_SUFFIX":"_credit_local_10x6"}, "args": [
+   "--n_job","10","--n_machine","6","--n_edge","2","--encoder_type","settrans",
+   "--machine_intra_attn","1","--hier","1","--hier_interval","8","--hier_alpha","0.5",
+   "--top_credit","local","--use_agv","1","--n_agv","6","--cross_delay","5",
+   "--cross_leg_ratio","0.5","--agv_dst_actor","1","--agv_rule","0","--agv_top_rule","0",
+   "--run_tag","plancredit_local_J10M6E2_s1_remote"]},
+  {"id": "T_local_J10M6E2_s2", "script": "Run.py", "priority": 6.2, "after": [], "args": [
+   "--n_job","10","--n_machine","6","--n_edge","2","--encoder_type","settrans",
+   "--machine_intra_attn","1","--hier","1","--hier_interval","8","--hier_alpha","0.5",
+   "--top_credit","local","--use_agv","1","--n_agv","6","--cross_delay","5",
+   "--cross_leg_ratio","0.5","--agv_dst_actor","1","--agv_rule","0","--agv_top_rule","0",
+   "--st_token_context","1","--st_task_features","1","--st_edge_features","0",
+   "--algo","grpo","--episode_num","200","--buffer_size","8","--resample_freq","8",
+   "--LR","1e-3","--use_lr_decay","0","--eval_sample","100","--random_weight_type","eval",
+   "--seed","2","--train_seed","2","--run_tag","plancredit_local_J10M6E2_s2_remote"]},
+  {"id": "E_local_J10M6E2_s2", "script": "eval_st_seed3.py", "priority": 50.2, "after": ["T_local_J10M6E2_s2"], "env": {"EVAL_ENCODER":"settrans","EVAL_OUTPUT_SUFFIX":"_credit_local_10x6"}, "args": [
+   "--n_job","10","--n_machine","6","--n_edge","2","--encoder_type","settrans",
+   "--machine_intra_attn","1","--hier","1","--hier_interval","8","--hier_alpha","0.5",
+   "--top_credit","local","--use_agv","1","--n_agv","6","--cross_delay","5",
+   "--cross_leg_ratio","0.5","--agv_dst_actor","1","--agv_rule","0","--agv_top_rule","0",
+   "--run_tag","plancredit_local_J10M6E2_s2_remote"]},
+  {"id": "T_local_J10M6E2_s3", "script": "Run.py", "priority": 6.3, "after": [], "args": [
+   "--n_job","10","--n_machine","6","--n_edge","2","--encoder_type","settrans",
+   "--machine_intra_attn","1","--hier","1","--hier_interval","8","--hier_alpha","0.5",
+   "--top_credit","local","--use_agv","1","--n_agv","6","--cross_delay","5",
+   "--cross_leg_ratio","0.5","--agv_dst_actor","1","--agv_rule","0","--agv_top_rule","0",
+   "--st_token_context","1","--st_task_features","1","--st_edge_features","0",
+   "--algo","grpo","--episode_num","200","--buffer_size","8","--resample_freq","8",
+   "--LR","1e-3","--use_lr_decay","0","--eval_sample","100","--random_weight_type","eval",
+   "--seed","3","--train_seed","3","--run_tag","plancredit_local_J10M6E2_s3_remote"]},
+  {"id": "E_local_J10M6E2_s3", "script": "eval_st_seed3.py", "priority": 50.3, "after": ["T_local_J10M6E2_s3"], "env": {"EVAL_ENCODER":"settrans","EVAL_OUTPUT_SUFFIX":"_credit_local_10x6"}, "args": [
+   "--n_job","10","--n_machine","6","--n_edge","2","--encoder_type","settrans",
+   "--machine_intra_attn","1","--hier","1","--hier_interval","8","--hier_alpha","0.5",
+   "--top_credit","local","--use_agv","1","--n_agv","6","--cross_delay","5",
+   "--cross_leg_ratio","0.5","--agv_dst_actor","1","--agv_rule","0","--agv_top_rule","0",
+   "--run_tag","plancredit_local_J10M6E2_s3_remote"]}
+ ]
+}

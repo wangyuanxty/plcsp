@@ -29,8 +29,6 @@
 """
 from __future__ import annotations
 
-import numpy as np
-
 from collections.abc import Sequence
 from typing import NamedTuple
 
@@ -38,8 +36,6 @@ from ..env.des import StepCounters, SimWorld
 from ..env.rule_views import LAView, PAView
 from ..env.snapshot import Snapshot
 from .rollout import Decision, NetPolicy, gated_by_constraints
-from .rules import (apply_pa_rule, decode_param, la_rule_policy,
-                    pm_rule_policy)
 
 
 class ScriptedPolicy:
@@ -48,16 +44,13 @@ class ScriptedPolicy:
     ⚠️ **一条游标跨种类共用**：仿真的调用次序由决策序列决定，决策一样 ⟹ 次序一样。
     **不按 kind 分桶**（分桶会在种类交错时错位）。
 
-    ⚠️ **v3：脚本吃 `Decision` 而不是 `int`** —— 一次决策现在是"(规则, 参数)"两样，
-    **一个整数装不下**（v2 只要规则号）。**用 `Decision` 是为了与记录同源**：
-    `hrl/train.py` 的 `_prefix_to` 直接切 `base.rec.decisions`，不另建一套编码。
-
-    ⚠️ **`pm_interval` 必须与录制同档** —— `policy_m` 把比例 `A` 换算成绝对阈值要它。
+    ⚠️ **v3 top-K 起：回放直接返回 `Decision.act`**，不再从 `param_u` 反解
+    `λ` / `A`。候选集在录制时已冻结；回放只需要"当时选了哪个"。
+    并做**合法性校验**：动作不在当前候选集里 ⟹ 回放与仿真已错位，显式报错。
     """
 
-    def __init__(self, decisions: Sequence["Decision"], pm_interval: float = 120.0):
+    def __init__(self, decisions: Sequence["Decision"]):
         self.decisions = list(decisions)
-        self.pm_interval = float(pm_interval)
         self.k = 0
 
     def _next(self) -> "Decision":
@@ -75,28 +68,35 @@ class ScriptedPolicy:
 
     def policy_pa(self, view: PAView, pool, tie_rng=None):
         d = self._next()
-        lam_job, lam_mach = _pa_lams(d.param_u)
-        return apply_pa_rule(int(d.rule_pa), view, pool, tie_rng, lam_job, lam_mach)
+        if d.act is None or len(d.act) != 2:
+            raise ValueError(f"PA 决策缺 `act=(池下标, 机台)`：{d.act!r}")
+        pi, mach = int(d.act[0]), int(d.act[1])
+        if not (0 <= pi < len(pool)):
+            raise IndexError(f"回放的池下标 {pi} 越界（池大小 {len(pool)}）")
+        j, _oi = pool[pi]
+        if int(mach) not in [int(m) for m, _t in view.jobs[int(j)].alts]:
+            raise ValueError(
+                f"回放的机台 {mach} 不在工件 {j} 的当前候选机台里 —— "
+                "回放已偏离录制时的状态")
+        return pi, mach
 
     def policy_l(self, view: LAView, cand_v):
         d = self._next()
-        return int(la_rule_policy(int(d.rule_la), (decode_param(float(d.param_u[0])),))(
-            view, cand_v))
+        if d.act is None or len(d.act) != 1:
+            raise ValueError(f"LA 决策缺 `act=(车号,)`：{d.act!r}")
+        agv = int(d.act[0])
+        if agv not in [int(a) for a in cand_v]:
+            raise ValueError(f"回放的车号 {agv} 不在当前候选 {list(cand_v)} 里")
+        return agv
 
     def policy_m(self, snap: Snapshot, mach: int, cands):
         d = self._next()
-        thr = decode_param(float(d.param_u[0])) * self.pm_interval
-        return int(pm_rule_policy(int(d.rule_ra), thr)(snap, int(mach), cands))
-
-
-def _pa_lams(param_u) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """`u` 向量 → `(作业侧 2 个 λ, 机台侧 1 个 λ)`。
-
-    ⚠️ 与 `NetPolicy.policy_pa` 的拆法**逐字同源**（`agents.PA_PARAM_TOTAL` 的布局）。
-    """
-    u = np.asarray(param_u, dtype=np.float64)
-    return ((decode_param(float(u[0])), decode_param(float(u[1]))),
-            (decode_param(float(u[2])),))
+        if d.act is None or len(d.act) != 1:
+            raise ValueError(f"RA 决策缺 `act=(动作码,)`：{d.act!r}")
+        code = int(d.act[0])
+        if code not in [int(a) for a in cands]:
+            raise ValueError(f"回放的动作码 {code} 不在当前候选 {list(cands)} 里")
+        return code
 
 
 class BranchPolicy:
@@ -134,17 +134,48 @@ class BranchPolicy:
 
 
 class SegmentReturn(NamedTuple):
-    """一段的**增量**回报（设计 §10③：段内完成工件数 + 段内能耗 + 段内拖期增量）。"""
+    """一段的**增量**回报（设计 §10③：段内完成工件数 + 段内能耗 + 段内拖期增量）。
+
+    ⚠️ **2026-10-11：新增 `dt`（段时长）**（`progress-log.md` §25/§27）。
+    段回报**原文没有「时间」**，而 makespan 就是时间 ——
+    于是「规则唯一改变的那个量」在两种停表触发下都读不到：
+
+    | 停表触发 | 段内是「规则的函数」的量 | 原文读得到吗 |
+    |---|---|---|
+    | 工序计数（`od % ΔT`） | **停表时刻**（实测 `j=3` 43.61→50.67 min） | ✗ |
+    | 扰动（机障/AGV 故障） | **完成的工序数**（实测 `j=0` 7/8/9） | ✗（用的是工件数，恒 0） |
+
+    `dt` 让两者合成一个量：**进度率 `done_ops / dt`**（见 `train._scalar`）。
+    """
 
     done_jobs: int
     done_ops: int
     energy_kwh: float
     twt: float
+    dt: float = 0.0
+    """段时长 [min] = `after.now - before.now`（`StepCounters.now`）。
+
+    ⚠️ **默认 0.0** 只为兼容既有七元构造；`segment_return` 一律填真值。"""
+
+    d_ms: float = 0.0
+    """**段内「已排程部分 makespan」的增量** = `after.ms_committed - before.ms_committed`。
+
+    口径照 **Shi et al., *Advanced Engineering Informatics* 65:103195 (2025)** §4.2.2：
+    逐决策点奖励 `ms_t` = *"the difference in MS before and after state transition"*，
+    `MS` = *"Makespan for all jobs in the schedule"*。
+
+    ⚠️ **这是段回报的第一分量**（见 `train._scalar`）。Σ `d_ms` 沿一条链**望远镜求和**
+    = 终局的已排程 makespan ⟹ **最小化 Σ`d_ms` ≡ 最小化 makespan**（Shi 的分解）。
+    这是本节此前**缺的那一路**：`done_ops`/`dt` 各自只在一种停表触发下可见（§25）。"""
 
     def as_vector(self) -> tuple[float, float, float]:
         """→ `(完工工件数, 能耗, 拖期)`，**与 `reward.objective_vector` 同序`**（都越小越好）。
 
         ⚠️ **完工数取负**：它是"越多越好"，而 `reward` 的约定是"越小越好"。
+
+        ⚠️ **同序 ≠ 同量**（§23.9）：`objective_vector` 第一分量是 **makespan（分钟）**，
+        本函数第一分量是 **完成工件数（个）** ⟹ **`spec.bounds` 不能用在段回报上**。
+        训练侧的标量化走 `train._scalar`，它用**进度率**，不用本函数。
         """
         return (-float(self.done_jobs), float(self.energy_kwh), float(self.twt))
 
@@ -185,4 +216,6 @@ def segment_return(before: StepCounters, after: StepCounters) -> SegmentReturn:
     return SegmentReturn(done_jobs=int(after.done_jobs - before.done_jobs),
                          done_ops=int(after.done_ops - before.done_ops),
                          energy_kwh=float(after.energy_kwh - before.energy_kwh),
-                         twt=float(after.twt - before.twt))
+                         twt=float(after.twt - before.twt),
+                         dt=float(after.now - before.now),
+                         d_ms=float(after.ms_committed - before.ms_committed))
