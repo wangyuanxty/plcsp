@@ -42,6 +42,10 @@ class Instance:
     travel: np.ndarray     # (n_machine, n_machine) travel time
     edges: np.ndarray      # (n_edge, n_machine_per_edge) machine ids
     task: int
+    # M2 pools carry two extra arrays: the machine -> station distance and
+    # the station -> station transfer time.  Old pools leave them as None.
+    lu_machine: Optional[np.ndarray] = None   # (n_machine,)
+    lu_edge: Optional[np.ndarray] = None      # (n_edge, n_edge)
 
     @property
     def n_task(self) -> int:
@@ -62,13 +66,18 @@ class Instance:
 
 
 def load_instance(path: str, idx: int) -> Instance:
+    """Load one sample.  Pools hold 4 arrays (old) or 6 arrays (M2)."""
     with open(path, "rb") as fh:
         raw = pickle.load(fh)
-    t, power, travel, edges = raw
+    t, power, travel, edges = raw[:4]
     t_i = np.asarray(t[idx], dtype=np.float64)
     p_i = np.asarray(power[idx], dtype=np.float64)
     tt_i = np.asarray(travel[idx], dtype=np.float64)
     ed_i = np.asarray(edges[idx], dtype=np.int64)
+    lu_m = lu_e = None
+    if len(raw) >= 6:
+        lu_m = np.asarray(raw[4][idx], dtype=np.float64)
+        lu_e = np.asarray(raw[5][idx], dtype=np.float64)
     n_task, n_machine = t_i.shape
     # The task matrix is (n_job * n_op, n_machine).  In this instance family
     # n_op == n_machine; the edge table is (n_edge, machines_per_edge) and
@@ -78,7 +87,8 @@ def load_instance(path: str, idx: int) -> Instance:
         raise ValueError(f"task count {n_task} not divisible by ops {n_op}")
     n_job = n_task // n_op
     return Instance(n_job=n_job, n_op=n_op, n_machine=n_machine,
-                    t=t_i, power=p_i, travel=tt_i, edges=ed_i, task=idx)
+                    t=t_i, power=p_i, travel=tt_i, edges=ed_i, task=idx,
+                    lu_machine=lu_m, lu_edge=lu_e)
 
 
 @dataclass

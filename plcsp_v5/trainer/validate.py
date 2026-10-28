@@ -266,6 +266,17 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
         va_env.configs.weight_mk = float(phase_weights[0][0])
         va_env.configs.weight_ec = float(phase_weights[0][1])
         va_env.configs.weight_tt = float(phase_weights[0][2])
+
+    # [v5 M2] station distances; None for old pickles.  same_samples slices
+    # the last 100 samples, so its lu index follows the same offset.
+    _lu_idx = data_index
+    if data_type == "same_samples":
+        _lu_idx = len(data) - 100 + data_index
+    _lu_m = (None if getattr(data, "lu_machine", None) is None
+             else data.lu_machine[_lu_idx])
+    _lu_e = (None if getattr(data, "lu_edge", None) is None
+             else data.lu_edge[_lu_idx])
+
     _, _, _, va_adj, _, va_machine_fea2, va_tasks_fea_1101, \
         ft_idea_refer, pt_idea_refer = va_env.reset(Random_weight_type="eval")  # 初始化ft和it的状态 TODO 1108-验证的时候，采用的不是随机权重，而是固定的权重
 
@@ -273,6 +284,12 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
     # transport accounting as training, with the earliest-free AGV rule.
     # This keeps the validation distribution aligned with training.
     use_agv = bool(getattr(ppo, 'use_agv', False))
+    # [v5 M2] station-based transport, mirroring parallel_env.
+    _lu_station = bool((args or {}).get('lu_station', 0)) and use_agv
+    if _lu_station and (_lu_m is None or _lu_e is None):
+        raise ValueError(
+            "--lu_station 1 needs instances with load/unload stations; "
+            "regenerate the instance pool")
     n_agv = int(configs.get('n_agv', 6))
     cross_delay = float(configs.get('cross_delay', 5.0))
     cross_leg_ratio = float(configs.get('cross_leg_ratio', 0.5))
@@ -280,6 +297,7 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
     if use_agv:
         try:
             from agv.state import (AgvState, split_cross_edge,
+                                   RHO_EMPTY,
                                    transport_timing)
         except ImportError:
             from plcsp_v5.agv.state import (AgvState, split_cross_edge,
@@ -287,8 +305,43 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
         n_edge = len(va_edge_info)
         for k in range(n_agv):
             edge = k % n_edge
-            agvs.append(AgvState(idx=k, edge=edge,
-                                 location=int(va_edge_info[edge][0])))
+            # [v5 M2] AGVs park at the station, as in parallel_env.
+            _loc = (int(n_machine) + int(edge) if _lu_station
+                    else int(va_edge_info[edge][0]))
+            agvs.append(AgvState(idx=k, edge=edge, location=_loc))
+
+    if _lu_station:
+        try:
+            from agv.state import m2_node_dist, transport_timing_m2
+        except ImportError:
+            from plcsp_v5.agv.state import m2_node_dist, transport_timing_m2
+
+        # Machine -> workshop map, and the M2 distance table:
+        # machines 0..m-1, stations m..m+e-1.  The table mirrors
+        # m2_node_dist but is total, because the AGV actor reads the
+        # distance of every AGV, including AGVs of other workshops.
+        _m_edge = np.zeros(n_machine, dtype=int)
+        for _w in range(len(va_edge_info)):
+            for _m in va_edge_info[_w]:
+                _m_edge[int(_m)] = _w
+        _n_node = n_machine + len(va_edge_info)
+        _tt_m2 = np.zeros((_n_node, _n_node), dtype=np.float64)
+        _tt_m2[:n_machine, :n_machine] = np.asarray(
+            va_ability_tt, dtype=np.float64)
+        _tt_m2[n_machine:, n_machine:] = np.asarray(
+            _lu_e, dtype=np.float64)
+        for _i in range(n_machine):
+            _tt_m2[_i, n_machine + _m_edge[_i]] = float(_lu_m[_i])
+            _tt_m2[n_machine + _m_edge[_i], _i] = float(_lu_m[_i])
+        # Workshop members plus its own station, so va_select_agv maps a
+        # station pickup to its workshop.
+        _ei_m2 = [list(int(x) for x in _members) + [n_machine + _e]
+                  for _e, _members in enumerate(va_edge_info)]
+
+        def _travel_m2(a, b):
+            return m2_node_dist(
+                a, b, lambda x, y: float(va_ability_tt[int(x)][int(y)]),
+                n_machine, _m_edge, _lu_m, _lu_e)
 
     _agv_failure_rng = np.random.default_rng(
         int(configs.get('failure_seed', 0)) + 2000)
@@ -505,7 +558,101 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
         # env  step
         va_joint_actions = [va_task_index.data.item(), va_action_id.data.item()] # 先把张量的数值提取出来，task_index和m_idx
         # [v5] per-workshop fleets; an AGV never crosses an edge.
-        if use_agv and prev_m >= 0 and prev_m != va_joint_actions[1]:
+        # [v5 M2] station-based transport.  Reference:
+        # parallel_env._apply_m2_transport.
+        if _lu_station:
+            _task = int(va_joint_actions[0])
+            _drop = int(va_joint_actions[1])
+            _dropoff_edge = int(_m_edge[_drop])
+            _first = prev_m < 0
+            if _first:
+                # A job enters at the station of its first workshop.
+                _pickup = int(n_machine) + _dropoff_edge
+                _pickup_edge = _dropoff_edge
+                _ready = 0.0
+            else:
+                _pickup = int(prev_m)
+                _pickup_edge = int(_m_edge[_pickup])
+                _ready = now_ready
+            if (not _first) and prev_m == _drop:
+                # No transport: same machine.  Empty overrides keep the gap
+                # search on the stored start times (progress-log §135).
+                va_env.G.graph["transport_wait_override"] = {}
+                va_env.G.graph["transport_extra"] = {}
+            else:
+                _top_agv_rule = (bool(args.get('agv_top_rule', 0))
+                                 and _top_agv is not None)
+                _agv_rid = (int(_top_agv[0].item())
+                            if _top_agv is not None else None)
+                _agv, _ = va_select_agv(
+                    ppo, agvs, _pickup, _drop, _tt_m2, _ei_m2, _ready,
+                    greedy,
+                    agv_rule=bool(args.get('agv_rule', 0)),
+                    rule_id=_agv_rid,
+                    rule_alpha=float(args.get('hier_alpha', 0.0)),
+                    top_rule_arm=_top_agv_rule)
+                _dst = None
+                if _pickup_edge != _dropoff_edge:
+                    _dst_agvs = [a for a in agvs if a.edge == _dropoff_edge]
+                    if not _dst_agvs:
+                        raise ValueError(
+                            f"workshop edge {_dropoff_edge} has no AGV")
+                    _boundary_machine = int(n_machine) + int(_dropoff_edge)
+                    if (configs.get('agv_dst_actor', 1)
+                            and not configs.get('agv_rule', 0)
+                            and hasattr(ppo, 'agv_actor')):
+                        _src_start = max(_ready, float(_agv.free_time))
+                        _boundary_time = (
+                            _src_start
+                            + _travel_m2(_agv.location, _pickup)
+                            + float(_lu_m[_pickup])
+                            + float(_lu_e[_pickup_edge][_dropoff_edge]))
+                        _dst, _ = va_select_agv(
+                            ppo, agvs, _boundary_machine, _drop,
+                            _tt_m2, _ei_m2, _boundary_time, greedy,
+                            agv_rule=False,
+                            rule_id=_agv_rid,
+                            rule_alpha=float(args.get('hier_alpha', 0.0)),
+                            top_rule_arm=_top_agv_rule)
+                    else:
+                        _dst = min(_dst_agvs, key=lambda a: a.free_time)
+                _repair = 0.0
+                if configs.get('agv_failure', 0):
+                    _repair = sample_repair(
+                        _agv_failure_rng,
+                        (_travel_m2(_pickup, _drop) if _dst is None
+                         else float(_lu_m[_pickup])),
+                        configs.get('agv_mtbf', 100.0),
+                        configs.get('agv_mttr', 10.0))
+                _timing = transport_timing_m2(
+                    _agv, _pickup, _drop, _ready, _travel_m2,
+                    n_machine, _m_edge, _lu_m, _lu_e,
+                    dst=_dst, src_repair=_repair)
+                _travel = _timing["loaded"]
+                _wait = _timing["wait"]
+                _empty = _timing["empty"]
+                _agv.free_time = _timing["src_free"]
+                _agv.location = _timing["src_location"]
+                _agv.travelled += _timing["src_travelled"]
+                if _dst is not None:
+                    _dst.free_time = _timing["dst_free"]
+                    _dst.location = _timing["dst_location"]
+                    _dst.travelled += _timing["dst_travelled"]
+                if _first:
+                    # Node ids are 1-based; the action index is 0-based.
+                    _arrival = (_timing["dst_free"] if _dst is not None
+                                else _timing["src_free"])
+                    va_env.G.graph.setdefault(
+                        "ready_override", {})[_task + 1] = float(_arrival)
+                    va_env.G.graph.setdefault(
+                        "transport_extra", {})[_task] = _travel + RHO_EMPTY * _empty
+                else:
+                    _edge = (_task, _task + 1)
+                    va_env.G.graph["transport_override"] = {_edge: _travel}
+                    va_env.G.graph["transport_wait_override"] = {_edge: _wait}
+                    va_env.G.graph.setdefault(
+                        "transport_extra", {})[_task] = RHO_EMPTY * _empty
+        elif use_agv and prev_m >= 0 and prev_m != va_joint_actions[1]:
             _drop = int(va_joint_actions[1])
             _total = float(va_ability_tt[prev_m][_drop])
             _pickup_edge = 0
@@ -602,6 +749,8 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
         if use_agv:
             va_env.G.graph.pop("transport_override", None)
             va_env.G.graph.pop("transport_wait_override", None)
+            va_env.G.graph.pop("transport_extra", None)
+            va_env.G.graph.pop("ready_override", None)
 
         """更新选择task节点之后的candidate和mask,(self, paralenv, action_batch, mask_value)"""
         """
@@ -875,6 +1024,16 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
                 configs=configs
                 )
 
+    # [v5 M2] station distances; None for old pickles.  same_samples slices
+    # the last 100 samples, so its lu index follows the same offset.
+    _lu_idx = data_index
+    if data_type == "same_samples":
+        _lu_idx = len(data) - 100 + data_index
+    _lu_m = (None if getattr(data, "lu_machine", None) is None
+             else data.lu_machine[_lu_idx])
+    _lu_e = (None if getattr(data, "lu_edge", None) is None
+             else data.lu_edge[_lu_idx])
+
     """
     1、邻居矩阵adj = tasks * tasks
     2、各个task节点的节点特征向量 = tasks * 12 
@@ -893,6 +1052,12 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
     # transport accounting as training, with the earliest-free AGV rule.
     # This keeps the validation distribution aligned with training.
     use_agv = bool(getattr(ppo, 'use_agv', False))
+    # [v5 M2] station-based transport, mirroring parallel_env.
+    _lu_station = bool((args or {}).get('lu_station', 0)) and use_agv
+    if _lu_station and (_lu_m is None or _lu_e is None):
+        raise ValueError(
+            "--lu_station 1 needs instances with load/unload stations; "
+            "regenerate the instance pool")
     n_agv = int(configs.get('n_agv', 6))
     cross_delay = float(configs.get('cross_delay', 5.0))
     cross_leg_ratio = float(configs.get('cross_leg_ratio', 0.5))
@@ -900,15 +1065,52 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
     if use_agv:
         try:
             from agv.state import (AgvState, split_cross_edge,
+                                   RHO_EMPTY,
                                    transport_timing)
         except ImportError:
-            from plcsp_v5.agv.state import (AgvState, split_cross_edge,
+            from plcsp_v5.agv.state import (AgvState, RHO_EMPTY,
+                                            split_cross_edge,
                                             transport_timing)
         n_edge = len(va_edge_info)
         for k in range(n_agv):
             edge = k % n_edge
-            agvs.append(AgvState(idx=k, edge=edge,
-                                 location=int(va_edge_info[edge][0])))
+            # [v5 M2] AGVs park at the station, as in parallel_env.
+            _loc = (int(n_machine) + int(edge) if _lu_station
+                    else int(va_edge_info[edge][0]))
+            agvs.append(AgvState(idx=k, edge=edge, location=_loc))
+
+    if _lu_station:
+        try:
+            from agv.state import m2_node_dist, transport_timing_m2
+        except ImportError:
+            from plcsp_v5.agv.state import m2_node_dist, transport_timing_m2
+
+        # Machine -> workshop map, and the M2 distance table:
+        # machines 0..m-1, stations m..m+e-1.  The table mirrors
+        # m2_node_dist but is total, because the AGV actor reads the
+        # distance of every AGV, including AGVs of other workshops.
+        _m_edge = np.zeros(n_machine, dtype=int)
+        for _w in range(len(va_edge_info)):
+            for _m in va_edge_info[_w]:
+                _m_edge[int(_m)] = _w
+        _n_node = n_machine + len(va_edge_info)
+        _tt_m2 = np.zeros((_n_node, _n_node), dtype=np.float64)
+        _tt_m2[:n_machine, :n_machine] = np.asarray(
+            va_ability_tt, dtype=np.float64)
+        _tt_m2[n_machine:, n_machine:] = np.asarray(
+            _lu_e, dtype=np.float64)
+        for _i in range(n_machine):
+            _tt_m2[_i, n_machine + _m_edge[_i]] = float(_lu_m[_i])
+            _tt_m2[n_machine + _m_edge[_i], _i] = float(_lu_m[_i])
+        # Workshop members plus its own station, so va_select_agv maps a
+        # station pickup to its workshop.
+        _ei_m2 = [list(int(x) for x in _members) + [n_machine + _e]
+                  for _e, _members in enumerate(va_edge_info)]
+
+        def _travel_m2(a, b):
+            return m2_node_dist(
+                a, b, lambda x, y: float(va_ability_tt[int(x)][int(y)]),
+                n_machine, _m_edge, _lu_m, _lu_e)
 
     _agv_failure_rng = np.random.default_rng(
         int(configs.get('failure_seed', 0)) + 2000)
@@ -1003,7 +1205,91 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
         # env  step
         va_joint_actions = [va_task_index.data.item(), va_action_id.data.item()] # 先把张量的数值提取出来，task_index和m_idx
         # [v5] per-workshop fleets; an AGV never crosses an edge.
-        if use_agv and prev_m >= 0 and prev_m != va_joint_actions[1]:
+        # [v5 M2] station-based transport.  Reference:
+        # parallel_env._apply_m2_transport.
+        if _lu_station:
+            _task = int(va_joint_actions[0])
+            _drop = int(va_joint_actions[1])
+            _dropoff_edge = int(_m_edge[_drop])
+            _first = prev_m < 0
+            if _first:
+                # A job enters at the station of its first workshop.
+                _pickup = int(n_machine) + _dropoff_edge
+                _pickup_edge = _dropoff_edge
+                _ready = 0.0
+            else:
+                _pickup = int(prev_m)
+                _pickup_edge = int(_m_edge[_pickup])
+                _ready = now_ready
+            if (not _first) and prev_m == _drop:
+                # No transport: same machine.  Empty overrides keep the gap
+                # search on the stored start times (progress-log §135).
+                va_env.G.graph["transport_wait_override"] = {}
+                va_env.G.graph["transport_extra"] = {}
+            else:
+                _agv, _ = va_select_agv(
+                    ppo, agvs, _pickup, _drop, _tt_m2, _ei_m2, _ready,
+                    greedy,
+                    agv_rule=bool(args.get('agv_rule', 0)))
+                _dst = None
+                if _pickup_edge != _dropoff_edge:
+                    _dst_agvs = [a for a in agvs if a.edge == _dropoff_edge]
+                    if not _dst_agvs:
+                        raise ValueError(
+                            f"workshop edge {_dropoff_edge} has no AGV")
+                    _boundary_machine = int(n_machine) + int(_dropoff_edge)
+                    if (configs.get('agv_dst_actor', 1)
+                            and not configs.get('agv_rule', 0)
+                            and hasattr(ppo, 'agv_actor')):
+                        _src_start = max(_ready, float(_agv.free_time))
+                        _boundary_time = (
+                            _src_start
+                            + _travel_m2(_agv.location, _pickup)
+                            + float(_lu_m[_pickup])
+                            + float(_lu_e[_pickup_edge][_dropoff_edge]))
+                        _dst, _ = va_select_agv(
+                            ppo, agvs, _boundary_machine, _drop,
+                            _tt_m2, _ei_m2, _boundary_time, greedy,
+                            agv_rule=False)
+                    else:
+                        _dst = min(_dst_agvs, key=lambda a: a.free_time)
+                _repair = 0.0
+                if configs.get('agv_failure', 0):
+                    _repair = sample_repair(
+                        _agv_failure_rng,
+                        (_travel_m2(_pickup, _drop) if _dst is None
+                         else float(_lu_m[_pickup])),
+                        configs.get('agv_mtbf', 100.0),
+                        configs.get('agv_mttr', 10.0))
+                _timing = transport_timing_m2(
+                    _agv, _pickup, _drop, _ready, _travel_m2,
+                    n_machine, _m_edge, _lu_m, _lu_e,
+                    dst=_dst, src_repair=_repair)
+                _travel = _timing["loaded"]
+                _wait = _timing["wait"]
+                _empty = _timing["empty"]
+                _agv.free_time = _timing["src_free"]
+                _agv.location = _timing["src_location"]
+                _agv.travelled += _timing["src_travelled"]
+                if _dst is not None:
+                    _dst.free_time = _timing["dst_free"]
+                    _dst.location = _timing["dst_location"]
+                    _dst.travelled += _timing["dst_travelled"]
+                if _first:
+                    # Node ids are 1-based; the action index is 0-based.
+                    _arrival = (_timing["dst_free"] if _dst is not None
+                                else _timing["src_free"])
+                    va_env.G.graph.setdefault(
+                        "ready_override", {})[_task + 1] = float(_arrival)
+                    va_env.G.graph.setdefault(
+                        "transport_extra", {})[_task] = _travel + RHO_EMPTY * _empty
+                else:
+                    _edge = (_task, _task + 1)
+                    va_env.G.graph["transport_override"] = {_edge: _travel}
+                    va_env.G.graph["transport_wait_override"] = {_edge: _wait}
+                    va_env.G.graph.setdefault(
+                        "transport_extra", {})[_task] = RHO_EMPTY * _empty
+        elif use_agv and prev_m >= 0 and prev_m != va_joint_actions[1]:
             _drop = int(va_joint_actions[1])
             _total = float(va_ability_tt[prev_m][_drop])
             _pickup_edge = 0
@@ -1089,6 +1375,8 @@ def esa_validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data
         if use_agv:
             va_env.G.graph.pop("transport_override", None)
             va_env.G.graph.pop("transport_wait_override", None)
+            va_env.G.graph.pop("transport_extra", None)
+            va_env.G.graph.pop("ready_override", None)
 
         """更新选择task节点之后的candidate和mask,(self, paralenv, action_batch, mask_value)"""
         """

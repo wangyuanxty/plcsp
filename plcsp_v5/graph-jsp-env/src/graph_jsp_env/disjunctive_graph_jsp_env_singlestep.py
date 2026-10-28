@@ -199,6 +199,14 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
         """
         
         self.configs = Variant(**configs)  # 将字典转换为Variant实例
+        # [v5] Machine-idle reading: "trailing" = sum_k (MKT - P_k),
+        # "gap" = leading idle plus internal gaps (old behaviour).
+        try:
+            from agv.state import resolve_idle_mode
+        except ImportError:
+            from plcsp_v5.agv.state import resolve_idle_mode
+        self.idle_mode = resolve_idle_mode(
+            getattr(self.configs, 'idle_mode', None))
         # [v5] Stage-0 machine failure: repair delay on the selected machine.
         self.machine_failure = bool(getattr(self.configs, 'machine_failure', 0))
         self.machine_mtbf = float(getattr(self.configs, 'machine_mtbf', 100.0))
@@ -864,7 +872,7 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
         1、就是从self.machine_routes中求和空白
         2、可能会包含：运输时间t + 某个task的dur加工时间
         """
-        self.idle_t_this_step = calculate_idle_t_for_each_machine(self.G, self.machine_routes, self.instance_p2) #基于已选的m的空闲时间总和，是累加的！！！！！！！！！ TODO 1113-新增了空闲功率
+        self.idle_t_this_step = calculate_idle_t_for_each_machine(self.G, self.machine_routes, self.instance_p2, idle_mode=self.idle_mode) #基于已选的m的空闲时间总和（每步都从machine_routes重算）
         # print("当前step的：已分配的m的所有空闲时间之和：", self.idle_t_this_step)
         """print("计算空闲时间时的machine_route = ", self.machine_routes)"""
 
@@ -884,6 +892,11 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
         else: # 既然选到了中间位置的task，其前置task必定被选，不然不满足先后工序！！！
             # TODO 上一个task 和 当前task，是否会有运输时间！函数中会始终判断都是同一个job的！！！ 前置必然被选，此时的运输就是新增的运输时间
             new_avail_transT = find_transportT(self.G, joint_action[0], (joint_action[0]+1), self.instance_transT, self.configs) # action+1=当前的task_id，所以action=上一个的task_id
+        # [v5 M2] AGV travel that has no job edge: empty deadhead on a normal
+        # step, and both legs when a job enters the shop at a station.
+        extra = getattr(self.G, "graph", {}).get("transport_extra", None)
+        if isinstance(extra, dict):
+            new_avail_transT += float(extra.get(int(joint_action[0]), 0.0))
         self.trans_t_this_step += new_avail_transT
 
         """
@@ -2589,4 +2602,3 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
             return [True in job_mask for job_mask in masks_per_job]
         else:
             raise ValueError(f"only 'task' and 'job' are valid arguments for 'action_mode'. {action_mode} is not.")
-

@@ -26,11 +26,19 @@ import json
 import math
 import pickle
 import random
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+
+try:  # scripts add ``plcsp_v5/`` to ``sys.path``
+    from agv.state import (DEFAULT_IDLE_MODE, idle_cost,
+                           resolve_idle_mode)
+except ImportError:  # repository root only
+    from plcsp_v5.agv.state import (DEFAULT_IDLE_MODE, idle_cost,
+                                    resolve_idle_mode)
 
 N_AGV = 6
 CROSS_DELAY = 5.0
@@ -55,8 +63,14 @@ def split_cross(total, delay=CROSS_DELAY, ratio=LEG_RATIO):
     return src, d, rem - src
 
 
-def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV):
-    """Decode an operation sequence + machine assignment into v5 costs."""
+def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV,
+           idle_mode=DEFAULT_IDLE_MODE):
+    """Decode an operation sequence + machine assignment into v5 costs.
+
+    ``idle_mode="trailing"`` charges ``sum_k (MKT - P_k)``; ``"gap"``
+    keeps the old leading-plus-gaps reading.
+    """
+    idle_mode = resolve_idle_mode(idle_mode)
     n_task, n_machine = t.shape
     n_job = n_task // n_machine
     n_ops = n_machine
@@ -77,6 +91,7 @@ def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV):
     finish = [0.0] * n_task
     start = [0.0] * n_task
     routes = {m: [] for m in range(n_machine)}
+    proc_on_machine = [0.0] * n_machine
     proc_energy = 0.0
     trans_total = 0.0
 
@@ -152,16 +167,18 @@ def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV):
         route.insert(pos, (st, st + dur, task))
         start[task] = st
         finish[task] = st + dur
+        proc_on_machine[m] += dur
         proc_energy += float(t[task][m]) * float(p[task][m])
 
     mk = max(finish)
-    idle = 0.0
+    gap_idle = 0.0
     for m, route in routes.items():
         if not route:
             continue
-        idle += route[0][0]
+        gap_idle += route[0][0]
         for k in range(len(route) - 1):
-            idle += route[k + 1][0] - route[k][1]
+            gap_idle += route[k + 1][0] - route[k][1]
+    idle = idle_cost(idle_mode, gap_idle, proc_on_machine, mk)
     obj = W_MK * mk + W_EC * (proc_energy / n_task + idle) + W_TT * trans_total
     return {"mk": mk, "pt": proc_energy, "transT": trans_total,
             "idleT": idle, "obj": obj,
@@ -233,6 +250,162 @@ def pdr_schedule(t, p, job_rule, machine_rule):
     return os_seq, ms
 
 
+def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
+              n_agv=N_AGV, idle_mode=DEFAULT_IDLE_MODE):
+    """M2 decoder: load/unload stations, entry transport, empty travel.
+
+    The objective counts loaded and empty AGV travel at unit power.
+    ``idle_mode`` follows ``decode``.
+    """
+    idle_mode = resolve_idle_mode(idle_mode)
+    try:
+        from agv.state import m2_node_dist, RHO_EMPTY
+    except ImportError:
+        from plcsp_v5.agv.state import m2_node_dist, RHO_EMPTY
+
+    n_task, n_machine = t.shape
+    n_job = n_task // n_machine
+    n_ops = n_machine
+    n_edge = len(edge_info)
+
+    machine_edge = np.zeros(n_machine, dtype=int)
+    for w in range(n_edge):
+        for m_ in edge_info[w]:
+            machine_edge[int(m_)] = w
+
+    def travel(a, b):
+        if a < 0 or b < 0:
+            return 0.0
+        return float(tt[int(a)][int(b)])
+
+    def dist(a, b):
+        return m2_node_dist(a, b, travel, n_machine, machine_edge,
+                            lu_machine, lu_edge)
+
+    station = [int(n_machine) + w for w in range(n_edge)]
+    agvs = [[k % n_edge, station[k % n_edge], 0.0] for k in range(n_agv)]
+
+    op_count = [0] * n_job
+    finish = [0.0] * n_task
+    start = [0.0] * n_task
+    routes = {m: [] for m in range(n_machine)}
+    proc_on_machine = [0.0] * n_machine
+    proc_energy = 0.0
+    loaded_total = 0.0
+    empty_total = 0.0
+
+    for j in os_seq:
+        j = int(j)
+        oi = op_count[j]
+        task = j * n_ops + oi
+        m = int(ms[task])
+        dur = float(t[task][m])
+        if dur < 0:
+            raise ValueError(f"task {task} cannot use machine {m}")
+        op_count[j] += 1
+        de = int(machine_edge[m])
+
+        if oi == 0:
+            prev_ft = 0.0
+            prev_m = -1
+            pickup = station[de]
+            pe = de
+        else:
+            prev_task = task - 1
+            prev_m = int(ms[prev_task])
+            prev_ft = finish[prev_task]
+            pickup = prev_m
+            pe = int(machine_edge[prev_m])
+
+        if oi > 0 and prev_m == m:
+            ready = prev_ft
+        elif pe == de:
+            src_idx = [k for k, a in enumerate(agvs) if a[0] == pe]
+            if not src_idx:
+                raise ValueError(f"workshop {pe} has no AGV")
+            src = min(src_idx, key=lambda k: (agvs[k][2], k))
+            start_src = max(prev_ft, agvs[src][2])
+            dead = dist(agvs[src][1], pickup)
+            loaded = dist(pickup, m)
+            finish_src = start_src + dead + loaded
+            agvs[src][2] = finish_src
+            agvs[src][1] = m
+            loaded_total += loaded
+            empty_total += dead
+            ready = finish_src
+        else:
+            src_idx = [k for k, a in enumerate(agvs) if a[0] == pe]
+            dst_idx = [k for k, a in enumerate(agvs) if a[0] == de]
+            if not src_idx:
+                raise ValueError(f"workshop {pe} has no AGV")
+            if not dst_idx:
+                raise ValueError(f"workshop {de} has no AGV")
+            src = min(src_idx, key=lambda k: (agvs[k][2], k))
+            dst = min(dst_idx, key=lambda k: (agvs[k][2], k))
+            start_src = max(prev_ft, agvs[src][2])
+            dead_src = dist(agvs[src][1], pickup)
+            t_src = float(lu_machine[pickup])
+            src_arrival = start_src + dead_src + t_src
+            boundary = src_arrival + float(lu_edge[pe][de])
+            start_dst = max(boundary, agvs[dst][2])
+            dead_dst = dist(agvs[dst][1], station[de])
+            t_dst = float(lu_machine[m])
+            finish_dst = start_dst + dead_dst + t_dst
+            agvs[src][2] = src_arrival
+            agvs[src][1] = station[pe]
+            agvs[dst][2] = finish_dst
+            agvs[dst][1] = m
+            loaded_total += t_src + t_dst
+            empty_total += dead_src + dead_dst
+            ready = finish_dst
+
+        route = routes[m]
+        pos = len(route)
+        for k in range(len(route) + 1):
+            prev_ft_r = route[k - 1][1] if k > 0 else 0.0
+            next_st = route[k][0] if k < len(route) else math.inf
+            st = max(ready, prev_ft_r)
+            if st + dur <= next_st:
+                pos = k
+                break
+        route.insert(pos, (st, st + dur, task))
+        start[task] = st
+        finish[task] = st + dur
+        proc_on_machine[m] += dur
+        proc_energy += float(t[task][m]) * float(p[task][m])
+
+    mk = max(finish)
+    gap_idle = 0.0
+    for m, route in routes.items():
+        if not route:
+            continue
+        gap_idle += route[0][0]
+        for k in range(len(route) - 1):
+            gap_idle += route[k + 1][0] - route[k][1]
+    idle = idle_cost(idle_mode, gap_idle, proc_on_machine, mk)
+    trans_total = loaded_total + RHO_EMPTY * empty_total
+    obj = W_MK * mk + W_EC * (proc_energy / n_task + idle) + W_TT * trans_total
+    return {"mk": mk, "pt": proc_energy, "transT": trans_total,
+            "loaded": loaded_total, "empty": empty_total,
+            "idleT": idle, "obj": obj,
+            "start": start, "finish": finish}
+
+
+def score_schedule(t, p, tt, edge_info, os_seq, ms, agv=True,
+                   lu_machine=None, lu_edge=None,
+                   idle_mode=DEFAULT_IDLE_MODE):
+    """Score one schedule with the M1 decoder or the M2 decoder.
+
+    ``decode_m2`` is selected when ``lu_machine`` is given; ``--lu 0``
+    therefore keeps the original ``decode`` path unchanged.
+    """
+    if lu_machine is not None:
+        return decode_m2(t, p, tt, edge_info, lu_machine, lu_edge,
+                         os_seq, ms, idle_mode=idle_mode)
+    return decode(t, p, tt, edge_info, os_seq, ms, agv=agv,
+                  idle_mode=idle_mode)
+
+
 def ra_schedule(t, rng):
     n_task, n_machine = t.shape
     n_job = n_task // n_machine
@@ -272,7 +445,9 @@ def _pox(a, b, rng):
 
 
 def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
-                 return_schedule=False):
+                 return_schedule=False, lu_machine=None, lu_edge=None,
+                 idle_mode=DEFAULT_IDLE_MODE):
+    idle_mode = resolve_idle_mode(idle_mode)
     rng = random.Random(seed)
     n_task, n_machine = t.shape
     n_job = n_task // n_machine
@@ -280,7 +455,10 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
     base_os = [j for j in range(n_job) for _ in range(n_ops)]
 
     def cost(os_seq, ms):
-        return decode(t, p, tt, edge_info, os_seq, ms, agv=agv)["obj"]
+        return score_schedule(
+            t, p, tt, edge_info, os_seq, ms, agv=agv,
+            lu_machine=lu_machine, lu_edge=lu_edge,
+            idle_mode=idle_mode)["obj"]
 
     population = []
     for _ in range(pop):
@@ -312,7 +490,9 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
         new.sort(key=lambda x: x[2])
         population = new
     best = population[0]
-    out = decode(t, p, tt, edge_info, best[0], best[1], agv=agv)
+    out = score_schedule(t, p, tt, edge_info, best[0], best[1], agv=agv,
+                         lu_machine=lu_machine, lu_edge=lu_edge,
+                         idle_mode=idle_mode)
     result = {"obj": out["obj"], "mk": out["mk"], "pt": out["pt"],
               "transT": out["transT"], "idleT": out["idleT"],
               "n_eval": n_eval}
@@ -334,23 +514,30 @@ def _cost_fields(out):
 
 def _worker(args):
     kind, data, params = args
-    t, p, tt, edge_info = data
+    t, p, tt, edge_info = data[:4]
+    lu_machine = data[4] if len(data) > 4 else None
+    lu_edge = data[5] if len(data) > 5 else None
     if kind == "pdr":
-        inst, jr, mr, agv = params
+        inst, jr, mr, agv, idle_mode = params
         os_seq, ms = pdr_schedule(t, p, jr, mr)
-        out = decode(t, p, tt, edge_info, os_seq, ms, agv=agv)
+        out = score_schedule(t, p, tt, edge_info, os_seq, ms, agv=agv,
+                             lu_machine=lu_machine, lu_edge=lu_edge,
+                             idle_mode=idle_mode)
         return {"instance": inst, "job_rule": jr, "machine_rule": mr,
                 **_cost_fields(out)}
     if kind == "ra":
-        inst, seed, agv = params
+        inst, seed, agv, idle_mode = params
         rng = random.Random(seed)
         os_seq, ms = ra_schedule(t, rng)
-        out = decode(t, p, tt, edge_info, os_seq, ms, agv=agv)
+        out = score_schedule(t, p, tt, edge_info, os_seq, ms, agv=agv,
+                             lu_machine=lu_machine, lu_edge=lu_edge,
+                             idle_mode=idle_mode)
         return {"instance": inst, "seed": seed, **_cost_fields(out)}
     if kind == "rga":
         p_params = dict(params)
         inst = p_params.pop("instance")
         seed = int(p_params["seed"])
+        p_params.setdefault("idle_mode", DEFAULT_IDLE_MODE)
         out = rga_instance(t, p, tt, edge_info, **p_params)
         return {"instance": inst, "seed": seed, **_cost_fields(out),
                 "n_eval": int(out["n_eval"])}
@@ -387,6 +574,33 @@ def _rga_summary(records, n_instances, seeds, wall):
             "wall_s": wall}
 
 
+def _ensure_m2_import_path():
+    """Make ``plcsp_v5.agv.state`` importable when run as a script."""
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def _load_pool(path, lu):
+    """Load one instance pool; return per-instance tuples.
+
+    With ``lu`` the pool has six arrays, the last two being
+    ``lu_machine`` (n_machine,) and ``lu_edge`` (n_edge, n_edge).
+    """
+    with open(path, "rb") as fh:
+        data = pickle.load(fh)
+    if lu:
+        if len(data) != 6:
+            raise SystemExit(
+                f"{path} has {len(data)} arrays; --lu 1 needs the six-array "
+                "_lu pool (t, p, tt, edge_info, lu_machine, lu_edge)")
+        t_all, p_all, tt_all, edge_all, lu_m_all, lu_e_all = data
+    else:
+        t_all, p_all, tt_all, edge_all = data
+        lu_m_all = lu_e_all = None
+    return t_all, p_all, tt_all, edge_all, lu_m_all, lu_e_all
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", default="plcsp_v5/instance/test_Instance_J6M6E2.pkl")
@@ -397,34 +611,66 @@ def main():
     ap.add_argument("--gen", type=int, default=100)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--agv", type=int, default=1)
+    ap.add_argument("--lu", type=int, default=0,
+                    help="1 = score with decode_m2 (load/unload stations)")
+    ap.add_argument("--idle_mode", choices=["trailing", "gap"],
+                    default=DEFAULT_IDLE_MODE,
+                    help="machine-idle term: trailing = sum_k (MKT - P_k), "
+                         "gap = leading idle plus internal gaps (old)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
-    data = pickle.load(open(args.instances, "rb"))
-    t_all, p_all, tt_all, edge_all = data
+    lu = bool(args.lu)
+    if lu and not args.agv:
+        ap.error("--lu 1 requires AGVs; use --agv 1")
+    if lu and args.out and "m2" not in Path(args.out).name.lower():
+        ap.error("--lu 1 results must not overwrite M1 files; "
+                 "the --out file name must contain 'm2'")
+
+    inst_path = Path(args.instances)
+    if lu and not inst_path.stem.endswith("_lu"):
+        cand = inst_path.with_name(inst_path.stem + "_lu" + inst_path.suffix)
+        if cand.exists():
+            inst_path = cand
+    if lu:
+        _ensure_m2_import_path()
+
+    t_all, p_all, tt_all, edge_all, lu_m_all, lu_e_all = _load_pool(
+        inst_path, lu)
     n = len(t_all) if args.limit <= 0 else min(args.limit, len(t_all))
     agv = bool(args.agv)
     jobs = []
+
+    def inst_data(i):
+        base = (t_all[i], p_all[i], tt_all[i], edge_all[i])
+        if lu:
+            return base + (lu_m_all[i], lu_e_all[i])
+        return base
 
     if args.mode == "pdr":
         jr = ["fifo", "mor", "lwkr_t", "lwkr_pt", "mwkr_t", "mwkr_pt"]
         mr = ["spt", "seyc"]
         for i in range(n):
-            inst = (t_all[i], p_all[i], tt_all[i], edge_all[i])
+            inst = inst_data(i)
             for a in jr:
                 for b in mr:
-                    jobs.append(("pdr", inst, (i, a, b, agv)))
+                    jobs.append(("pdr", inst,
+                                 (i, a, b, agv, args.idle_mode)))
     elif args.mode == "ra":
         for i in range(n):
-            inst = (t_all[i], p_all[i], tt_all[i], edge_all[i])
-            jobs.append(("ra", inst, (i, i, agv)))
+            inst = inst_data(i)
+            jobs.append(("ra", inst, (i, i, agv, args.idle_mode)))
     else:
         for i in range(n):
             for s in range(args.seeds):
-                inst = (t_all[i], p_all[i], tt_all[i], edge_all[i])
-                jobs.append(("rga", inst,
-                             dict(instance=i, seed=s + 1, pop=args.pop,
-                                  gen=args.gen, agv=agv)))
+                inst = inst_data(i)
+                params = dict(instance=i, seed=s + 1, pop=args.pop,
+                              gen=args.gen, agv=agv,
+                              idle_mode=args.idle_mode)
+                if lu:
+                    params.update(lu_machine=lu_m_all[i],
+                                  lu_edge=lu_e_all[i])
+                jobs.append(("rga", inst, params))
 
     t0 = time.time()
     if args.workers > 1:
@@ -445,7 +691,8 @@ def main():
     payload = {
         "mode": args.mode,
         "agv": agv,
-        "instances": args.instances,
+        "idle_mode": args.idle_mode,
+        "instances": str(inst_path) if lu else args.instances,
         "n_instances": n,
         "n_runs": len(records),
         "seeds": args.seeds if args.mode == "rga" else 1,
@@ -454,9 +701,13 @@ def main():
         "summary": summary,
         "records": records,
     }
-    print(json.dumps({"mode": args.mode, "agv": agv,
-                      "n_instances": n, "n_runs": len(records),
-                      "summary": summary}, indent=2))
+    head = {"mode": args.mode, "agv": agv, "n_instances": n,
+            "n_runs": len(records), "summary": summary}
+    if lu:
+        payload["lu"] = True
+        payload["model"] = "m2"
+        head["model"] = "m2"
+    print(json.dumps(head, indent=2))
     if args.out:
         Path(args.out).write_text(json.dumps(payload, indent=1),
                                   encoding="utf-8")

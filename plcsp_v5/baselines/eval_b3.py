@@ -86,9 +86,13 @@ def main():
     ap.add_argument("--agv", type=int, default=1)
     ap.add_argument("--limit", type=int, default=100)
     ap.add_argument("--iters", type=int, default=800)
-    ap.add_argument("--n-job", type=int, default=6)
-    ap.add_argument("--n-machine", type=int, default=6)
-    ap.add_argument("--n-edge", type=int, default=2)
+    ap.add_argument("--n-job", "--n_job", dest="n_job", type=int, default=6)
+    ap.add_argument("--n-machine", "--n_machine", dest="n_machine",
+                    type=int, default=6)
+    ap.add_argument("--n-edge", "--n_edge", dest="n_edge", type=int,
+                    default=2)
+    ap.add_argument("--lu_station", "--lu-station", dest="lu_station",
+                    type=int, default=0)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -104,6 +108,7 @@ def main():
         "cross_leg_ratio": 0.5,
         "agv_rule": 1,
         "agv_dst_actor": 0,
+        "lu_station": int(args.lu_station),
         "eval_sample": int(args.limit),
         "test_seed": 3,
         "log_to_wandb": 0,
@@ -113,8 +118,9 @@ def main():
     job, mch = _load_weights(ppo, n_job, n_machine, n_edge, args.iters)
     print(f"loaded {job.name} / {mch.name}", flush=True)
 
+    _sfx = "_lu" if int(args.lu_station) else ""
     data_path = (ROOT / "plcsp_v5" / "instance" /
-                 f"test_Instance_J{n_job}M{n_machine}E{n_edge}.pkl")
+                 f"test_Instance_J{n_job}M{n_machine}E{n_edge}{_sfx}.pkl")
     data = Instance_Dataset(generate_true=0, dataset_pth=str(data_path))
 
     records = []

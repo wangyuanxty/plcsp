@@ -732,7 +732,7 @@ DisjunctiveGraphJssEnv使用networkx库进行图形结构和图形可视化。�
         1、就是从self.machine_routes中求和空白
         2、可能会包含：运输时间t + 某个task的dur加工时间
         """
-        self.idle_t_this_step = calculate_idle_t_for_each_machine(self.G, self.machine_routes) #基于已选的m的空闲时间总和，是累加的
+        self.idle_t_this_step = calculate_idle_t_for_each_machine(self.G, self.machine_routes, None, idle_mode=getattr(self.configs, 'idle_mode', None)) #基于已选的m的空闲时间总和（每步都从machine_routes重算）
         # print("当前step的：已分配的m的所有空闲时间之和：", self.idle_t_this_step)
         """print("计算空闲时间时的machine_route = ", self.machine_routes)"""
 

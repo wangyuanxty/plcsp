@@ -290,7 +290,26 @@ class Instance_Dataset(Dataset):
                 
                 Logger.log("instances/log_csv", f"save instance in {csv_pth} path", print_true=1)
                 
-            instance = [ability_t_minus, ability_p_minus, ability_transT, ability_edge] # TODO 250418-产生的instance（lst）用来保存
+            # M2: one load/unload station per workshop.
+            #   lu_machine[s, m] = distance from machine m to its own station
+            #   lu_edge[s, a, b] = distance between the stations of a and b
+            lu_machine = np.random.uniform(low=tr_in_low, high=tr_in_high,
+                                           size=(samples, m_num))
+            lu_edge = np.zeros((samples, edge_num, edge_num))
+            for i_s in range(samples):
+                for a in range(edge_num):
+                    for b in range(a + 1, edge_num):
+                        dist = abs(a - b)
+                        v = np.random.uniform(low=tr_in_high * dist,
+                                              high=tr_out_high * dist)
+                        lu_edge[i_s, a, b] = v
+                        lu_edge[i_s, b, a] = v
+            Logger.log("instances/ability_lu",
+                       f"lu_machine={lu_machine.shape}, lu_edge={lu_edge.shape}",
+                       print_true=0)
+
+            instance = [ability_t_minus, ability_p_minus, ability_transT,
+                        ability_edge, lu_machine, lu_edge] # TODO 250418-产生的instance（lst）用来保存
             with open(pkl_pth, 'wb') as f:
                 pickle.dump(instance, f)
             Logger.log("instances/log_pkl", f"save instance in {pkl_pth}.pkl'", print_true=1)
@@ -318,6 +337,9 @@ class Instance_Dataset(Dataset):
             # self.p2 = m_p2
             self.transT = instances[2]
             self.edge = instances[3]
+            # M2 fields.  Older pickles hold only the first four arrays.
+            self.lu_machine = instances[4] if len(instances) > 5 else None
+            self.lu_edge = instances[5] if len(instances) > 5 else None
             self.size = len(self.t)  # 就是样本samples的大小
 
             # 用于测试数据: 倒数后100个数据
@@ -386,6 +408,9 @@ class Instance_Dataset(Dataset):
                             #  "p2": p2,
                              "transT": transT,
                              "edge": edge}
+        if self.lu_machine is not None:
+            self.ability_dict["lu_machine"] = self.lu_machine[idx]
+            self.ability_dict["lu_edge"] = self.lu_edge[idx]
 
         return self.ability_dict
     
@@ -401,6 +426,10 @@ if __name__ == '__main__':
         # Load config and init objects
         with open(configs_pwd, 'r') as load_f:
             conf_dict = json.load(load_f)  # json方式来加载，形成conf的字典！
+    else:
+        _here_cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config_ins.json')
+        with open(_here_cfg, 'r') as load_f:
+            conf_dict = json.load(load_f)
     
     
     # parse_dict 函数使用了 json.loads(s) 来将一个 JSON 格式的字符串 s 解析为一个 Python 字典。如果传递给 parse_dict 的字符串不符合 JSON 格式，将会引发 json.JSONDecodeError 异常。
@@ -421,6 +450,10 @@ if __name__ == '__main__':
     parser.add_argument('--train_seed', type=int, default=0, help='instance')
     parser.add_argument('--eval_seed', type=int, default=1, help='instance') 
     parser.add_argument('--test_seed', type=int, default=3, help='instance') 
+    parser.add_argument('--suffix', type=str, default='', help='appended to every instance file name')
+    parser.add_argument('--all_sizes', type=int, default=0, help='1 = generate every size in ins_size')
+    parser.add_argument('--force', type=int, default=0, help='1 = overwrite an existing instance pool')
+    parser.add_argument('--sizes', type=str, default='', help='comma-separated size filters, e.g. 10x6,10x10')
     args = parser.parse_args()   # 解析命令行参数，并将结果存储在args变量中。
     config=vars(args)  # vars内置函数，转为dict，表示参数和其值
     
@@ -428,15 +461,24 @@ if __name__ == '__main__':
     
     ins_size = [(6,6,2),(10,6,2),(20,6,3),(10,10,2),(15,10,2),(20,10,5)]
     pth = 'D:/research/DeepReinforcementLearningScheduling/plcsp_v5/instance'
+    if not os.path.isdir(pth):
+        pth = os.path.dirname(os.path.abspath(__file__))
     # with open(log_file, 'w') as file:
     #     # 不需要写入任何内容，直接打开文件就会清空它 # 打开文件以写入模式（'w'），这将清空文件内容
     #     pass
     
-    for ins_n in range(len(ins_size)-5):  # s TODO 250418-暂时只生成662的数据
+    _want = {x.strip() for x in config['sizes'].split(',') if x.strip()}
+    for ins_n in range(len(ins_size) if config['all_sizes'] else len(ins_size)-5):
+        if _want and f"{ins_size[ins_n][0]}x{ins_size[ins_n][1]}" not in _want:
+            continue  # s TODO 250418-暂时只生成662的数据
         
-        csv_pth = pth + "/ABILITY_J%sM%sE%s_instances.csv" % (ins_size[ins_n][0], ins_size[ins_n][1], ins_size[ins_n][2])
-        pkl_pth = pth + f'/Instance_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}.pkl'  
-        log_file = pth + f"/log_instance_generate_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}.txt" 
+        _sfx = config['suffix']
+        csv_pth = pth + ("/ABILITY_J%sM%sE%s_instances%s.csv" % (ins_size[ins_n][0], ins_size[ins_n][1], ins_size[ins_n][2], _sfx))
+        pkl_pth = pth + f'/Instance_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}{_sfx}.pkl'  
+        if os.path.exists(pkl_pth) and not config['force']:
+            print(f'[skip] {pkl_pth} exists; pass --force 1 to overwrite')
+            continue
+        log_file = pth + f"/log_instance_generate_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}{_sfx}.txt" 
         
         """ 
         新的Dataset：（一口气生成所有样本）
@@ -459,9 +501,9 @@ if __name__ == '__main__':
         
         logg = Logger.get_logs(log_file)  # TODO 返回所有保存的log，log是dict形式，储存的txt文件是"追加"模式，会不断很长
         
-        eval_csv_pth = pth + "/eval_ABILITY_J%sM%sE%s_instances.csv" % (ins_size[ins_n][0], ins_size[ins_n][1], ins_size[ins_n][2])
-        eval_pkl_pth = pth + f'/eval_Instance_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}.pkl'  
-        eval_log_file = pth + f"/eval_log_instance_generate_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}.txt"
+        eval_csv_pth = pth + ("/eval_ABILITY_J%sM%sE%s_instances%s.csv" % (ins_size[ins_n][0], ins_size[ins_n][1], ins_size[ins_n][2], _sfx))
+        eval_pkl_pth = pth + f'/eval_Instance_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}{_sfx}.pkl'  
+        eval_log_file = pth + f"/eval_log_instance_generate_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}{_sfx}.txt"
         
         eval_instance = Instance_Dataset(
             samples=config['eval_samples'],
@@ -477,9 +519,9 @@ if __name__ == '__main__':
         
         logg = Logger.get_logs(eval_log_file)  # TODO 返回所有保存的log，log是dict形式，储存的txt文件是"追加"模式，会不断很长
         
-        test_csv_pth = pth + "/test_ABILITY_J%sM%sE%s_instances.csv" % (ins_size[ins_n][0], ins_size[ins_n][1], ins_size[ins_n][2])
-        test_pkl_pth = pth + f'/test_Instance_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}.pkl'  
-        test_log_file = pth + f"/test_log_instance_generate_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}.txt"
+        test_csv_pth = pth + ("/test_ABILITY_J%sM%sE%s_instances%s.csv" % (ins_size[ins_n][0], ins_size[ins_n][1], ins_size[ins_n][2], _sfx))
+        test_pkl_pth = pth + f'/test_Instance_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}{_sfx}.pkl'  
+        test_log_file = pth + f"/test_log_instance_generate_J{ins_size[ins_n][0]}M{ins_size[ins_n][1]}E{ins_size[ins_n][2]}{_sfx}.txt"
         
         test_instance = Instance_Dataset(
             samples=config['eval_samples'],   # test和eval的数据集的大小是一样的

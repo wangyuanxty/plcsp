@@ -41,13 +41,27 @@ V5_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 
+def _group_lambda_on(variant):
+    """True when the group shares one lambda.
+
+    ``--group_lambda -1`` keeps the historical behaviour (GRPO shares one
+    lambda per group, PPO samples one per env).  ``0`` and ``1`` override it,
+    which is what the critic-isolation control needs: PPO with one lambda per
+    group.
+    """
+    flag = int(variant.get('group_lambda', -1))
+    if flag >= 0:
+        return bool(flag)
+    return variant.get('algo', 'ppo') == 'grpo'
+
+
 def _current_weights(paral_env, variant):
     """Per-env preference weights.
 
-    GRPO uses one group lambda shared by all envs.  PPO keeps a separate
+    A group lambda is shared by all envs.  Otherwise PPO keeps a separate
     sampled ``reward_random_weight`` per env.
     """
-    if variant.get('algo', 'ppo') == 'grpo':
+    if _group_lambda_on(variant):
         w = np.array([variant['weight_mk'], variant['weight_ec'],
                       variant['weight_tt']], dtype=np.float32)
         return np.tile(w, (variant['env_batch'], 1))
@@ -159,15 +173,17 @@ def experiment(
             raise ValueError(
                 "GRPO needs resample_freq == buffer_size "
                 "(one group = G rollouts on the same instances)")
-        # GRPO samples one lambda per group and injects it through configs.
-        # The env reset mode must read configs, hence 'eval'.
+    if _group_lambda_on(variant):
+        # One lambda per group is injected through configs.  The env reset
+        # mode must read configs, hence 'eval'.
         variant['random_weight_type'] = 'eval'
     pth = os.path.join(V5_ROOT, 'instance')
-    dataset_path = pth + f"/Instance_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}.pkl"
+    _dsfx = "_lu" if int(variant.get("lu_station", 0)) else ""
+    dataset_path = pth + f"/Instance_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}{_dsfx}.pkl"
     train_instance = Instance_Dataset(  # TODO def的所有形参都默认值，这里传入可以只选择要改的值！
             generate_true=0,    # TODO generate_true=0直接读取文件的地址，不需要其他参数
             dataset_pth=dataset_path)  
-    eval_dataset_path = pth + f"/eval_Instance_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}.pkl"
+    eval_dataset_path = pth + f"/eval_Instance_J{variant['n_job']}M{variant['n_machine']}E{variant['n_edge']}{_dsfx}.pkl"
     eval_instance = Instance_Dataset(  # TODO def的所有形参都默认值，这里传入可以只选择要改的值！
             generate_true=0,    # TODO generate_true=0直接读取文件的地址，不需要其他参数
             dataset_pth=eval_dataset_path)
@@ -395,7 +411,7 @@ def experiment(
     
     for i_episode in range(resume_episode, variant['episode_num']):
         # [v5 grpo] one lambda per group: fixed inside G rollouts, random across groups.
-        if variant.get('algo', 'ppo') == 'grpo' and not group_costs:
+        if _group_lambda_on(variant) and not group_costs:
             _w = np.random.rand(3)
             _w = _w / _w.sum()
             variant['weight_mk'], variant['weight_ec'], variant['weight_tt'] = map(float, _w)

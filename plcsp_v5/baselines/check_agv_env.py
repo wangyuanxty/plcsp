@@ -117,6 +117,38 @@ def _actions(os_seq, ms, n_ops):
     return actions
 
 
+def run_env_m2(t, p, tt, edge, lu_m, lu_e, os_seq, ms, n_agv=6):
+    """Same harness with the station-based transport model."""
+    variant = _variant(t, len(edge), 1, n_agv)
+    variant["lu_station"] = 1
+    pe = Parallel_env(args=variant)
+    pe.get_batch({
+        "t": torch.from_numpy(t[None, ...]).float(),
+        "p": torch.from_numpy(p[None, ...]).float(),
+        "transT": torch.from_numpy(tt[None, ...]).float(),
+        "edge": torch.from_numpy(edge[None, ...]).float(),
+        "lu_machine": torch.from_numpy(lu_m[None, ...]).float(),
+        "lu_edge": torch.from_numpy(lu_e[None, ...]).float(),
+    })
+    pe.init_RewardScaling_sameBATCH(shape=4)
+    pe.init_DGFJSPEnv_state0()
+
+    n_task, n_machine = t.shape
+    for action in _actions(os_seq, ms, n_machine):
+        pe.DGFJSPEnv_paral_step([action])
+
+    env0 = pe.paral_env_DG[0]
+    mk = float(env0.makespan_previous_step)
+    pt = float(env0.total_e1_previous_step)
+    trans = float(env0.trans_t_previous_step)
+    idle = float(env0.idle_t_previous_step)
+    obj = W[0] * mk + W[1] * (pt / n_task + idle) + W[2] * trans
+    starts = [float(env0.G.nodes[i + 1]["start_time"]) for i in range(n_task)]
+    finishes = [float(env0.G.nodes[i + 1]["finish_time"]) for i in range(n_task)]
+    return {"mk": mk, "pt": pt, "transT": trans, "idleT": idle, "obj": obj,
+            "starts": starts, "finishes": finishes}
+
+
 def run_env(t, p, tt, edge, os_seq, ms, use_agv, n_agv=6):
     variant = _variant(t, len(edge), use_agv, n_agv)
     pe = Parallel_env(args=variant)

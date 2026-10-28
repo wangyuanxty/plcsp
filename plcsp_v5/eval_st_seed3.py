@@ -24,6 +24,10 @@ args.eval_seed = 3
 # EVAL_GREEDY=0 evaluates the sampled policy instead of the greedy policy.
 _EVAL_GREEDY = os.environ.get("EVAL_GREEDY", "1") != "0"
 _EVAL_SUFFIX = os.environ.get("EVAL_OUTPUT_SUFFIX", "")
+# Shard the 100 test instances across processes: shard k of n evaluates
+# k, k+n, k+2n, ...  Defaults keep the original single-process behaviour.
+_EVAL_SHARD = int(os.environ.get("EVAL_SHARD", "0"))
+_EVAL_NSHARDS = int(os.environ.get("EVAL_N_SHARDS", "1"))
 random.seed(args.test_seed)
 np.random.seed(args.test_seed)
 torch.manual_seed(args.test_seed)
@@ -38,6 +42,7 @@ def main() -> int:
     variant = vars(args)
     ppo = PPOAlgorithm(args=variant, load_pretrained=False)
     id_name = f"J{args.n_job}M{args.n_machine}E{args.n_edge}"
+    _test_sfx = "_lu" if int(getattr(args, "lu_station", 0)) else ""
 
     model_dir = os.path.join(REPO, "trained_model")
     if getattr(args, "run_tag", ""):
@@ -69,27 +74,30 @@ def main() -> int:
     test_instance = Instance_Dataset(
         generate_true=0,
         dataset_pth=os.path.join(REPO, "instance",
-                                 f"test_Instance_{id_name}.pkl"))
+                                 f"test_Instance_{id_name}{_test_sfx}.pkl"))
 
-    objs, cost4 = [], []
-    for i in range(100):
+    objs, cost4, idxs = [], [], []
+    for i in range(_EVAL_SHARD, 100, _EVAL_NSHARDS):
         _, cost, obj = validate_cost_gcn_jointActor_GAT(
             ppo=ppo, gantt_flag=False, data=test_instance, data_index=i,
             data_type="random", greedy=_EVAL_GREEDY, args=variant,
             top_ctl=top_ctl)
         objs.append(float(obj))
         cost4.append([float(x) for x in cost])
-        if (i + 1) % 20 == 0:
-            print(f"  {i + 1}/100", flush=True)
+        idxs.append(i)
+        if len(idxs) % 20 == 0:
+            print(f"  {len(idxs)} done", flush=True)
 
     objs = np.asarray(objs)
     cost4 = np.asarray(cost4)
+    idxs = np.asarray(idxs)
     print(f"\nmode={'greedy' if _EVAL_GREEDY else 'sampling'}")
-    print(f"obj mean={objs.mean():.2f} std={objs.std():.2f}")
+    print(f"shard {_EVAL_SHARD}/{_EVAL_NSHARDS} n={len(idxs)} "
+          f"obj mean={objs.mean():.2f} std={objs.std():.2f}")
     for j, name in enumerate(("mk", "pt", "transT", "idleT")):
         print(f"{name} mean={cost4[:, j].mean():.2f}")
     out = os.path.join(model_dir, f"eval_st_seed3{_EVAL_SUFFIX}.npz")
-    np.savez(out, obj=objs, cost4=cost4)
+    np.savez(out, obj=objs, cost4=cost4, idx=idxs)
     print(f"saved -> {out}")
     return 0
 

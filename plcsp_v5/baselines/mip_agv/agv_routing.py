@@ -4,6 +4,12 @@ Given an operation order and machine assignment, each consecutive pair of
 operations on different machines needs a transport.  A transport is one
 leg (same workshop) or two legs with a fixed delay (cross workshop).
 
+With ``lu_station=1`` the M2 model applies: every workshop has a
+load/unload station, the first operation of a job also needs a leg
+(station -> machine), and a cross-workshop transport splits at the
+stations (machine -> source station, no-AGV transfer, target station ->
+machine).
+
 The model assigns legs to AGVs (home-workshop fleets) and sequences each
 AGV with a circuit.  The sequence-dependent setup is the deadhead travel
 from the previous drop-off to the next pick-up.  The objective minimises
@@ -24,12 +30,14 @@ import argparse
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
+import numpy as np
 from ortools.sat.python import cp_model
 
-from plcsp_v5.agv.state import split_cross_edge
+from plcsp_v5.agv.state import (
+    m2_node_dist, split_cross_edge, station_node)
 from plcsp_v5.baselines.mip_agv.agv_sim import simulate
 from plcsp_v5.baselines.mip_agv.model_noagv import (
-    SCALE, Instance, Schedule, load_instance, solve)
+    SCALE, Instance, load_instance, solve)
 from plcsp_v5.baselines.mip_agv.validate_env import task_order_from_starts
 
 DEPOT = 0
@@ -40,8 +48,8 @@ class Leg:
     tau: int           # transport task (the operation that is moved)
     kind: str          # "single" | "src" | "dst"
     workshop: int
-    pickup: int
-    dropoff: int
+    pickup: int        # machine id, or station node n_machine + workshop
+    dropoff: int       # machine id, or station node n_machine + workshop
     duration: int      # scaled
     release: int       # scaled
     final: bool
@@ -55,17 +63,74 @@ def _edge_of(edges, machine: int) -> int:
     raise ValueError(f"machine {machine} is in no workshop")
 
 
+def _machine_edge(inst: Instance) -> np.ndarray:
+    """Workshop index of every machine."""
+    out = np.zeros(inst.n_machine, dtype=int)
+    for w, members in enumerate(inst.edges):
+        for m in members:
+            out[int(m)] = w
+    return out
+
+
+def _check_m2(inst: Instance, lu_station: int) -> None:
+    if lu_station and (inst.lu_machine is None or inst.lu_edge is None):
+        raise ValueError(
+            "lu_station=1 needs an instance with lu_machine / lu_edge; "
+            "use a *_lu.pkl pool")
+
+
 def build_legs(inst: Instance, order: Sequence[int],
                machines: Sequence[int], starts: Sequence[float],
                cross_delay: float = 5.0,
-               leg_ratio: float = 0.5) -> List[Leg]:
+               leg_ratio: float = 0.5,
+               lu_station: int = 0) -> List[Leg]:
     """Build transport legs from an operation schedule."""
+    _check_m2(inst, lu_station)
     legs: List[Leg] = []
     finishes = [starts[t] + float(inst.t[t, machines[t]])
                 for t in range(inst.n_task)]
+    machine_edge = _machine_edge(inst) if lu_station else None
     for tau in order:
         tau = int(tau)
         o = tau % inst.n_op
+        if lu_station:
+            m = int(machines[tau])
+            de = int(machine_edge[m])
+            if o == 0:
+                # Entry leg: the job starts at the station of its first
+                # operation's workshop.
+                legs.append(Leg(
+                    tau=tau, kind="single", workshop=de,
+                    pickup=station_node(de, inst.n_machine), dropoff=m,
+                    duration=int(round(float(inst.lu_machine[m]) * SCALE)),
+                    release=0, final=True))
+                continue
+            prev_m = int(machines[tau - 1])
+            if prev_m == m:
+                continue
+            ready = int(round(finishes[tau - 1] * SCALE))
+            pe = int(machine_edge[prev_m])
+            if pe == de:
+                legs.append(Leg(
+                    tau=tau, kind="single", workshop=pe,
+                    pickup=prev_m, dropoff=m,
+                    duration=int(round(float(inst.travel[prev_m][m]) * SCALE)),
+                    release=ready, final=True))
+            else:
+                legs.append(Leg(
+                    tau=tau, kind="src", workshop=pe,
+                    pickup=prev_m,
+                    dropoff=station_node(pe, inst.n_machine),
+                    duration=int(round(float(
+                        inst.lu_machine[prev_m]) * SCALE)),
+                    release=ready, final=False))
+                legs.append(Leg(
+                    tau=tau, kind="dst", workshop=de,
+                    pickup=station_node(de, inst.n_machine), dropoff=m,
+                    duration=int(round(float(inst.lu_machine[m]) * SCALE)),
+                    release=0, final=True,
+                    delay=int(round(float(inst.lu_edge[pe][de]) * SCALE))))
+            continue
         if o == 0:
             continue
         prev_m = int(machines[tau - 1])
@@ -97,13 +162,36 @@ def build_legs(inst: Instance, order: Sequence[int],
 
 
 def solve_routing(inst: Instance, legs: Sequence[Leg], n_agv: int,
-                  time_limit: float = 60.0, workers: int = 8
+                  time_limit: float = 60.0, workers: int = 8,
+                  lu_station: int = 0
                   ) -> Tuple[Dict[int, Tuple[int, int]], float]:
-    """Assign and sequence legs.  Returns (plan, objective)."""
+    """Assign and sequence legs.  Returns (plan, objective).
+
+    ``lu_station=1`` measures every deadhead in the M2 node space, where
+    station nodes are ``n_machine + workshop``.
+    """
+    _check_m2(inst, lu_station)
     n_edge = len(inst.edges)
+    machine_edge = _machine_edge(inst) if lu_station else None
+
+    def _travel(a: int, b: int) -> float:
+        return float(inst.travel[int(a)][int(b)])
+
+    def dist(a: int, b: int) -> float:
+        if lu_station:
+            return float(m2_node_dist(
+                a, b, _travel, inst.n_machine, machine_edge,
+                inst.lu_machine, inst.lu_edge))
+        return float(inst.travel[int(a)][int(b)])
+
+    if lu_station:
+        far = max(float(inst.travel.max()), float(inst.lu_machine.max()),
+                  float(inst.lu_edge.max()))
+    else:
+        far = float(inst.travel.max())
     horizon = max([leg.release for leg in legs] or [0])
     horizon += sum(leg.duration for leg in legs)
-    horizon += int(round(float(inst.travel.max()) * SCALE)) * len(legs)
+    horizon += int(round(far * SCALE)) * len(legs)
     horizon += 1
 
     model = cp_model.CpModel()
@@ -130,6 +218,10 @@ def solve_routing(inst: Instance, legs: Sequence[Leg], n_agv: int,
         members = [k for k, leg in enumerate(legs) if leg.workshop == w]
         if not members:
             continue
+        if lu_station:
+            depot_loc = station_node(w, inst.n_machine)
+        else:
+            depot_loc = int(inst.edges[w][0])
         local = {k: i + 1 for i, k in enumerate(members)}
         nodes = [DEPOT] + list(local.values())
         arcs = []
@@ -149,17 +241,14 @@ def solve_routing(inst: Instance, legs: Sequence[Leg], n_agv: int,
                 arcs.append((i, j, lit))
                 if i == DEPOT:
                     k = members[j - 1]
-                    dead = int(round(float(
-                        inst.travel[int(inst.edges[w][0])][legs[k].pickup])
-                        * SCALE))
+                    dead = int(round(dist(depot_loc, legs[k].pickup) * SCALE))
                     model.Add(start[k] >= dead).OnlyEnforceIf(lit)
                 else:
                     k_i = members[i - 1]
                     if j != DEPOT:
                         k_j = members[j - 1]
-                        dead = int(round(float(
-                            inst.travel[legs[k_i].dropoff][legs[k_j].pickup])
-                            * SCALE))
+                        dead = int(round(dist(
+                            legs[k_i].dropoff, legs[k_j].pickup) * SCALE))
                         model.Add(start[k_j] >= end[k_i] + dead
                                   ).OnlyEnforceIf(lit)
         all_arcs = list(arcs) + [(node, node, loop)
@@ -212,14 +301,19 @@ def solve_routing(inst: Instance, legs: Sequence[Leg], n_agv: int,
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instance",
-                    default="plcsp_v5/instance/test_Instance_J6M6E2.pkl")
+    ap.add_argument("--instance", default=None,
+                    help="default: test_Instance_J6M6E2(_lu).pkl")
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--n_agv", type=int, default=6)
     ap.add_argument("--stage_a_time", type=float, default=20.0)
     ap.add_argument("--routing_time", type=float, default=30.0)
     ap.add_argument("--iters", type=int, default=3)
+    ap.add_argument("--lu_station", type=int, default=0,
+                    help="1 = M2 load/unload-station transport model")
     args = ap.parse_args()
+    if args.instance is None:
+        suffix = "_lu" if args.lu_station else ""
+        args.instance = f"plcsp_v5/instance/test_Instance_J6M6E2{suffix}.pkl"
 
     inst = load_instance(args.instance, args.index)
     sched = solve(inst, time_limit=args.stage_a_time, workers=8)
@@ -227,22 +321,26 @@ def main() -> None:
         raise SystemExit("Stage A found no solution")
     order = task_order_from_starts(sched.start, inst.n_job, inst.n_op)
 
-    rule = simulate(inst, order, sched.machine, n_agv=args.n_agv)
+    rule = simulate(inst, order, sched.machine, n_agv=args.n_agv,
+                    lu_station=args.lu_station)
     best = rule
     best_name = "rule"
     starts = rule.starts
     legs: List[Leg] = []
     for it in range(args.iters):
-        legs = build_legs(inst, order, sched.machine, starts)
+        legs = build_legs(inst, order, sched.machine, starts,
+                          lu_station=args.lu_station)
         if not legs:
             break
         plan, _ = solve_routing(inst, legs, args.n_agv,
-                                time_limit=args.routing_time)
+                                time_limit=args.routing_time,
+                                lu_station=args.lu_station)
         sim = simulate(inst, order, sched.machine, n_agv=args.n_agv,
                        pick=lambda step, ctx: plan.get(
                            ctx["tau"], (ctx["src_pool"][0],
                                         ctx["dst_pool"][0]
-                                        if ctx["dst_pool"] else -1)))
+                                        if ctx["dst_pool"] else -1)),
+                       lu_station=args.lu_station)
         if sim.objective < best.objective:
             best, best_name = sim, f"milp{it}"
         starts = sim.starts

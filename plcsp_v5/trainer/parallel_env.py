@@ -30,6 +30,8 @@ except ImportError:  # CPU test env without gym; the class is only needed at run
 # batch_size, njobs, nmachines, nedges
 
 class Parallel_env(object):
+    # Class-level default so instances built without __init__ still work.
+    lu_station = False
     def __init__(self, args):  # 传入arg参数，已经转成dict形式了
         
         self.njobs = args['n_job']
@@ -54,6 +56,7 @@ class Parallel_env(object):
         # [v5] Stage-0 AGV transport resource (per-workshop fleets)
         self.use_agv = bool(args.get('use_agv', 0))
         self.n_agv = int(args.get('n_agv', 6))
+        self.lu_station = bool(args.get('lu_station', 0))
         self.cross_delay = float(args.get('cross_delay', 5.0))
         self.cross_leg_ratio = float(args.get('cross_leg_ratio', 0.5))
         self.agv_failure = bool(args.get('agv_failure', 0))
@@ -82,9 +85,17 @@ class Parallel_env(object):
         Logger.log("Training/Parallel_env/get_batch_scenario", f"job={self.njobs}, machine={self.nmachines}, edge={self.nedges}, tasks={ self.ntasks}", print_true=1)
         
         t_batch = dataset_dict["t"].numpy() # 先转成array数组  # bs * task * m
-        p_batch = dataset_dict["p"].numpy() 
-        transT_batch = dataset_dict["transT"].numpy() 
-        edge_batch = dataset_dict["edge"].numpy() 
+        p_batch = dataset_dict["p"].numpy()
+        transT_batch = dataset_dict["transT"].numpy()
+        edge_batch = dataset_dict["edge"].numpy()
+        lu_m = dataset_dict.get("lu_machine")
+        lu_e = dataset_dict.get("lu_edge")
+        lu_m = lu_m.numpy() if lu_m is not None else None
+        lu_e = lu_e.numpy() if lu_e is not None else None
+        if self.lu_station and lu_m is None:
+            raise ValueError(
+                "--lu_station 1 needs instances with load/unload stations; "
+                "regenerate the instance pool")
 
         self.ability_instance = [] # 进来此函数，表示已经换了样本，否则不会进来！！！重头开始APPEND！！
 
@@ -95,6 +106,9 @@ class Parallel_env(object):
                         copy.deepcopy(p_batch[i_batch]),
                         copy.deepcopy(transT_batch[i_batch]),
                         copy.deepcopy(edge_batch[i_batch])]  # 一次采样的实例信息存到一个list中,元素为np.array
+            if lu_m is not None:
+                instance.append(copy.deepcopy(lu_m[i_batch]))
+                instance.append(copy.deepcopy(lu_e[i_batch]))
             self.ability_instance.append(copy.deepcopy(instance))  # 记录在总的列表中， batch_size个instance，每个instance有4元素  (记录的是数据，不是变量参数名字)
 
         if self.use_agv:
@@ -140,7 +154,10 @@ class Parallel_env(object):
             agvs = []
             for k in range(self.n_agv):
                 edge = k % self.nedges  # home workshop; never changes
-                loc = int(edge_info[edge][0])
+                if self.lu_station:
+                    loc = int(self.nmachines) + int(edge)  # at the station
+                else:
+                    loc = int(edge_info[edge][0])
                 agvs.append(AgvState(idx=k, edge=edge, location=loc))
             for edge in range(self.nedges):
                 if not any(a.edge == edge for a in agvs):
@@ -432,23 +449,51 @@ class Parallel_env(object):
                     return 0.0
                 return float(trans_t[int(a)][int(b)])
 
+            if self.lu_station:
+                try:
+                    from agv.state import m2_node_dist
+                except ImportError:
+                    from plcsp_v5.agv.state import m2_node_dist
+                _lu_m = self.ability_instance[i][4]
+                _lu_e = self.ability_instance[i][5]
+                _m_edge = np.zeros(self.nmachines, dtype=int)
+                for _w in range(self.nedges):
+                    for _m in edge_info[_w]:
+                        _m_edge[int(_m)] = _w
+
+                def travel(a, b, _tt=trans_t, _me=_m_edge, _lm=_lu_m,
+                           _le=_lu_e):
+                    return m2_node_dist(
+                        a, b, lambda x, y: float(_tt[int(x)][int(y)]),
+                        self.nmachines, _me, _lm, _le)
+
             def edge_of(m):
                 for e in range(self.nedges):
                     if int(m) in [int(x) for x in edge_info[e]]:
                         return e
                 return 0
 
-            if task_idx % self.nmachines == 0:
+            if task_idx % self.nmachines == 0 and not self.lu_station:
                 pickup, dropoff = -1, m_idx
                 valid = False
+            elif task_idx % self.nmachines == 0:
+                # M2 entry: the job waits at the station of the workshop that
+                # hosts its first operation.
+                dropoff = m_idx
+                pickup_edge = edge_of(dropoff)
+                pickup = int(self.nmachines) + pickup_edge
+                valid = True
             else:
                 pickup = int(env.G.nodes[task_idx]["machine"])
                 dropoff = m_idx
                 valid = pickup >= 0 and pickup != dropoff
 
-            pickup_edge = edge_of(pickup) if pickup >= 0 else edge_of(dropoff)
+            if not (task_idx % self.nmachines == 0 and self.lu_station):
+                pickup_edge = edge_of(pickup) if pickup >= 0 else edge_of(dropoff)
             dropoff_edge = edge_of(dropoff)
-            if valid:
+            if valid and task_idx % self.nmachines == 0:
+                now = 0.0  # the job is available at the station from time 0
+            elif valid:
                 # The job is ready when its predecessor finishes. Using the
                 # global max finish would hide the AGV wait of this job.
                 now = float(env.G.nodes[task_idx].get("finish_time") or 0.0)
@@ -516,6 +561,24 @@ class Parallel_env(object):
                     return 0.0
                 return float(trans_t[int(a)][int(b)])
 
+            if self.lu_station:
+                try:
+                    from agv.state import m2_node_dist
+                except ImportError:
+                    from plcsp_v5.agv.state import m2_node_dist
+                _lu_m = self.ability_instance[i][4]
+                _lu_e = self.ability_instance[i][5]
+                _m_edge = np.zeros(self.nmachines, dtype=int)
+                for _w in range(self.nedges):
+                    for _m in edge_info[_w]:
+                        _m_edge[int(_m)] = _w
+
+                def travel(a, b, _tt=trans_t, _me=_m_edge, _lm=_lu_m,
+                           _le=_lu_e):
+                    return m2_node_dist(
+                        a, b, lambda x, y: float(_tt[int(x)][int(y)]),
+                        self.nmachines, _me, _lm, _le)
+
             def edge_of(m):
                 for e in range(self.nedges):
                     if int(m) in [int(x) for x in edge_info[e]]:
@@ -555,8 +618,15 @@ class Parallel_env(object):
                 t_src, d_eff, _t_dst = split_cross_edge(
                     total, self.cross_delay, self.cross_leg_ratio)
                 start_src = max(ready, float(src.free_time))
-                boundary = start_src + travel(src.location, pickup) + t_src + d_eff
-                boundary_machine = int(edge_info[dropoff_edge][0])
+                if self.lu_station:
+                    # M2: the target AGV picks the job up at the station.
+                    boundary_machine = int(self.nmachines) + int(dropoff_edge)
+                    boundary = (start_src + travel(src.location, pickup)
+                                + float(self.ability_instance[i][4][pickup])
+                                + float(self.ability_instance[i][5][pickup_edge][dropoff_edge]))
+                else:
+                    boundary = start_src + travel(src.location, pickup) + t_src + d_eff
+                    boundary_machine = int(edge_info[dropoff_edge][0])
                 dst_agvs = [a for a in agvs if a.edge == dropoff_edge]
                 if not dst_agvs:
                     raise ValueError(
@@ -579,6 +649,110 @@ class Parallel_env(object):
                 np.asarray(ctxs, dtype=np.float32),
                 np.asarray(masks, dtype=bool),
                 np.asarray(valids, dtype=bool))
+
+    def _apply_m2_transport(self, l_batch, task, m_idx, agv_action,
+                            agv_dst_actions):
+        """M2 transport: load/unload stations, entry legs, empty travel.
+
+        ``transport_override`` carries the loaded time (it also drives the
+        start time), ``transport_extra`` carries the empty time so that the
+        objective counts loaded plus empty.  A job entering the shop has no
+        job edge, so its arrival is injected through ``ready_override``.
+        """
+        try:
+            from agv.state import transport_timing_m2, station_node, RHO_EMPTY
+        except ImportError:
+            from plcsp_v5.agv.state import (transport_timing_m2, station_node,
+                                                RHO_EMPTY)
+
+        env = self.paral_env_DG[l_batch]
+        inst = self.ability_instance[l_batch]
+        edge_info, trans_t = inst[3], inst[2]
+        lu_m, lu_e = inst[4], inst[5]
+        agvs = self.agv_states[l_batch]
+        n_machine = self.nmachines
+        task = int(task)
+        m_idx = int(m_idx)
+
+        machine_edge = np.zeros(n_machine, dtype=int)
+        for w in range(self.nedges):
+            for m_ in edge_info[w]:
+                machine_edge[int(m_)] = w
+
+        def _travel(a, b):
+            if a < 0 or b < 0:
+                return 0.0
+            return float(trans_t[int(a)][int(b)])
+
+        first = (task % n_machine == 0)
+        de = int(machine_edge[m_idx])
+        if first:
+            prev_machine = -1
+            ready = 0.0
+            pickup = station_node(de, n_machine)
+            pe = de
+        else:
+            prev_machine = int(env.G.nodes[task]["machine"])
+            if (prev_machine < 0 or prev_machine == m_idx
+                    or not env.G.nodes[task].get("scheduled")):
+                # No transport for this step.  Still install empty overrides:
+                # the gap search reads stored start times only when the wait
+                # override is present.
+                env.G.graph["transport_wait_override"] = {}
+                env.G.graph["transport_extra"] = {}
+                return
+            ready = float(env.G.nodes[task].get("finish_time") or 0.0)
+            pickup = prev_machine
+            pe = int(machine_edge[prev_machine])
+
+        src_agvs = [a for a in agvs if a.edge == pe]
+        if not src_agvs:
+            raise ValueError(f"workshop edge {pe} has no AGV")
+        if (agv_action < 0 or agv_action >= len(agvs)
+                or agvs[agv_action].edge != pe):
+            agv_action = min((a.idx for a in src_agvs),
+                             key=lambda k: agvs[k].free_time)
+        src = agvs[agv_action]
+
+        dst = None
+        if pe != de:
+            dst_agvs = [a for a in agvs if a.edge == de]
+            if not dst_agvs:
+                raise ValueError(f"workshop edge {de} has no AGV")
+            if agv_dst_actions is not None:
+                a_dst = int(agv_dst_actions[l_batch])
+                if 0 <= a_dst < len(agvs) and agvs[a_dst].edge == de:
+                    dst = agvs[a_dst]
+            if dst is None:
+                dst = min(dst_agvs, key=lambda a: a.free_time)
+
+        timing = transport_timing_m2(
+            src, pickup, m_idx, ready, _travel,
+            n_machine, machine_edge, lu_m, lu_e, dst=dst)
+
+        loaded = float(timing["loaded"])
+        empty = float(timing["empty"])
+        wait = float(timing["wait"])
+        src.free_time = timing["src_free"]
+        src.location = timing["src_location"]
+        src.travelled += timing["src_travelled"]
+        if dst is not None:
+            dst.free_time = timing["dst_free"]
+            dst.location = timing["dst_location"]
+            dst.travelled += timing["dst_travelled"]
+
+        self.agv_wait_total[l_batch] += wait
+        extra = env.G.graph.setdefault("transport_extra", {})
+        if first:
+            # Graph node ids are 1-based; the action index is 0-based.
+            env.G.graph.setdefault("ready_override", {})[task + 1] = float(
+                timing["dst_free"] if dst is not None else timing["src_free"])
+            extra[task] = loaded + RHO_EMPTY * empty
+        else:
+            edge = (task, task + 1)
+            env.G.graph["transport_override"] = {edge: loaded}
+            env.G.graph["transport_wait_override"] = {edge: wait}
+            extra[task] = RHO_EMPTY * empty
 
     def DGFJSPEnv_paral_step(self, joint_actions, agv_actions=None,
                              agv_dst_actions=None):
@@ -610,8 +784,12 @@ class Parallel_env(object):
                     agv_action = -1
                 else:
                     agv_action = int(agv_actions[l_batch])
-                if select_task_index % self.nmachines == 0:
+                if select_task_index % self.nmachines == 0 and not self.lu_station:
                     pass  # first operation of a job: no transport
+                elif self.lu_station:
+                    self._apply_m2_transport(l_batch, select_task_index,
+                                             select_mch_index, agv_action,
+                                             agv_dst_actions)
                 else:
                     prev_machine = int(env.G.nodes[select_task_index]["machine"])
                     if (prev_machine < 0
@@ -725,6 +903,8 @@ class Parallel_env(object):
             if self.use_agv:
                 env.G.graph.pop("transport_override", None)
                 env.G.graph.pop("transport_wait_override", None)
+                env.G.graph.pop("transport_extra", None)
+                env.G.graph.pop("ready_override", None)
 
             # TODO：检验是否选到了负数的t
             if self.ability_instance[l_batch][0][select_task_index][select_mch_index] < 0:

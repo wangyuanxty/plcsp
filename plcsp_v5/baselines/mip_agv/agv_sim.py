@@ -4,6 +4,12 @@ Replicates ``Parallel_env`` for a fixed operation order and machine
 assignment: source AGV, cross-workshop split, fixed delay, target AGV,
 deadhead, and the four cost components.
 
+Two transport models are supported.  ``lu_station=0`` is the original
+machine-to-machine model.  ``lu_station=1`` is M2: every workshop has one
+load/unload station, the first operation of a job also needs a transport,
+and a cross-workshop leg splits at the stations.  The M2 transport term
+counts loaded and empty AGV travel.
+
 The AGV choice is either the earliest-free rule (the environment's
 fallback) or an explicit per-step plan from the routing model.
 
@@ -21,7 +27,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from plcsp_v5.agv.state import AgvState, transport_timing
+from plcsp_v5.agv.state import (
+    RHO_EMPTY, AgvState, station_node, transport_timing, transport_timing_m2)
 from plcsp_v5.baselines.mip_agv.model_noagv import Instance, load_instance
 
 
@@ -33,6 +40,7 @@ class AgvChoice:
     loaded: float = 0.0
     wait: float = 0.0
     cross: bool = False
+    empty: float = 0.0
 
 
 @dataclass
@@ -45,6 +53,8 @@ class SimResult:
     idle: float
     trans: float
     objective: float
+    loaded: float = 0.0
+    empty: float = 0.0
     choices: Dict[int, AgvChoice] = field(default_factory=dict)
 
 
@@ -55,36 +65,62 @@ def _edge_of(edges: np.ndarray, machine: int) -> int:
     raise ValueError(f"machine {machine} is in no workshop")
 
 
-def _new_agvs(n_agv: int, edges: np.ndarray) -> List[AgvState]:
+def _machine_edge(edges: np.ndarray, n_machine: int) -> np.ndarray:
+    """Workshop index of every machine."""
+    out = np.zeros(n_machine, dtype=int)
+    for w, members in enumerate(edges):
+        for m in members:
+            out[int(m)] = w
+    return out
+
+
+def _new_agvs(n_agv: int, edges: np.ndarray,
+              n_machine: Optional[int] = None,
+              lu_station: int = 0) -> List[AgvState]:
     n_edge = len(edges)
     out = []
     for k in range(n_agv):
         edge = k % n_edge
-        out.append(AgvState(idx=k, edge=edge,
-                            location=int(edges[edge][0])))
+        if lu_station:
+            if n_machine is None:
+                raise ValueError("lu_station=1 needs n_machine")
+            location = station_node(edge, n_machine)
+        else:
+            location = int(edges[edge][0])
+        out.append(AgvState(idx=k, edge=edge, location=location))
     return out
 
 
 def simulate(inst: Instance, order: Sequence[int],
              machines: Sequence[int], n_agv: int = 6,
              cross_delay: float = 5.0, leg_ratio: float = 0.5,
-             pick: Optional[Callable[[int, dict], Tuple[int, int]]] = None
-             ) -> SimResult:
+             pick: Optional[Callable[[int, dict], Tuple[int, int]]] = None,
+             lu_station: int = 0) -> SimResult:
     """Run one fixed (order, machines) schedule.
 
     ``pick(step_index, ctx)`` returns ``(src_agv, dst_agv)``; ``dst_agv``
     is ignored for same-workshop trips.  ``None`` uses the earliest-free
     rule, which is the environment's fallback.
+
+    ``lu_station=1`` selects the M2 transport model and requires an
+    instance with ``lu_machine`` / ``lu_edge``.
     """
     n, m_count = inst.n_task, inst.n_machine
     travel = inst.travel
     edges = inst.edges
-    agvs = _new_agvs(n_agv, edges)
+    if lu_station and (inst.lu_machine is None or inst.lu_edge is None):
+        raise ValueError(
+            "lu_station=1 needs an instance with lu_machine / lu_edge; "
+            "use a *_lu.pkl pool")
+    agvs = _new_agvs(n_agv, edges, n_machine=m_count,
+                     lu_station=lu_station)
+    machine_edge = (_machine_edge(edges, m_count) if lu_station else None)
     starts = [0.0] * n
     finishes = [0.0] * n
     routes: List[List[int]] = [[] for _ in range(m_count)]
     choices: Dict[int, AgvChoice] = {}
-    trans_total = 0.0
+    loaded_total = 0.0
+    empty_total = 0.0
 
     def _travel(a: int, b: int) -> float:
         if a < 0 or b < 0:
@@ -98,7 +134,72 @@ def simulate(inst: Instance, order: Sequence[int],
         duration = float(inst.t[tau, m])
         start_job = 0.0
 
-        if o > 0:
+        if lu_station:
+            prev_m = -1
+            if o == 0:
+                ready = 0.0
+                pickup_edge = int(machine_edge[m])
+                dropoff_edge = pickup_edge
+                pickup = station_node(pickup_edge, m_count)
+                cross = False
+            else:
+                prev = tau - 1
+                prev_m = int(machines[prev])
+                ready = finishes[prev]
+                pickup = prev_m
+                pickup_edge = int(machine_edge[prev_m])
+                dropoff_edge = int(machine_edge[m])
+                cross = pickup_edge != dropoff_edge
+
+            if o > 0 and prev_m == m:
+                start_job = finishes[tau - 1]
+            else:
+                src_pool = [a for a in agvs if a.edge == pickup_edge]
+                dst_pool = [a for a in agvs if a.edge == dropoff_edge]
+                if not src_pool:
+                    raise ValueError(
+                        f"workshop edge {pickup_edge} has no AGV")
+                if cross and not dst_pool:
+                    raise ValueError(
+                        f"workshop edge {dropoff_edge} has no AGV")
+
+                if pick is None:
+                    src_idx = int(min(
+                        (a.idx for a in src_pool),
+                        key=lambda k: agvs[k].free_time))
+                    dst_idx = int(min(
+                        (a.idx for a in dst_pool),
+                        key=lambda k: agvs[k].free_time)) if cross else -1
+                else:
+                    ctx = {"tau": tau, "prev_m": prev_m, "m": m,
+                           "ready": ready, "cross": cross,
+                           "pickup_edge": pickup_edge,
+                           "dropoff_edge": dropoff_edge,
+                           "src_pool": [a.idx for a in src_pool],
+                           "dst_pool": [a.idx for a in dst_pool]}
+                    src_idx, dst_idx = pick(step, ctx)
+
+                src = agvs[src_idx]
+                dst = agvs[dst_idx] if cross else None
+                timing = transport_timing_m2(
+                    src, pickup, m, ready, _travel,
+                    m_count, machine_edge, inst.lu_machine, inst.lu_edge,
+                    dst=dst)
+                if dst is not None:
+                    dst.free_time = timing["dst_free"]
+                    dst.location = timing["dst_location"]
+                    dst.travelled += timing["dst_travelled"]
+                src.free_time = timing["src_free"]
+                src.location = timing["src_location"]
+                src.travelled += timing["src_travelled"]
+                loaded_total += float(timing["loaded"])
+                empty_total += float(timing["empty"])
+                choices[tau] = AgvChoice(
+                    used=True, src=src_idx, dst=dst_idx,
+                    loaded=timing["loaded"], wait=timing["wait"],
+                    cross=cross, empty=timing["empty"])
+                start_job = ready + timing["wait"] + timing["loaded"]
+        elif o > 0:
             prev = tau - 1
             prev_m = int(machines[prev])
             if prev_m == m:
@@ -153,7 +254,7 @@ def simulate(inst: Instance, order: Sequence[int],
                 src.free_time = timing["src_free"]
                 src.location = timing["src_location"]
                 src.travelled += timing["src_travelled"]
-                trans_total += timing["loaded"]
+                loaded_total += float(timing["loaded"])
                 start_job = ready + timing["wait"] + timing["loaded"]
 
         # Left-shift placement, matching _schedule_task in the environment.
@@ -202,29 +303,46 @@ def simulate(inst: Instance, order: Sequence[int],
         idle += starts[route[0]]
         for i in range(len(route) - 1):
             idle += starts[route[i + 1]] - finishes[route[i]]
+    trans_total = loaded_total + RHO_EMPTY * empty_total
     objective = 0.4 * makespan + 0.4 * (pec_mean + idle) + 0.2 * trans_total
     return SimResult(starts=starts, finishes=finishes,
                      machines=list(machines), makespan=makespan,
                      pec_mean=pec_mean, idle=idle, trans=trans_total,
-                     objective=objective, choices=choices)
+                     objective=objective, loaded=loaded_total,
+                     empty=empty_total, choices=choices)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instance",
-                    default="plcsp_v5/instance/test_Instance_J6M6E2.pkl")
+    ap.add_argument("--instance", default=None,
+                    help="default: test_Instance_J6M6E2(_lu).pkl")
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--n_agv", type=int, default=6)
+    ap.add_argument("--lu_station", type=int, default=0,
+                    help="1 = M2 load/unload-station transport model")
     args = ap.parse_args()
+    if args.instance is None:
+        suffix = "_lu" if args.lu_station else ""
+        args.instance = f"plcsp_v5/instance/test_Instance_J6M6E2{suffix}.pkl"
 
     from plcsp_v5.baselines.mip_agv.validate_env import run_env
     from baselines.agv_baselines import pdr_schedule
 
     inst = load_instance(args.instance, args.index)
     raw = pickle.load(open(args.instance, "rb"))
+    if args.lu_station and len(raw) < 6:
+        raise SystemExit(
+            "--lu_station 1 needs a *_lu.pkl pool with lu_machine/lu_edge")
     tt, edge = raw[2][args.index], raw[3][args.index]
     os_seq, ms = pdr_schedule(inst.t, inst.power, "mor", "spt")
-    env = run_env(inst.t, inst.power, tt, edge, os_seq, ms, 1, args.n_agv)
+    if args.lu_station:
+        from plcsp_v5.baselines.check_agv_env import run_env_m2
+        lu_m, lu_e = raw[4][args.index], raw[5][args.index]
+        env = run_env_m2(inst.t, inst.power, tt, edge, lu_m, lu_e,
+                         os_seq, ms, args.n_agv)
+    else:
+        env = run_env(inst.t, inst.power, tt, edge, os_seq, ms, 1,
+                      args.n_agv)
 
     order = []
     counter = {j: 0 for j in range(inst.n_job)}
@@ -232,7 +350,8 @@ def main() -> None:
         j = int(j)
         order.append(j * inst.n_op + counter[j])
         counter[j] += 1
-    sim = simulate(inst, order, ms, n_agv=args.n_agv)
+    sim = simulate(inst, order, ms, n_agv=args.n_agv,
+                   lu_station=args.lu_station)
 
     print("component        env        sim       diff")
     for key_env, key_sim in (("mk", "makespan"), ("idleT", "idle"),

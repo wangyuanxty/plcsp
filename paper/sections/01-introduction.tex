@@ -19,22 +19,24 @@ operations on each machine. When the shop uses automated guided vehicles
 (AGVs), a third decision appears: which vehicle moves the job between two
 machines. The three decisions are coupled. A machine that finishes early may
 wait for a vehicle, and a vehicle that is busy delays the next operation. In
-an energy-aware objective the coupling is tighter, because idle machines and
-empty vehicle travel contribute to the objective even when they do not change
-the makespan. The objective in this paper combines makespan, processing and
-idle energy, and loaded transport time.
+an energy-aware objective the coupling is tighter, because idle machines
+contribute to the objective even when they do not change the makespan. The
+objective in this paper combines makespan, processing and idle energy, and
+loaded transport time.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_environment.pdf}
 \caption{Conceptual architecture and illustrative examples of the shop
 environment and logistics processes. (a) Three coupled decisions and the
-four objective terms. (b) Two workshops, six machines, and one AGV fleet per
-workshop; a job crosses the boundary. (c) First operation: empty travel to
-the pickup machine, a loaded leg to the handover, and a second loaded leg to
-the destination. (d) Later operation within one workshop: one loaded leg.
-(e) After the last operation. Shapes and line styles encode the same
-information as colour.}
+four objective terms; the transport term counts loaded travel and half-weighted
+empty travel. (b) Two workshops, six machines, one load/unload station per
+workshop, and one AGV fleet per workshop; a job crosses the boundary.
+(c) Cross-workshop transport: empty travel to the pickup machine, a loaded leg
+to the source station, a transfer between the two stations, and a loaded leg
+from the target station to the destination. (d) A job entering at the station,
+and a later operation within one workshop. (e) After the last operation.
+Shapes and line styles encode the same information as colour.}
 \label{fig:motivated}
 \end{figure*}
 
@@ -96,10 +98,10 @@ The contributions are as follows.
 \begin{enumerate}
 \item \emph{A multi-agent controller for joint production and logistics
 scheduling across workshops.} The operation, machine, and vehicle decisions
-are made at the same low-level step by three policy heads, so the transport
-decision is coupled to the machine decision that creates it. For a
-cross-workshop job, a single AGV head selects the source vehicle and, after
-the handover, the target vehicle.
+are produced by three policy heads in one step, so the transport decision is
+coupled to the machine decision that creates it. For a cross-workshop job, a
+single AGV head selects the source vehicle and, after the transfer between
+the stations, the target vehicle.
 
 \item \emph{A dual Set Transformer encoder with machine-internal grouping.}
 The machine encoder projects three feature groups separately, compares them
@@ -107,10 +109,11 @@ within a machine, and then compares machines. The encoder has no position
 embedding, so the same weights apply to any number of operations, machines,
 and vehicles.
 
-\item \emph{A multi-actor group-relative update without a value critic.} The
-three heads share one group-relative advantage and are updated with the
-clipped ratio of their summed log-probabilities. No value critic, no reference
-model, and no KL penalty are used at the low level.
+\item \emph{A group-relative update for three heterogeneous heads.} The
+estimator is GRPO's~\cite{shao2024grpo}; the contribution here is its use with
+three heads that share one team advantage. The heads are updated with the
+clipped ratio of their summed log-probabilities, and no value critic, no
+reference model, and no KL penalty are used at the low level.
 
 \item \emph{A hierarchical rule selector with per-head cost signals.} A
 top-level policy selects a rule prior for each head every few steps. Each rule
@@ -118,13 +121,17 @@ head receives the change of its own local cost as the reward, so the selector
 can attribute a cost change to the head whose decision caused it.
 \end{enumerate}
 
-Section~\ref{sec:experiments} reports the ablations that isolate each
-contribution.
+Section~\ref{sec:experiments} compares the controller with rule-based,
+metaheuristic, mixed-integer, and adapted DRL baselines. Against the best
+rule pair, which makes all three decisions by fixed rules, the controller
+lowers the objective by 41.5\% on $6\times6$ instances and by 47.6\% on
+$10\times6$ instances.
 
-The controller is fast: one schedule takes about 0.56~s per instance. It is
-not the best method in objective value. On the same 100 instances, a
-random-key genetic algorithm obtains 478.04 and a two-stage mixed-integer
-baseline obtains 505.05, against 556.70 for the controller.
+The controller is fast: one schedule takes about 0.56~s per instance. On the
+same 100 instances it obtains 556.70, against 951.20 for the best rule pair
+and 707.21 and 743.62 for two of the adapted DRL baselines. Two search methods
+return lower values: a random-key genetic algorithm obtains 478.04 and a
+two-stage mixed-integer baseline 505.05.
 Section~\ref{sec:experiments} reports this comparison, together with the
 scope of the transport model.
 

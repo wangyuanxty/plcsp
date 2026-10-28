@@ -11,17 +11,26 @@ steps.
 
 The experiments show that the encoder and the multi-actor update each improve
 over their respective baselines, and that the controller is fast enough for
-interactive use. The controller is not the best method in objective value: the
-random-key genetic algorithm and the two-stage mixed-integer baseline return
-better schedules when they are given more computation, and the advantage of
-the controller is run time. The top-level rule selector has a small and uneven
-effect. The action analysis shows that it is not a fixed rule: the machine
-head moves from minimum energy to minimum transport, and the AGV head from
-earliest free to nearest, as the partial schedule fills. At the larger size the
-selector and the learned transport decision do not change the objective.
+interactive use. Its objective is lower than that of the fixed dispatching
+rules and of the adapted DRL baselines at every size. Against the search
+methods the outcome depends on the size: they return better schedules on the
+smaller instances, and on the largest the controller is ahead. That trade,
+search time for a single pass, is the operating point of the method. The
+top-level rule
+selector has a small and uneven effect. The action analysis shows that it is
+not a fixed rule: the machine head moves from minimum energy to minimum
+transport, and the AGV head from earliest free to nearest, as the partial
+schedule fills. At the larger size the selector and the learned transport
+decision do not change the objective.
 
-The transport model assigns AGVs to workshops and splits a cross-workshop trip
-into two legs with a fixed handover delay. Charging, failures, and load and
+The transport model assigns AGVs to workshops and moves a cross-workshop
+job through the two load/unload stations. Charging, failures, and load and
 unload times are outside the model. The mixed-integer baseline is a two-stage
 heuristic, not a joint optimum. Extending the model to charging and failures,
 and solving the joint problem on larger instances, are the next steps.
+
+\section*{Data availability}
+
+The simulator, the instance generator, the baseline implementations, and the
+trained checkpoints are available from the corresponding author on reasonable
+request.

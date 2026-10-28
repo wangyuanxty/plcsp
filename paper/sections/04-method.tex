@@ -38,6 +38,14 @@ masked to the feasible actions: an operation is feasible when its predecessor
 is complete, a machine is feasible when the operation can be processed on it,
 and an AGV is feasible when it belongs to the required workshop.
 
+\paragraph{Multi-agent formulation}
+The controller is a cooperative multi-agent system. Each agent is one policy
+head with its own action space and its own candidate encoding. The agents
+decide at the same step (the AGV agent when a transport is needed) and receive
+one team return, and training uses a centralized group-relative advantage. The
+scheme therefore follows centralized training with decentralized execution: no
+per-agent reward is required, and each head selects from its own candidates.
+
 The low-level heads are trained with group-relative policy optimization
 (GRPO) and no value critic. The top-level policy is trained with proximal
 policy optimization (PPO) on the weighted-cost change of each segment. The
@@ -302,7 +310,8 @@ AGV encoder on the vehicles of one workshop. With attention, the cost of a
 step is $O(n_j^2 d + M^2 d + A^2 d)$ in time and
 $O(n_j d + M d + A d)$ in memory, where $d$ is the embedding width. An
 episode contains $JO$ steps. A low-level update processes $G$ episodes for
-four epochs. The top level processes four to seven decisions per episode.
+four epochs. The top level processes between four and thirteen decisions per
+episode, depending on the instance size.
 The controller therefore scales linearly in the number of episodes and
 quadratically in the largest candidate set, not in the product of the three
 candidate sets.

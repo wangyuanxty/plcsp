@@ -17,6 +17,55 @@ from typing import Callable
 
 import numpy as np
 
+# Empty-travel power as a fraction of loaded-travel power.
+RHO_EMPTY = 0.5
+
+# Machine-idle accounting.  ``trailing`` is the published definition
+# ``sum_k (MKT - P_k)``: every machine is charged until the makespan, so
+# the trailing interval after its last operation counts.  ``gap`` is the
+# old reading: leading idle plus the gaps between operations only.
+IDLE_MODES = ("trailing", "gap")
+DEFAULT_IDLE_MODE = "trailing"
+
+
+def resolve_idle_mode(mode: str | None = None) -> str:
+    """Validate ``idle_mode`` and fill the default for ``None``/empty."""
+    if mode is None or str(mode).strip() == "":
+        return DEFAULT_IDLE_MODE
+    key = str(mode).strip().lower()
+    if key not in IDLE_MODES:
+        raise ValueError(
+            f"idle_mode must be one of {IDLE_MODES}, got {mode!r}")
+    return key
+
+
+def trailing_idle(processing_by_machine, makespan: float,
+                  idle_power=None) -> float:
+    """``sum_k w_k * (MKT - P_k)`` over every machine.
+
+    ``processing_by_machine`` holds ``P_k``; an unused machine has
+    ``P_k = 0`` and is charged the whole makespan.  ``idle_power`` is the
+    optional per-machine idle-power weight (v5 uses 1.0).
+    """
+    mkt = float(makespan)
+    total = 0.0
+    for k, proc in enumerate(processing_by_machine):
+        weight = 1.0 if idle_power is None else float(idle_power[k])
+        total += weight * (mkt - float(proc))
+    return float(total)
+
+
+def idle_cost(mode: str | None, gap_idle: float, processing_by_machine,
+              makespan: float, idle_power=None) -> float:
+    """Return the machine-idle term under ``mode``.
+
+    ``gap_idle`` is the already-computed old reading, so callers that
+    collect the machine routes once can serve both modes.
+    """
+    if resolve_idle_mode(mode) == "gap":
+        return float(gap_idle)
+    return trailing_idle(processing_by_machine, makespan, idle_power)
+
 
 class AgvStatus(IntEnum):
     IDLE = 0
@@ -173,6 +222,118 @@ def transport_timing(
         "t_dst": t_dst,
         "dead_src": dead_src,
         "dead_dst": dead_dst,
+    }
+
+
+def station_node(edge: int, n_machine: int) -> int:
+    """Node id of the load/unload station of workshop ``edge``."""
+    return int(n_machine) + int(edge)
+
+
+def m2_node_dist(a: int, b: int, travel: Callable[[int, int], float],
+                 n_machine: int, machine_edge, lu_machine,
+                 lu_edge) -> float:
+    """Distance between two nodes in the M2 model.
+
+    Nodes 0..n_machine-1 are machines; nodes n_machine+w are stations.
+    """
+    if a < 0 or b < 0:
+        return 0.0
+    a_st = a >= n_machine
+    b_st = b >= n_machine
+    if not a_st and not b_st:
+        return float(travel(int(a), int(b)))
+    if a_st and b_st:
+        return float(lu_edge[int(a) - n_machine][int(b) - n_machine])
+    if not a_st and b_st:
+        w = int(b) - n_machine
+        w_a = int(machine_edge[int(a)])
+        if w_a == w:
+            return float(lu_machine[int(a)])
+        # Machine -> station of another workshop: the machine's own station
+        # plus the station transfer.  Used by the AGV feature encoder, which
+        # queries every AGV, not only the ones that could serve the job.
+        return float(lu_machine[int(a)]) + float(lu_edge[w_a][w])
+    w = int(a) - n_machine
+    w_b = int(machine_edge[int(b)])
+    if w_b == w:
+        return float(lu_machine[int(b)])
+    return float(lu_edge[w][w_b]) + float(lu_machine[int(b)])
+
+
+def transport_timing_m2(
+        src: AgvState, pickup: int, dropoff: int, ready: float,
+        travel: Callable[[int, int], float],
+        n_machine: int, machine_edge, lu_machine, lu_edge,
+        dst: AgvState | None = None,
+        src_repair: float = 0.0) -> dict:
+    """M2 transport timing with load/unload stations.
+
+    Same workshop (``dst is None``):
+        deadhead(src.location -> pickup) + loaded(pickup -> dropoff).
+        ``pickup`` may be a station node, which is how a job enters the shop.
+
+    Cross workshop (``dst`` given):
+        source deadhead + loaded(pickup -> station of the source workshop);
+        station-to-station transfer (no AGV);
+        target deadhead (station -> station) + loaded(station -> dropoff).
+
+    ``loaded`` and ``empty`` are the AGV travel times used by the objective.
+    """
+    def dist(a, b):
+        return m2_node_dist(a, b, travel, n_machine, machine_edge,
+                            lu_machine, lu_edge)
+
+    dead_src = dist(src.location, pickup)
+    start_src = max(float(ready), float(src.free_time))
+    wait_src = start_src - float(ready)
+
+    if dst is None:
+        loaded = dist(pickup, dropoff) + float(src_repair)
+        return {
+            "wait": wait_src + dead_src,
+            "loaded": loaded,
+            "empty": dead_src,
+            "src_free": start_src + dead_src + loaded,
+            "src_location": int(dropoff),
+            "src_travelled": dead_src + loaded,
+            "dst_free": None,
+            "dst_location": None,
+            "dst_travelled": 0.0,
+            "t_src": loaded,
+            "t_dst": 0.0,
+            "dead_src": dead_src,
+            "dead_dst": 0.0,
+            "transfer": 0.0,
+        }
+
+    src_edge = int(machine_edge[int(pickup)])
+    dst_edge = int(machine_edge[int(dropoff)])
+    station_src = station_node(src_edge, n_machine)
+    station_dst = station_node(dst_edge, n_machine)
+    t_src = dist(pickup, station_src) + float(src_repair)
+    transfer = float(lu_edge[src_edge][dst_edge])
+    src_arrival = start_src + dead_src + t_src
+    boundary = src_arrival + transfer
+    dead_dst = dist(dst.location, station_dst)
+    start_dst = max(boundary, float(dst.free_time))
+    wait_dst = start_dst - boundary
+    t_dst = dist(station_dst, dropoff)
+    return {
+        "wait": wait_src + dead_src + transfer + wait_dst + dead_dst,
+        "loaded": t_src + t_dst,
+        "empty": dead_src + dead_dst,
+        "src_free": src_arrival,
+        "src_location": station_src,
+        "src_travelled": dead_src + t_src,
+        "dst_free": start_dst + dead_dst + t_dst,
+        "dst_location": int(dropoff),
+        "dst_travelled": dead_dst + t_dst,
+        "t_src": t_src,
+        "t_dst": t_dst,
+        "dead_src": dead_src,
+        "dead_dst": dead_dst,
+        "transfer": transfer,
     }
 
 

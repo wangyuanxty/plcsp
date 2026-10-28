@@ -33,9 +33,9 @@ $\mathcal{M}_{j,o}$ & eligible machines of operation $(j,o)$ \\
 $t_{j,o,m}$, $p_{j,o,m}$ & processing time and power \\
 $e_{j,o,m}$ & processing energy \\
 $\mathcal{A}_w$ & AGV fleet of workshop $w$ \\
-$d_{m,m'}$ & travel time between machines $m$ and $m'$ \\
-$\tau^{s}$, $\delta$, $\tau^{d}$ & source leg, handover delay, target leg \\
-$\rho$ & split ratio of the remaining cross-workshop travel \\
+$d_{a,b}$ & travel time between two nodes (machines or stations) \\
+$u_w$ & load/unload station of workshop $w$ \\
+$\rho_e$ & empty-travel power as a fraction of the loaded power \\
 $S_{j,o}$, $C_{j,o}$ & start and completion time \\
 $\Cmax$ & makespan \\
 $\Eproc$ & mean processing energy \\
@@ -48,33 +48,44 @@ $z_k$, $u_k$ & top-level state and rule triple of segment $k$ \\
 $\alpha$ & rule-bias scale \\
 $\Delta T$ & segment length in low-level steps \\
 \bottomrule
-\end{tabular}}}
+\end{tabular}}
 \end{table}
 
 \subsection{Transport}
 
 Let $m$ and $m'$ be the machines of two consecutive operations of the same
-job. If $m=m'$, no transport is required. Otherwise the job must be moved
-from $m$ to $m'$. Let $d_{m,m'}$ be the travel time between the two machines.
+job, and let $u_w$ be the load/unload station of workshop $w$. A job enters
+the shop at the station of the workshop that hosts its first operation, so
+the first operation is moved from $u_w$ to its machine. If $m=m'$, no
+transport is required.
+
+Let $d_{a,b}$ be the travel time between two nodes, where a node is either a
+machine or a station. A machine belongs to exactly one workshop, and
+$d_{m,u_w}$ is the distance from machine $m$ to its own station.
 
 If $m$ and $m'$ belong to the same workshop, one AGV of that workshop
-performs the transport. The loaded travel time is $d_{m,m'}$. The AGV first
-travels empty from its current position to $m$. The empty travel time is
-added to the start time of the next operation, but not to the transport time
-in the objective.
+performs the transport. The AGV first travels empty from its current position
+to $m$, and then carries the job to $m'$. The loaded travel time is
+$d_{m,m'}$; the empty travel time is $d_{p,m}$, where $p$ is the position of
+the AGV.
 
-If $m$ and $m'$ belong to different workshops, the transport is split into
-two legs with a handover delay:
+If $m$ and $m'$ belong to different workshops, the transport uses the two
+stations:
 \begin{equation}
-d_{m,m'}=\tau^{s}_{m,m'}+\delta_{m,m'}+\tau^{d}_{m,m'},
+m \;\xrightarrow{\text{AGV of }w}\; u_{w}
+\;\xrightarrow{\text{transfer}}\; u_{w'}
+\;\xrightarrow{\text{AGV of }w'}\; m',
 \label{eq:split}
 \end{equation}
-where $\delta_{m,m'}=\min(\delta,d_{m,m'})$ is a fixed delay that consumes
-no AGV, and $\tau^{s}$ and $\tau^{d}$ are the loaded travel times of the
-source and target legs. The remaining travel $d_{m,m'}-\delta_{m,m'}$ is
-split between the two legs by a fixed ratio $\rho$. A source-workshop AGV
-performs the first leg and a target-workshop AGV performs the second leg.
-The experiments use $\delta=5$ and $\rho=0.5$.
+where $w$ and $w'$ are the workshops of $m$ and $m'$. The transfer between
+the two stations consumes no AGV and takes $d_{u_w,u_{w'}}$. A
+source-workshop AGV performs the first leg and stays at $u_w$ afterwards; a
+target-workshop AGV performs the last leg. There is no fixed delay and no
+fixed split ratio.
+
+The transport term of the objective counts both the loaded and the empty
+AGV travel. The empty travel is charged at a fraction $\rho_e$ of the loaded
+power, $\rho_e=0.5$ in the experiments.
 
 \subsection{Objectives}
 
@@ -128,16 +139,19 @@ The model makes the following assumptions.
 \begin{itemize}
 \item[(A1)] AGVs are assigned to workshops and do not move between
 workshops.
-\item[(A2)] A cross-workshop transport consists of a source leg, a fixed
-handover delay, and a target leg. The handover point is the first machine of
-the target workshop.
+\item[(A2)] Each workshop has one load/unload station. A job enters the
+shop at the station of the workshop that hosts its first operation, and
+a cross-workshop transport goes from the source machine to the source
+station, transfers between the two stations, and continues from the
+target station to the target machine.
 \item[(A3)] AGVs are single-load. Loading and unloading take zero time.
 There is no charging and no AGV failure.
-\item[(A4)] The transport time in \eqref{eq:objective} counts loaded travel
-only. Empty travel and waiting are part of the schedule but not of
-$\Ttrans$.
-\item[(A5)] After a source leg, the position of the source AGV is not
-tracked; its next empty travel is approximated as zero.
+\item[(A4)] The transport term of \eqref{eq:objective} counts loaded and
+empty AGV travel; empty travel is charged at $
+ho_e=0.5$ of the loaded
+power. AGV waiting is not charged.
+\item[(A5)] The position of every AGV is tracked at all times, including
+a source AGV that has stopped at its station.
 \end{itemize}
 
 Assumptions (A1)--(A2) define the transport model. Assumptions (A3)--(A5)

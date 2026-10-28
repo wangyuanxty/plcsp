@@ -4,6 +4,11 @@
 """
 import numpy as np
 
+try:  # scripts add ``plcsp_v5/`` to ``sys.path``
+    from agv.state import idle_cost, resolve_idle_mode
+except ImportError:  # repository root only
+    from plcsp_v5.agv.state import idle_cost, resolve_idle_mode
+
 
 """def find_max_st_in_inedge(G, taskid, edge_init_weight):
     inedge_list = list(G.in_edges(taskid)) # 找到所有入边
@@ -86,6 +91,15 @@ def find_max_arrivaTime_for_currentNode(G, taskid, edge_init_weight, configs):
         max_list.append(max_val)
         # print(exist_list)
     st_currentTask = max(max_list)  # 必定要选最大值，因为是有先后约束的，不能选小的先开始的，约束不满足！
+
+    # [v5 M2] Earliest-start override for a task that has no AGV transport
+    # edge, i.e. the first operation of a job entering at a load/unload
+    # station.  Inactive unless the caller sets the override.
+    ready_overrides = getattr(G, "graph", {}).get("ready_override", None)
+    if isinstance(ready_overrides, dict):
+        value = ready_overrides.get(int(taskid))
+        if value is not None:
+            st_currentTask = max(float(st_currentTask), float(value))
 
     return st_currentTask
 
@@ -174,33 +188,53 @@ machine_route里边的task是有顺序的，代表当前m被选取后的task的�
 3、不断累加其中的空白！
 4、其中必然会包含transT的时间，有的时候是别的task的dur，但是说实际的，有这时间必须要等待的（无非就是最后不算it？）
 """
-def calculate_idle_t_for_each_machine(G, machineRoute, p2_ins):
-    blank = 0
-    sum_idle = 0
-    count = 0  # 画图的纵坐标
-    # for m_id in machineRoute.keys():  # key的名字
-    #     count += 1
-    # for route in machineRoute.values():  # 字典的value的列表
-    for m_index, route in machineRoute.items():  # 字典的key和value的列表  todo 1113-新增空闲功率的存在！
-        # 防止某些设备列表中只有一个任务
+def calculate_idle_t_for_each_machine(G, machineRoute, p2_ins=None,
+                                      idle_mode=None):
+    """Machine-idle term from the current machine routes.
+
+    ``idle_mode="gap"`` is the old reading: leading idle plus the gaps
+    between consecutive operations.  ``idle_mode="trailing"`` (default)
+    is ``sum_k power_k * (MKT - P_k)``, which also charges every machine
+    from its last operation to the makespan.  The value is recomputed
+    from the routes on every call, so no accumulator is involved.
+
+    ``p2_ins`` is the optional idle-power row ``(1, n_machine)``; v5 uses
+    all ones.
+    """
+    mode = resolve_idle_mode(idle_mode)
+
+    def power(m_index):
+        if p2_ins is None:
+            return 1.0
+        return float(p2_ins[0][m_index])
+
+    sum_idle = 0.0
+    proc = [0.0] * len(machineRoute)
+    makespan = 0.0
+    for m_index, route in machineRoute.items():
+        m_index = int(m_index)
+        p = power(m_index)
+        route_proc = 0.0
+        for task in route:
+            route_proc += float(G.nodes[task]['duration'])
+            ft = float(G.nodes[task]['finish_time'])
+            if ft > makespan:
+                makespan = ft
+        proc[m_index] = route_proc
+
         if len(route) == 1:
-            blank = G.nodes[route[0]]['start_time'] - 0  # 空闲时间就是其开始时间和0的偏差
-            blank = blank * p2_ins[0][m_index]   # 空闲的时间 * 对应m的空闲功率！
-            sum_idle = sum_idle + blank
-        elif len(route) > 1:  # 防止在每一步运行的时候，出现空集的操作
-            # 每个列表的首个任务，计算其空闲时间
             blank = G.nodes[route[0]]['start_time'] - 0
-            blank = blank * p2_ins[0][m_index]  # 空闲的时间 * 对应m的空闲功率！
-            sum_idle = sum_idle + blank
+            sum_idle = sum_idle + blank * p
+        elif len(route) > 1:
+            blank = G.nodes[route[0]]['start_time'] - 0
+            sum_idle = sum_idle + blank * p
+            for i in range(len(route) - 1):
+                blank = (G.nodes[route[i + 1]]['start_time']
+                         - G.nodes[route[i]]['finish_time'])
+                sum_idle = sum_idle + blank * p
 
-            for i in range(len(route) - 1):  # 每个value列表中的元素个数 - 1
-                blank = G.nodes[route[i + 1]]['start_time'] - G.nodes[route[i]]['finish_time']  # 遍历每个列表中的元素：后一个st开始 - 前一个ft结束
-                blank = blank * p2_ins[0][m_index]  # 空闲的时间 * 对应m的空闲功率！
-                sum_idle = sum_idle + blank  # 遍历玩所有元素，求和
-
-    """if_print(1, "根据machine_route计算的：空闲时间{}".format(sum_idle))"""
-
-    return sum_idle
+    idle_power = [power(k) for k in range(len(machineRoute))]
+    return idle_cost(mode, sum_idle, proc, makespan, idle_power)
 
 
 def machine_context_features(G, machine_routes, task_idx, dur_row, tt, n_machine):

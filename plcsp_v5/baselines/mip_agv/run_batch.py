@@ -28,6 +28,7 @@ FIELDS = ["idx", "stage_a_obj", "rule_obj", "milp_obj", "best_obj",
 
 def run_one(inst_path: str, idx: int, args) -> dict:
     started = time.time()
+    lu_station = int(getattr(args, "lu_station", 0))
     inst = load_instance(inst_path, idx)
     sched = solve(inst, time_limit=args.stage_a_time, workers=args.workers)
     if sched is None:
@@ -35,21 +36,25 @@ def run_one(inst_path: str, idx: int, args) -> dict:
                 "seconds": round(time.time() - started, 1)}
 
     order = task_order_from_starts(sched.start, inst.n_job, inst.n_op)
-    rule = simulate(inst, order, sched.machine, n_agv=args.n_agv)
+    rule = simulate(inst, order, sched.machine, n_agv=args.n_agv,
+                    lu_station=lu_station)
     best, best_source = rule, "rule"
     starts = rule.starts
     for it in range(args.iters):
-        legs = build_legs(inst, order, sched.machine, starts)
+        legs = build_legs(inst, order, sched.machine, starts,
+                          lu_station=lu_station)
         if not legs:
             break
         plan, _ = solve_routing(inst, legs, args.n_agv,
                                 time_limit=args.routing_time,
-                                workers=args.workers)
+                                workers=args.workers,
+                                lu_station=lu_station)
         sim = simulate(
             inst, order, sched.machine, n_agv=args.n_agv,
             pick=lambda step, ctx: plan.get(
                 ctx["tau"], (ctx["src_pool"][0],
-                             ctx["dst_pool"][0] if ctx["dst_pool"] else -1)))
+                             ctx["dst_pool"][0] if ctx["dst_pool"] else -1)),
+            lu_station=lu_station)
         if sim.objective < best.objective:
             best, best_source = sim, f"milp{it}"
         starts = sim.starts
@@ -72,8 +77,8 @@ def run_one(inst_path: str, idx: int, args) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instance", default=(
-        "plcsp_v5/instance/test_Instance_J6M6E2.pkl"))
+    ap.add_argument("--instance", default=None,
+                    help="default: test_Instance_J6M6E2(_lu).pkl")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--n_shards", type=int, default=4)
     ap.add_argument("--n_instances", type=int, default=100)
@@ -82,8 +87,18 @@ def main() -> None:
     ap.add_argument("--routing_time", type=float, default=8.0)
     ap.add_argument("--iters", type=int, default=3)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--lu_station", type=int, default=0,
+                    help="1 = M2 load/unload-station transport model")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.instance is None:
+        suffix = "_lu" if args.lu_station else ""
+        args.instance = f"plcsp_v5/instance/test_Instance_J6M6E2{suffix}.pkl"
+    # M2 results must not overwrite the old-model files.
+    if args.lu_station and "m2" not in args.out.lower():
+        base = os.path.basename(args.out)
+        args.out = os.path.join(os.path.dirname(args.out), "m2_" + base)
+        print(f"lu_station=1: writing M2 results to {args.out}", flush=True)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", newline="") as fh:

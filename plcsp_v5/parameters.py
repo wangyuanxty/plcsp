@@ -103,6 +103,8 @@ parser.add_argument('--use_orthogonal', type=int, default=False, help='hyper_par
 parser.add_argument('--neighbor_pooling_type', type=str, default="average", help='gcn_paras') # 定义pooling或aggregate的方式（暂时用average，比max什么的好）
 parser.add_argument('--encoder_type', type=str, default='e2e', choices=['e2e', 'settrans', 'hybrid', 'hybrid_full', 'job_st'], help='[v5] e2e=GIN+GAT, settrans=ST+ST, hybrid=GIN job + ST machine, hybrid_full=also ST machine critic, job_st=ST job + original GAT machine')
 parser.add_argument('--algo', type=str, default='ppo', choices=['ppo', 'grpo'], help='[v5] policy optimization: ppo (critics) or grpo (critic-free group-relative)')
+parser.add_argument('--group_lambda', type=int, default=-1, help='[v5] 1 = one lambda per group, 0 = one per env, -1 = auto (grpo: 1, ppo: 0)')
+parser.add_argument('--lu_station', type=int, default=0, help='[v5 M2] 1 = load/unload stations, entry transport, loaded+empty in the transport term')
 parser.add_argument('--st_graph_bias', type=int, default=0, help='[v5] inject ST attention bias from the task graph')
 parser.add_argument('--st_token_context', type=int, default=1, help='[v5] add edge-consequence features to ST task tokens')
 parser.add_argument('--st_full_context', type=int, default=0, help='[v5] add full job/machine/edge context features to ST')
