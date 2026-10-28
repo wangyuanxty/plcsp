@@ -662,7 +662,8 @@ def experiment(
                     machine_bias = machine_rule_bias(
                         machine_candidate_fea_batch, mask_machine_batch_,
                         top_machine, variant['hier_alpha'],
-                        device=variant['device'])
+                        device=variant['device'],
+                        machine_ctx=machine_context_batch)
                 
                 """
                 TODO m_fea1（job_actor后产生） 和 m_fea2（env后产生） 都要输入到machine网络中，进行GAT自聚合
@@ -764,14 +765,12 @@ def experiment(
                     agv_mask_store = torch.from_numpy(agv_mask_np).bool()
                     agv_valid_store = torch.zeros(_b, dtype=torch.bool)
                 elif bool(variant.get('agv_rule', 0)):
-                    try:
-                        from agv.state import earliest_free_agv
-                    except ImportError:
-                        from plcsp_v5.agv.state import earliest_free_agv
-                    agv_actions = np.asarray(
-                        [earliest_free_agv(paral_env.agv_states[i],
-                                           agv_mask_np[i])
-                         for i in range(_b)], dtype=np.int64)
+                    # NVS: nearest vehicle selection by deadhead travel,
+                    # feature 7 of the AGV feature vector.
+                    _dead = np.array(agv_feat_np[:, :, 7], dtype=np.float64)
+                    _dead = np.where(np.asarray(agv_mask_np, dtype=bool),
+                                     _dead, np.inf)
+                    agv_actions = np.argmin(_dead, axis=1).astype(np.int64)
                     a_agv_store = torch.from_numpy(agv_actions)
                     a_agv_logprob_store = torch.zeros(_b, dtype=torch.float)
                     agv_v_store = torch.zeros(_b, 2, dtype=torch.float)

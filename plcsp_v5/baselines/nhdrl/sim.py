@@ -38,12 +38,13 @@ from typing import Optional, Sequence
 import numpy as np
 
 try:  # scripts add ``plcsp_v5/`` to ``sys.path``
-    from agv.state import (RHO_EMPTY, m2_node_dist, station_node,
+    from agv.state import (DEFAULT_IDLE_MODE, RHO_EMPTY, idle_cost,
+                           m2_node_dist, resolve_idle_mode, station_node,
                            transport_timing_m2)
 except ImportError:  # repository root only
-    from plcsp_v5.agv.state import (RHO_EMPTY,
-                                   m2_node_dist, station_node,
-                                    transport_timing_m2)
+    from plcsp_v5.agv.state import (DEFAULT_IDLE_MODE, RHO_EMPTY, idle_cost,
+                                    m2_node_dist, resolve_idle_mode,
+                                    station_node, transport_timing_m2)
 
 N_AGV_DEFAULT = 6
 CROSS_DELAY = 5.0
@@ -181,7 +182,8 @@ class NestedSim:
                  n_agv: int = N_AGV_DEFAULT,
                  lu_station: bool = False,
                  lu_machine: Optional[np.ndarray] = None,
-                 lu_edge: Optional[np.ndarray] = None):
+                 lu_edge: Optional[np.ndarray] = None,
+                 idle_mode: str = DEFAULT_IDLE_MODE):
         self.t = np.asarray(t, dtype=np.float64)
         self.p = np.asarray(p, dtype=np.float64)
         self.tt = np.asarray(tt, dtype=np.float64)
@@ -194,6 +196,11 @@ class NestedSim:
         self.n_agv = int(n_agv)
         if self.n_agv < self.n_edge:
             raise ValueError("n_agv must be at least n_edge")
+
+        # Machine-idle accounting must follow the decoder.  The default is
+        # the published definition sum_k (MKT - P_k); "gap" is the old
+        # reading (leading idle plus internal gaps only).
+        self.idle_mode = resolve_idle_mode(idle_mode)
 
         self.lu_station = bool(lu_station)
         self.lu_machine: Optional[np.ndarray] = None
@@ -316,7 +323,8 @@ class NestedSim:
         return float(np.max(self.finish[self.finish > 0])) if np.any(
             self.finish > 0) else 0.0
 
-    def partial_idle(self) -> float:
+    def gap_idle(self) -> float:
+        """Old reading: leading idle plus the gaps between operations."""
         idle = 0.0
         for route in self.routes:
             if not route:
@@ -325,6 +333,17 @@ class NestedSim:
             for k in range(len(route) - 1):
                 idle += route[k + 1][0] - route[k][1]
         return float(idle)
+
+    def partial_idle(self) -> float:
+        """Machine-idle term under ``idle_mode``.
+
+        ``trailing`` (default) charges every machine ``MKT - P_k``; ``gap``
+        keeps the old leading-plus-gaps reading.  The final value equals the
+        decoder's ``idleT`` because ``partial_ms`` equals the final makespan.
+        """
+        gap = self.gap_idle() if self.idle_mode == "gap" else 0.0
+        return idle_cost(self.idle_mode, gap, self.machine_proc,
+                         self.partial_ms())
 
     def cost_non_ms(self) -> float:
         """Non-makespan part of the v5 objective."""

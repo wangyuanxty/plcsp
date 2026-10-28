@@ -49,7 +49,7 @@ def main() -> None:
     args = ap.parse_args()
 
     data = pickle.load(open(args.instances, "rb"))
-    t_all, p_all, tt_all, edge_all = data
+    t_all, p_all, tt_all, edge_all = data[:4]
     rules = (("fifo", "spt"), ("mor", "seyc"), ("lwkr_pt", "spt"))
     worst_cost = 0.0
     worst_time = 0.0

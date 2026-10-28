@@ -33,6 +33,10 @@ from pathlib import Path
 
 import numpy as np
 
+_ROOT = str(Path(__file__).resolve().parents[2])
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 try:  # scripts add ``plcsp_v5/`` to ``sys.path``
     from agv.state import (DEFAULT_IDLE_MODE, idle_cost,
                            resolve_idle_mode)
@@ -64,11 +68,15 @@ def split_cross(total, delay=CROSS_DELAY, ratio=LEG_RATIO):
 
 
 def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV,
-           idle_mode=DEFAULT_IDLE_MODE):
+           idle_mode=DEFAULT_IDLE_MODE, insert_gaps=True):
     """Decode an operation sequence + machine assignment into v5 costs.
 
     ``idle_mode="trailing"`` charges ``sum_k (MKT - P_k)``; ``"gap"``
     keeps the old leading-plus-gaps reading.
+
+    ``insert_gaps=False`` appends every operation behind the last one on
+    its machine.  This mirrors the append-only scheduling of the upstream
+    PDR environment, which never left-shifts.
     """
     idle_mode = resolve_idle_mode(idle_mode)
     n_task, n_machine = t.shape
@@ -157,13 +165,16 @@ def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV,
 
         route = routes[m]
         pos = len(route)
-        for k in range(len(route) + 1):
-            prev_ft = route[k - 1][1] if k > 0 else 0.0
-            next_st = route[k][0] if k < len(route) else math.inf
-            st = max(ready, prev_ft)
-            if st + dur <= next_st + 1e-9:
-                pos = k
-                break
+        st = max(ready, route[-1][1] if route else 0.0)
+        if insert_gaps:
+            for k in range(len(route) + 1):
+                prev_ft = route[k - 1][1] if k > 0 else 0.0
+                next_st = route[k][0] if k < len(route) else math.inf
+                cand = max(ready, prev_ft)
+                if cand + dur <= next_st + 1e-9:
+                    pos = k
+                    st = cand
+                    break
         route.insert(pos, (st, st + dur, task))
         start[task] = st
         finish[task] = st + dur
@@ -251,11 +262,15 @@ def pdr_schedule(t, p, job_rule, machine_rule):
 
 
 def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
-              n_agv=N_AGV, idle_mode=DEFAULT_IDLE_MODE):
+              n_agv=N_AGV, idle_mode=DEFAULT_IDLE_MODE,
+              agv_rule="earliest_free"):
     """M2 decoder: load/unload stations, entry transport, empty travel.
 
     The objective counts loaded and empty AGV travel at unit power.
-    ``idle_mode`` follows ``decode``.
+    ``idle_mode`` follows ``decode``.  ``agv_rule`` selects the AGV
+    dispatch rule: ``earliest_free`` (minimum free time, the historical
+    default), ``nearest`` (minimum deadhead travel) or
+    ``earliest_arrival`` (waiting time plus deadhead travel).
     """
     idle_mode = resolve_idle_mode(idle_mode)
     try:
@@ -282,8 +297,21 @@ def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
         return m2_node_dist(a, b, travel, n_machine, machine_edge,
                             lu_machine, lu_edge)
 
+    def pick(pool, pickup_node, ready_t):
+        """Choose one AGV of ``pool`` under ``agv_rule``."""
+        if agv_rule == "nearest":
+            return min(pool, key=lambda k: (dist(agvs[k][1], pickup_node), k))
+        if agv_rule == "earliest_arrival":
+            return min(pool, key=lambda k: (
+                max(ready_t, agvs[k][2]) + dist(agvs[k][1], pickup_node), k))
+        if agv_rule == "least_utilized":
+            return min(pool, key=lambda k: (agvs[k][3], k))
+        return min(pool, key=lambda k: (agvs[k][2], k))
+
     station = [int(n_machine) + w for w in range(n_edge)]
-    agvs = [[k % n_edge, station[k % n_edge], 0.0] for k in range(n_agv)]
+    # [edge, location, free_time, cumulative travel]
+    agvs = [[k % n_edge, station[k % n_edge], 0.0, 0.0]
+            for k in range(n_agv)]
 
     op_count = [0] * n_job
     finish = [0.0] * n_task
@@ -323,13 +351,14 @@ def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
             src_idx = [k for k, a in enumerate(agvs) if a[0] == pe]
             if not src_idx:
                 raise ValueError(f"workshop {pe} has no AGV")
-            src = min(src_idx, key=lambda k: (agvs[k][2], k))
+            src = pick(src_idx, pickup, prev_ft)
             start_src = max(prev_ft, agvs[src][2])
             dead = dist(agvs[src][1], pickup)
             loaded = dist(pickup, m)
             finish_src = start_src + dead + loaded
             agvs[src][2] = finish_src
             agvs[src][1] = m
+            agvs[src][3] += dead + loaded
             loaded_total += loaded
             empty_total += dead
             ready = finish_src
@@ -340,21 +369,23 @@ def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
                 raise ValueError(f"workshop {pe} has no AGV")
             if not dst_idx:
                 raise ValueError(f"workshop {de} has no AGV")
-            src = min(src_idx, key=lambda k: (agvs[k][2], k))
-            dst = min(dst_idx, key=lambda k: (agvs[k][2], k))
+            src = pick(src_idx, pickup, prev_ft)
             start_src = max(prev_ft, agvs[src][2])
             dead_src = dist(agvs[src][1], pickup)
             t_src = float(lu_machine[pickup])
             src_arrival = start_src + dead_src + t_src
             boundary = src_arrival + float(lu_edge[pe][de])
+            dst = pick(dst_idx, station[de], boundary)
             start_dst = max(boundary, agvs[dst][2])
             dead_dst = dist(agvs[dst][1], station[de])
             t_dst = float(lu_machine[m])
             finish_dst = start_dst + dead_dst + t_dst
             agvs[src][2] = src_arrival
             agvs[src][1] = station[pe]
+            agvs[src][3] += dead_src
             agvs[dst][2] = finish_dst
             agvs[dst][1] = m
+            agvs[dst][3] += dead_dst + t_dst
             loaded_total += t_src + t_dst
             empty_total += dead_src + dead_dst
             ready = finish_dst
@@ -393,7 +424,8 @@ def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
 
 def score_schedule(t, p, tt, edge_info, os_seq, ms, agv=True,
                    lu_machine=None, lu_edge=None,
-                   idle_mode=DEFAULT_IDLE_MODE):
+                   idle_mode=DEFAULT_IDLE_MODE,
+                   agv_rule="earliest_free"):
     """Score one schedule with the M1 decoder or the M2 decoder.
 
     ``decode_m2`` is selected when ``lu_machine`` is given; ``--lu 0``
@@ -401,7 +433,8 @@ def score_schedule(t, p, tt, edge_info, os_seq, ms, agv=True,
     """
     if lu_machine is not None:
         return decode_m2(t, p, tt, edge_info, lu_machine, lu_edge,
-                         os_seq, ms, idle_mode=idle_mode)
+                         os_seq, ms, idle_mode=idle_mode,
+                         agv_rule=agv_rule)
     return decode(t, p, tt, edge_info, os_seq, ms, agv=agv,
                   idle_mode=idle_mode)
 
@@ -446,7 +479,8 @@ def _pox(a, b, rng):
 
 def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
                  return_schedule=False, lu_machine=None, lu_edge=None,
-                 idle_mode=DEFAULT_IDLE_MODE):
+                 idle_mode=DEFAULT_IDLE_MODE,
+                 agv_rule="earliest_free"):
     idle_mode = resolve_idle_mode(idle_mode)
     rng = random.Random(seed)
     n_task, n_machine = t.shape
@@ -458,7 +492,7 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
         return score_schedule(
             t, p, tt, edge_info, os_seq, ms, agv=agv,
             lu_machine=lu_machine, lu_edge=lu_edge,
-            idle_mode=idle_mode)["obj"]
+            idle_mode=idle_mode, agv_rule=agv_rule)["obj"]
 
     population = []
     for _ in range(pop):
@@ -492,7 +526,7 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
     best = population[0]
     out = score_schedule(t, p, tt, edge_info, best[0], best[1], agv=agv,
                          lu_machine=lu_machine, lu_edge=lu_edge,
-                         idle_mode=idle_mode)
+                         idle_mode=idle_mode, agv_rule=agv_rule)
     result = {"obj": out["obj"], "mk": out["mk"], "pt": out["pt"],
               "transT": out["transT"], "idleT": out["idleT"],
               "n_eval": n_eval}
@@ -518,13 +552,13 @@ def _worker(args):
     lu_machine = data[4] if len(data) > 4 else None
     lu_edge = data[5] if len(data) > 5 else None
     if kind == "pdr":
-        inst, jr, mr, agv, idle_mode = params
+        inst, jr, mr, agv, idle_mode, agv_rule = params
         os_seq, ms = pdr_schedule(t, p, jr, mr)
         out = score_schedule(t, p, tt, edge_info, os_seq, ms, agv=agv,
                              lu_machine=lu_machine, lu_edge=lu_edge,
-                             idle_mode=idle_mode)
+                             idle_mode=idle_mode, agv_rule=agv_rule)
         return {"instance": inst, "job_rule": jr, "machine_rule": mr,
-                **_cost_fields(out)}
+                "agv_rule": agv_rule, **_cost_fields(out)}
     if kind == "ra":
         inst, seed, agv, idle_mode = params
         rng = random.Random(seed)
@@ -545,12 +579,15 @@ def _worker(args):
 
 
 def _pdr_summary(records, wall):
-    keys = sorted({(r["job_rule"], r["machine_rule"]) for r in records})
+    keys = sorted({(r["job_rule"], r["machine_rule"], r.get("agv_rule", ""))
+                   for r in records})
     per_rule = []
-    for jr, mr in keys:
+    for jr, mr, ar in keys:
         vals = [r["obj"] for r in records
-                if r["job_rule"] == jr and r["machine_rule"] == mr]
-        per_rule.append({"job_rule": jr, "machine_rule": mr, **_stat(vals)})
+                if r["job_rule"] == jr and r["machine_rule"] == mr
+                and r.get("agv_rule", "") == ar]
+        per_rule.append({"job_rule": jr, "machine_rule": mr, "agv_rule": ar,
+                         **_stat(vals)})
     per_rule.sort(key=lambda x: x["mean"])
     return {"overall": _stat([r["obj"] for r in records]),
             "per_rule": per_rule, "wall_s": wall}
@@ -617,6 +654,9 @@ def main():
                     default=DEFAULT_IDLE_MODE,
                     help="machine-idle term: trailing = sum_k (MKT - P_k), "
                          "gap = leading idle plus internal gaps (old)")
+    ap.add_argument("--agv_rules", default="earliest_free",
+                    help="comma list of AGV dispatch rules for --mode pdr: "
+                         "earliest_free,nearest,earliest_arrival")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -647,6 +687,8 @@ def main():
             return base + (lu_m_all[i], lu_e_all[i])
         return base
 
+    agv_rules = [x.strip() for x in str(args.agv_rules).split(",")
+                 if x.strip()]
     if args.mode == "pdr":
         jr = ["fifo", "mor", "lwkr_t", "lwkr_pt", "mwkr_t", "mwkr_pt"]
         mr = ["spt", "seyc"]
@@ -654,8 +696,9 @@ def main():
             inst = inst_data(i)
             for a in jr:
                 for b in mr:
-                    jobs.append(("pdr", inst,
-                                 (i, a, b, agv, args.idle_mode)))
+                    for ar in agv_rules:
+                        jobs.append(("pdr", inst,
+                                     (i, a, b, agv, args.idle_mode, ar)))
     elif args.mode == "ra":
         for i in range(n):
             inst = inst_data(i)
@@ -666,7 +709,8 @@ def main():
                 inst = inst_data(i)
                 params = dict(instance=i, seed=s + 1, pop=args.pop,
                               gen=args.gen, agv=agv,
-                              idle_mode=args.idle_mode)
+                              idle_mode=args.idle_mode,
+                              agv_rule=agv_rules[0])
                 if lu:
                     params.update(lu_machine=lu_m_all[i],
                                   lu_edge=lu_e_all[i])

@@ -147,21 +147,34 @@ PPO（对照）：JA / MA / AA 局部 critic + 4 目标 global critic；GAE。
 
 ### 3.2 规则集
 
-Job 规则（4）：
+Job 规则（3）：
 
-- `est`：最早预估开始
 - `eft`：最早预估完成
-- `spt`：最短预估加工时间
+- `lwko`：剩余工序最少
 - `mwko`：剩余工序最多
 
-Machine 规则（3）：
+`est` 删除（被 `eft` 弱支配）。`min_e` 删除：工件层面的加工能耗与作业顺序无关，
+总能耗由机器分配决定，把它当作业优先级规则没有改变能耗的通道。
+
+Machine 规则（4）：
 
 - `min_t`：最短加工时间
 - `min_pt`：最低加工能耗
 - `min_trans`：最短运输时间
+- `min_ready`：最早可开工（机器上下文第 1 列）
 
-当前 RS 只控制 job / machine；不控制 AGV。  
-若要把 AGV 规则也交给 RS：4 × 3 × 3 = 36 个动作，列为 E6b。
+`min_ready` 补的是"这台机器什么时候有空"这一维，其余三条都不看可用性。
+
+AGV 规则（3）：
+
+- `nearest`：最小空驶距离（NV）
+- `earliest_arrival`：最小（剩余忙碌时间 + 空驶距离）
+- `least_utilized`：最小累计行驶（LUV，装卸时间为 0 时等于累计忙碌时间）
+
+`earliest_free` 删除（被 `earliest_arrival` 弱支配）；`random` 删除（不是调度规则）。
+出处：NV 见 Egbelu & Tanchoco (1984), IJPR 22(3):359–374, DOI 10.1080/00207548408942459。
+
+三层动作空间大小：3 × 4 × 3 = 36。
 
 ### 3.3 偏好口径
 

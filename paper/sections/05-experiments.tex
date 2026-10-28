@@ -48,13 +48,13 @@ The baselines are adaptations of published methods, not reproductions. Two of th
 MOR, and the most- and least-work-remaining forms on processing time and on
 processing energy) with two machine rules (shortest processing time and
 minimum processing energy), as in Wang et
-al.~\cite{wang2025multitarget}. AGVs follow the earliest-free rule. The best
-rule pair is reported.
+al.~\cite{wang2025multitarget}. AGVs follow one of the two AGV rules the
+controller selects from; the better one is reported.
 
 \paragraph{RGA} A random-key genetic algorithm with population 50 and 100
 generations, i.e.\ 4850 schedule evaluations per instance, with the operators
 of Zhang et al.~\cite{zhang2011rga}. It optimises the operation sequence and
-the machine assignment; AGVs are dispatched by the earliest-free rule. The
+the machine assignment; AGVs are dispatched by the earliest-arrival rule. The
 objective values are computed with a direct decoder, which reproduces the four
 simulator cost components exactly on random schedules; for the run-time
 measurement, each of the 4850 evaluations is replayed through the same DG
@@ -71,16 +71,9 @@ transfer \eqref{eq:split} follow the simulator. The time limit is 10~s for
 Stage~A and 8~s for each Stage~B solve; at $10\times10$, half the instances
 need a 60~s routing limit.
 
-\paragraph{B3} The multi-action DRL framework of Lei et
-al.~\cite{lei2022} is evaluated with the checkpoint released for each instance
-size: the job and machine actors are used greedily, the AGV is dispatched by
-the earliest-free rule, and the machine input is zero-padded to our feature
-width. It is a single checkpoint per size, not a three-seed method. We report
-it as an adapted baseline, not as a reproduction.
-
 \paragraph{E2E} The architecture of Wang et
 al.~\cite{wang2025multitarget} uses a GIN job encoder and a GAT machine
-encoder. We train it with PPO under the same protocol, with the earliest-free
+encoder. We train it with PPO under the same protocol, with the nearest-vehicle
 AGV rule. It is the published architecture retrained, not a reproduction of
 the numbers in that paper.
 
@@ -95,13 +88,16 @@ energy and transport rules. It is trained for 1500 episodes, the budget of
 the original paper. The authors released no code; the baseline is written
 from the paper and is not a reproduction.
 
-\paragraph{Shi et al.} The nested method of Shi et al.~\cite{shi2025nested}
-is adapted. An operation agent, a process agent with nine composite rules,
-and an AGV agent act in sequence; each is trained with its own PPO update on
-a shared reward that splits the makespan from the remaining objective. The
-original problem models AGV failures and load/unload stations; here the
-instances are static and the stations are not modelled. It is trained for
-1000 episodes. This baseline is also written from the paper.
+\paragraph{Excluded baseline} The nested method of
+Shi et al.~\cite{shi2025nested} was implemented and trained for 1000
+episodes, but it is not reported in Table~\ref{tab:baselines}. The best
+fixed rule in its action space attains 1008.93, 1184.86, and 2195.48 at the
+three sizes. Three seeds of the learned policy give 1957.67, 2870.31, and
+6292.75, and the ratio of the worst seed to the best spans 1.3 to 2.9. The
+decoder agrees with the shared decoder to zero, so the spread comes from the
+training procedure, not from the environment. One seed reaches 1255.72 at
+$6\times6$; the other two give 2045.72 and 2571.56. We exclude the method
+because this spread does not support a fair comparison.
 
 \paragraph{Learned baselines} PPO with per-head critics replaces GRPO in the
 same architecture. The no-RS variant removes the top-level rule selector.
@@ -116,36 +112,30 @@ earliest-free rule in 50 instances and ties in 50; the mean improvement is
 3.33 and the maximum is 21.24. At $10\times10$ the routing stage needs a
 60~s limit on half the instances; the mean solver time in the table includes
 those runs. The per-instance standard deviations at
-$6\times6$ are 139.5 (PDR), 127.8 (B3), 94.7 (E2E), 68.7 (ours), 72.1 (MIP),
+$6\times6$ are 139.5 (PDR), 94.7 (E2E), 68.7 (ours), 72.1 (MIP),
 and 56.1 (RGA). Table~\ref{tab:pdr} lists the twelve rule
 pairs at the three sizes. The best pair changes with size: mor/spt at
 $6\times6$ and $10\times10$, mor/seyc at $10\times6$.
 
 \begin{table*}[t]
 \centering
-\caption{Objective and run time on the three instance families. Objectives are
-means over the 100 test instances; the learned methods are averaged over three
-seeds. Li and Shi are adapted baselines
-written from the papers, not reproductions. The $6	imes6$ row uses the
-revised transport model; cells marked \TBD{M}{run} are being regenerated. MIP
-is the mean of three runs and re-solves each instance with a 10~s limit.
-The $10\times10$ controller runs
-were stopped at episode 170, and the best validation checkpoint of each seed
-was evaluated. Times are per instance: PDR and
-RGA are measured on one instance per size through the DG simulator used by
-the controller, MIP is solver time, the controller runs on one GPU. ``--''
-means not measured. Lower is better.}
+\caption{Objective on the three instance families, all methods measured with
+the same decoder and the same transport model. Each value is the mean over the
+100 test instances; the learned methods are averaged over three seeds. Li is
+an adapted baseline written from the paper, not a reproduction. Cells
+marked \TBD{M}{run} are being regenerated under the revised idle term; only the
+rule baseline is current. Lower is better.}
 \label{tab:baselines}
-\begin{tabular}{llcccccccc}
+\begin{tabular}{lccc}
 \toprule
-Size & & PDR & B3 & E2E & Li & Shi & Ours & MIP & RGA \\
+Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ \\
 \midrule
-\multirow{2}{*}{$6\times6\times2$} & Obj. & 1070.91 & 811.81 & 938.97 & 945.82 & 1224.92 & 632.56 & 502.97 & 520.53 \\
- & Time (s) & 0.091 & -- & -- & -- & -- & 0.56 & 12.3 & 437.8 \\
-\multirow{2}{*}{$10\times6\times2$} & Obj. & 1234.15 & \TBD{M}{run} & -- & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} & 635.50 \\
- & Time (s) & 0.294 & -- & -- & -- & -- & -- & 16.9 & 1460.0 \\
-\multirow{2}{*}{$10\times10\times2$} & Obj. & 2904.05 & \TBD{M}{run} & -- & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} & 1732.45 \\
- & Time (s) & 0.858 & -- & -- & -- & -- & -- & 32.7 & 4828.9 \\
+Ours (H-ST-GRPO) & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
+MIP (two-stage CP-SAT) & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
+RGA & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
+PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 \\
+E2E (Wang et al., retrained) & \TBD{M}{run} & -- & -- \\
+Li et al. & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -155,24 +145,51 @@ Size & & PDR & B3 & E2E & Li & Shi & Ours & MIP & RGA \\
 \centering
 \caption{Objective of the twelve PDR pairs on the three instance families.
 Each cell is the mean over the 100 test instances, with the per-instance
-standard deviation in parentheses. Lower is better.}
+standard deviation in parentheses. Each pair is run under the three AGV
+dispatch rules of the controller. Lower is better.}
 \label{tab:pdr}
-\begin{tabular}{llccc}
+\footnotesize
+\renewcommand{\arraystretch}{0.92}
+\begin{tabular}{lllccc}
 \toprule
-Job rule & Machine rule & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ \\
+Job rule & Machine rule & AGV rule & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ \\
 \midrule
-mor & spt & 951.20 (139.49) & 1111.55 (176.02) & 2552.77 (252.66) \\
-mor & seyc & 975.70 (150.92) & 1101.30 (187.38) & 2655.28 (341.89) \\
-mwkr\_t & spt & 1011.31 (136.54) & 1235.09 (201.67) & 2852.92 (349.95) \\
-mwkr\_t & seyc & 1063.07 (182.03) & 1264.90 (225.25) & 2963.17 (399.88) \\
-mwkr\_pt & spt & 1150.76 (156.53) & 1422.05 (236.66) & 3500.56 (436.97) \\
-mwkr\_pt & seyc & 1179.19 (185.64) & 1460.50 (272.62) & 3536.55 (457.19) \\
-lwkr\_t & spt & 1837.16 (328.63) & 2832.45 (346.99) & 12413.88 (1238.98) \\
-lwkr\_t & seyc & 1880.06 (350.01) & 2946.68 (490.16) & 12610.02 (1324.08) \\
-fifo & spt & 1880.91 (309.56) & 2982.74 (494.63) & 12661.59 (1117.84) \\
-lwkr\_pt & spt & 1887.11 (370.06) & 2883.40 (395.68) & 12383.71 (1163.32) \\
-lwkr\_pt & seyc & 1902.03 (367.64) & 2914.07 (452.99) & 12673.24 (1258.92) \\
-fifo & seyc & 1944.94 (331.02) & 3002.62 (505.64) & 12939.03 (1266.73) \\
+mor & spt & nearest & 1402.44 (221.90) & 1593.57 (232.91) & 3785.40 (336.33) \\
+mor & spt & earliest\_arrival & 1319.24 (240.09) & 1481.60 (229.38) & 3288.35 (286.43) \\
+mor & spt & least\_utilized & 1421.66 (220.38) & 1585.02 (232.49) & 3752.25 (321.58) \\
+mor & seyc & nearest & 1419.06 (198.73) & 1600.00 (230.06) & 3910.08 (419.43) \\
+mor & seyc & earliest\_arrival & 1331.18 (193.51) & 1461.63 (221.82) & 3428.21 (385.53) \\
+mor & seyc & least\_utilized & 1444.67 (180.97) & 1604.82 (243.43) & 3889.13 (396.44) \\
+mwkr\_t & spt & nearest & 1465.36 (219.07) & 1802.05 (271.75) & 4166.26 (455.83) \\
+mwkr\_t & spt & earliest\_arrival & 1352.22 (217.31) & 1562.92 (242.15) & 3514.56 (354.63) \\
+mwkr\_t & spt & least\_utilized & 1534.72 (223.64) & 1810.96 (266.97) & 4297.29 (454.37) \\
+mwkr\_t & seyc & nearest & 1501.31 (231.09) & 1792.75 (292.54) & 4333.64 (553.17) \\
+mwkr\_t & seyc & earliest\_arrival & 1372.43 (210.54) & 1588.15 (259.31) & 3627.62 (437.59) \\
+mwkr\_t & seyc & least\_utilized & 1570.93 (241.12) & 1846.24 (316.21) & 4442.69 (502.53) \\
+mwkr\_pt & spt & nearest & 1737.52 (273.14) & 2144.95 (315.85) & 5251.33 (583.76) \\
+mwkr\_pt & spt & earliest\_arrival & 1504.25 (218.80) & 1771.95 (285.35) & 4146.93 (424.33) \\
+mwkr\_pt & spt & least\_utilized & 1846.53 (277.62) & 2219.12 (371.96) & 5653.35 (625.00) \\
+mwkr\_pt & seyc & nearest & 1772.77 (278.89) & 2242.80 (370.33) & 5383.22 (714.36) \\
+mwkr\_pt & seyc & earliest\_arrival & 1523.15 (237.85) & 1834.80 (271.45) & 4209.05 (426.48) \\
+mwkr\_pt & seyc & least\_utilized & 1879.33 (270.64) & 2359.34 (417.38) & 5688.99 (685.05) \\
+fifo & spt & nearest & 3806.24 (559.75) & 6163.02 (808.58) & 19572.60 (1732.98) \\
+fifo & spt & earliest\_arrival & 2192.01 (354.53) & 3128.64 (439.39) & 8629.11 (777.12) \\
+fifo & spt & least\_utilized & 3975.83 (545.58) & 6390.65 (800.66) & 20999.70 (1560.64) \\
+lwkr\_pt & spt & nearest & 3852.09 (540.96) & 6222.28 (907.93) & 19492.06 (1645.89) \\
+lwkr\_pt & spt & earliest\_arrival & 2198.88 (340.99) & 3160.94 (470.55) & 9047.59 (897.43) \\
+lwkr\_pt & spt & least\_utilized & 4096.92 (605.47) & 6322.54 (762.13) & 20961.73 (1423.31) \\
+fifo & seyc & nearest & 3884.62 (598.04) & 6431.68 (867.79) & 20031.40 (1760.46) \\
+fifo & seyc & earliest\_arrival & 2212.77 (351.11) & 3203.29 (485.89) & 8998.48 (855.13) \\
+fifo & seyc & least\_utilized & 4156.49 (542.33) & 6441.24 (850.87) & 21531.99 (1661.48) \\
+lwkr\_pt & seyc & nearest & 3864.34 (555.05) & 6369.61 (941.44) & 19983.41 (1735.39) \\
+lwkr\_pt & seyc & earliest\_arrival & 2218.27 (373.95) & 3254.81 (427.01) & 9165.84 (894.16) \\
+lwkr\_pt & seyc & least\_utilized & 4132.73 (559.92) & 6463.02 (858.29) & 21497.46 (1763.25) \\
+lwkr\_t & spt & nearest & 3778.10 (614.78) & 6293.32 (734.62) & 19619.90 (1617.69) \\
+lwkr\_t & spt & earliest\_arrival & 2221.92 (315.59) & 3174.42 (428.54) & 8968.42 (813.97) \\
+lwkr\_t & spt & least\_utilized & 4046.91 (556.81) & 6289.01 (696.54) & 21005.65 (1567.43) \\
+lwkr\_t & seyc & nearest & 3865.25 (641.54) & 6376.85 (880.20) & 20019.30 (1790.08) \\
+lwkr\_t & seyc & earliest\_arrival & 2303.36 (406.64) & 3282.16 (430.95) & 9285.69 (923.48) \\
+lwkr\_t & seyc & least\_utilized & 4205.55 (570.32) & 6491.78 (852.05) & 21437.79 (1685.86) \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -186,13 +203,9 @@ second; MIP solves two CP-SAT models and RGA evaluates 4850 schedules.
 Second, the AGV routing stage of MIP adds little on these instances: half
 of them are unchanged, and the mean gain is 3.33. The AGV fleet is not the
 binding resource at this size. Third, the retrained E2E architecture obtains
-743.62, which is 186.92 above the controller and 36.41 above B3. Fourth, the
-two adapted baselines separate. Li et al.\ is below the best rule pair at all
-three sizes, by 75.43, 283.19, and 645.02, and above the controller at the two
-sizes where both are measured, by 319.07 and 241.19. Shi et al.\ is close to
-the controller at $6\times6$ (736.00) and below the rule pair at the two
-larger sizes; its three seeds span 1315.76 to 5933.06 at $10\times10$, so the
-method is unstable at this budget.
+743.62, which is 186.92 above the controller. Fourth, Li et al.\ is below the
+best rule pair at all three sizes, by 75.43, 283.19, and 645.02, and above the
+controller at the two sizes where both are measured, by 319.07 and 241.19.
 Figure~\ref{fig:distribution} shows the per-instance distribution and the
 paired difference between RS and no RS.
 
@@ -242,12 +255,39 @@ is therefore 23.6\% below P-G at $6\times6$ and 14.7\% below it at
 $10\times6$, 36.0\% and 31.4\% below the published DRL baseline, and 46.5\%
 and 55.3\% below the best published rule pair.
 
-One caveat applies. The decoder used here packs operations into machine gaps,
-whereas the environment of that paper disables this shift for its rules. The
-same rule pair obtains 913.87 here against 1045.6 there, so 12.6\% of the gap
-comes from the decoder and not from the policy. The comparison supports the
-relative ordering within each study; it does not support a claim about
-absolute differences.
+Three caveats apply, and all three follow from re-running the code of that
+paper on our instances.
+
+First, the two decoders differ. The decoder used here packs an operation into
+the earliest feasible gap on its machine; the environment of that paper only
+appends to the end of the machine queue, because it disables gap filling for
+its rules. On the same operation sequences the two mechanisms differ by 40\% or
+more for the weaker rules: FIFO with SPT yields 1514.64 here and 2894.55 there,
+with a makespan of 686.9 against 1388.2. Our rule baseline is therefore an
+insertion-decoding baseline, and it must not be compared with the rule column
+of that paper entry by entry.
+
+Second, the idle term is not the same in the two tables of that paper. Its rule
+table matches an idle term that counts the gap before a machine's first
+operation and between its operations; its mixed-integer table matches an idle
+term that also counts the interval from a machine's last operation to the
+makespan. Re-running its code reproduces the rule table to within 0.004\% under
+the first reading and misses it by 19--21\% under the second. This paper uses
+the second reading, so it agrees with the mixed-integer table and not with the
+rule table.
+
+Third, eight entries of that rule table -- the LWKR and MWKR families -- carry
+the SPT and SEYC labels swapped relative to the code: the value printed for
+LWKR(t)+SPT, 2816.0, is what the code returns for LWKR(t)+SEYC (2815.98), and
+the value printed for MWKR(t)+SPT, 1189.3, is what it returns for MWKR(t)+SEYC
+(1189.34).
+
+With the decoder matched, the rule logic is identical. Ported into our decoder
+with gap filling disabled, ten of the twelve rule pairs reproduce the values of
+that table to 1e-12, and the two MOR pairs reproduce it within their own
+randomisation range. The instance generator and the transport model are
+therefore shared; the differences above are in the scoring path, not in the
+instances.
 
 \begin{table}[t]
 \centering
@@ -278,7 +318,7 @@ At $10\times6$ the full model obtains 576.92, against 575.27 for the same
 controller without the selector and the AGV head. The difference is 1.65,
 smaller than the seed range of the full model (11.33), so the study is
 underpowered to separate the two configurations at this size. The controller
-beats PDR by 524.38 and B3 by 74.38, and is 11.29 behind RGA.
+beats PDR by 524.38 and is 11.29 behind RGA.
 
 \subsection{Ablations}
 \label{sec:ablations}
@@ -347,12 +387,10 @@ $10\times6$ & PPO & 605.14 \\
 \end{table}
 
 \paragraph{AGV head} Under the same checkpoint, replacing the learned AGV head
-by the earliest-free rule changes the objective from 564.05 to 573.57 at
-$6\times6$; the head is better in three of three seeds. At $10\times6$ the two
-are 577.71 and 577.83, a tie. The learned head therefore helps when the fleet
-is tight and is neutral when it is not. The no-AGV configuration in
-Table~\ref{tab:encoder} is a different resource regime (an unbounded fleet),
-not an AGV-policy baseline.
+by the better fixed AGV rule changes the objective from \TBD{M}{run} to
+\TBD{M}{run} at $6\times6$, and from \TBD{M}{run} to \TBD{M}{run} at
+$10\times6$. The no-AGV configuration in Table~\ref{tab:encoder} is a
+different resource regime (an unbounded fleet), not an AGV-policy baseline.
 
 \paragraph{Rule selection} Table~\ref{tab:rs} compares the controller with
 and without the top-level rule selector. The selector obtains 556.70 against
@@ -378,10 +416,11 @@ no RS & 558.11 & 558.35 & 575.69 & 564.05 \\
 The mean probability of each rule at the five top-level decision points, over
 20 test instances (seed 1), shows that the selector is not a fixed rule. The
 machine head moves from minimum energy (0.74 at
-decision 1) to minimum transport (0.80 at decision 5). The AGV head moves
-from earliest free (0.41 at decision 1) to nearest (0.88 at decision 5). The
-job head changes less: earliest finish stays near 0.4, and most remaining
-operations falls from 0.10 to 0.04. The prior therefore shifts as the partial
+decision 1) to minimum transport (\TBD{M}{run} at decision 5). The AGV head
+moves from nearest (\TBD{M}{run} at decision 1) to earliest arrival
+(\TBD{M}{run} at decision 5). The job head changes less: earliest finish
+stays near \TBD{M}{run}, and most remaining operations falls from
+\TBD{M}{run} to \TBD{M}{run}. The prior therefore shifts as the partial
 schedule fills, which is the behaviour the rule selector is meant to produce.
 
 \subsection{Analysis}

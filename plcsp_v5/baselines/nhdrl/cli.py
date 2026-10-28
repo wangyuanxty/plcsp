@@ -25,7 +25,14 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import torch
 
-from .ppo import Agent, PPOConfig, RunningMinMax, compute_gae
+from .ppo import (
+    Agent,
+    PPOConfig,
+    RunningMinMax,
+    RunningStandardizer,
+    compute_gae,
+    normalise_branch_reward,
+)
 from .sim import (
     AGV_RULES,
     EARLIEST,
@@ -89,6 +96,14 @@ DEVIATIONS = [
     "generates a mixed training pool.",
     "One deterministic greedy schedule per instance and the v5 weighted "
     "objective; no 20-run Pareto/HV/SP protocol.",
+    "The machine-idle term follows the published definition "
+    "sum_k (MKT - P_k); --idle-mode gap restores the old leading-plus-gaps "
+    "reading.",
+    "Three implementation fixes are on by default and can be disabled for "
+    "the old behaviour: --fix-behaviour-logprob (store the epsilon-greedy "
+    "behaviour-policy log probability), --fix-reward-window (recent reward "
+    "window), and --fix-common-reward-scale (standardise both OA branches "
+    "to a common unit before the weighted sum).",
     "The stepwise simulator is checked against the existing v5 decoder; see "
     "--check.",
 ]
@@ -256,14 +271,32 @@ def _update_agent(agent: Agent, traj: Trajectory, cap: int) -> dict[str, float]:
 # Reward
 # ----------------------------------------------------------------------
 def _reward(oa_action: int, outcome, ms_stats: RunningMinMax,
-            tc_stats: RunningMinMax, args: argparse.Namespace) -> float:
+            tc_stats: RunningMinMax, args: argparse.Namespace,
+            reward_scales: Optional[tuple[RunningStandardizer,
+                                          RunningStandardizer]] = None
+            ) -> float:
     ms_stats.update(outcome.ms_gain)
     tc_stats.update(outcome.cost_delta)
+    if reward_scales is not None:
+        # Both branches are "badness" signals (larger = worse): the MS gain
+        # is negated, the cost delta is already oriented that way.  Both
+        # statistics are updated on every step, so neither goes stale when
+        # the OA selects the other branch.
+        ms_badness = -outcome.ms_gain
+        tc_badness = outcome.cost_delta
+        reward_scales[0].update(ms_badness)
+        reward_scales[1].update(tc_badness)
     if int(oa_action) == 0:
-        norm = ms_stats.high(outcome.ms_gain)
+        if reward_scales is not None:
+            norm = normalise_branch_reward(reward_scales[0], ms_badness)
+        else:
+            norm = ms_stats.high(outcome.ms_gain)
         pref = float(args.pref_ms)
     else:
-        norm = tc_stats.low(outcome.cost_delta)
+        if reward_scales is not None:
+            norm = normalise_branch_reward(reward_scales[1], tc_badness)
+        else:
+            norm = tc_stats.low(outcome.cost_delta)
         pref = float(args.pref_tc)
     value = (float(args.w1) * norm
              + float(args.w2) * (pref / float(args.maxp)) * norm)
@@ -296,11 +329,15 @@ def build_agents(args: argparse.Namespace,
 def train(args: argparse.Namespace, pools: list[InstancePool],
           agents: dict[str, Agent], device: torch.device,
           rng: random.Random, ms_stats: RunningMinMax,
-          tc_stats: RunningMinMax) -> dict[str, Any]:
+          tc_stats: RunningMinMax,
+          reward_scales: Optional[tuple[RunningStandardizer,
+                                        RunningStandardizer]] = None
+          ) -> dict[str, Any]:
     eps = float(args.eps_start)
     history: list[dict[str, Any]] = []
     t0 = time.time()
     updates = {"oa": 0, "pa": 0, "la": 0}
+    behaviour_lp = bool(int(args.fix_behaviour_logprob))
 
     for episode in range(int(args.epochs)):
         pool = pools[episode % len(pools)]
@@ -308,7 +345,8 @@ def train(args: argparse.Namespace, pools: list[InstancePool],
         t, p, tt, edge, lu_m, lu_e = pool.get(index)
         sim = NestedSim(t, p, tt, edge, n_agv=int(args.n_agv),
                         lu_station=bool(args.lu_station),
-                        lu_machine=lu_m, lu_edge=lu_e)
+                        lu_machine=lu_m, lu_edge=lu_e,
+                        idle_mode=str(args.idle_mode))
         oa_traj, pa_traj, la_traj = Trajectory(), Trajectory(), Trajectory()
         episode_return = 0.0
 
@@ -316,22 +354,26 @@ def train(args: argparse.Namespace, pools: list[InstancePool],
             oa_vec = sim.oa_features(float(args.pref_ms),
                                      float(args.pref_tc),
                                      float(args.maxp))
-            a_oa, lp_oa, v_oa = agents["oa"].act(oa_vec, eps, False, rng)
+            a_oa, lp_oa, v_oa = agents["oa"].act(oa_vec, eps, False, rng,
+                                                behaviour_lp)
 
             pa_vec = sim.pa_features(a_oa, oa_vec)
-            a_pa, lp_pa, v_pa = agents["pa"].act(pa_vec, eps, False, rng)
+            a_pa, lp_pa, v_pa = agents["pa"].act(pa_vec, eps, False, rng,
+                                                 behaviour_lp)
             _job, task, machine = sim.choose_pa(a_pa)
 
             need = sim.transport_info(task, machine) is not None
             if need:
                 la_vec = sim.la_features(task, machine, a_oa, oa_vec)
-                a_la, lp_la, v_la = agents["la"].act(la_vec, eps, False, rng)
+                a_la, lp_la, v_la = agents["la"].act(la_vec, eps, False, rng,
+                                                     behaviour_lp)
             else:
                 a_la = None
 
             outcome = sim.schedule(task, machine,
                                    AGV_RULES[a_la] if need else None)
-            reward = _reward(a_oa, outcome, ms_stats, tc_stats, args)
+            reward = _reward(a_oa, outcome, ms_stats, tc_stats, args,
+                             reward_scales)
             episode_return += reward
 
             oa_traj.add(oa_vec, a_oa, lp_oa, v_oa, reward)
@@ -403,7 +445,8 @@ def evaluate(args: argparse.Namespace, agents: dict[str, Agent],
         t, p, tt, edge, lu_m, lu_e = pool.get(index)
         sim = NestedSim(t, p, tt, edge, n_agv=int(args.n_agv),
                         lu_station=bool(args.lu_station),
-                        lu_machine=lu_m, lu_edge=lu_e)
+                        lu_machine=lu_m, lu_edge=lu_e,
+                        idle_mode=str(args.idle_mode))
         oa_counts = [0] * N_OA_ACTIONS
         pa_counts = [0] * N_PA_ACTIONS
         la_counts = [0] * N_LA_ACTIONS
@@ -486,17 +529,20 @@ def check_decode(args: argparse.Namespace) -> int:
         for pa_action in range(N_PA_ACTIONS):
             sim = NestedSim(t, p, tt, edge, n_agv=int(args.n_agv),
                             lu_station=bool(args.lu_station),
-                            lu_machine=lu_m, lu_edge=lu_e)
+                            lu_machine=lu_m, lu_edge=lu_e,
+                            idle_mode=str(args.idle_mode))
             while not sim.done:
                 _job, task, machine = sim.choose_pa(pa_action)
                 sim.schedule(task, machine, EARLIEST)
             ms = np.asarray(sim.ms, dtype=int)
             if args.lu_station:
                 dec = decode_m2(t, p, tt, edge, lu_m, lu_e, sim.os_seq, ms,
-                                n_agv=int(args.n_agv))
+                                n_agv=int(args.n_agv),
+                                idle_mode=str(args.idle_mode))
             else:
                 dec = decode(t, p, tt, edge, sim.os_seq, ms, agv=True,
-                             n_agv=int(args.n_agv))
+                             n_agv=int(args.n_agv),
+                             idle_mode=str(args.idle_mode))
             res = sim.result()
             for key in ("mk", "pt", "transT", "idleT", "obj"):
                 worst[key] = max(worst[key], abs(float(res[key])
@@ -528,7 +574,10 @@ def _n_params(module: torch.nn.Module) -> int:
 
 def _save_weights(path: Path, agents: dict[str, Agent],
                   ms_stats: RunningMinMax, tc_stats: RunningMinMax,
-                  args: argparse.Namespace) -> None:
+                  args: argparse.Namespace,
+                  reward_scales: Optional[tuple[RunningStandardizer,
+                                                RunningStandardizer]] = None
+                  ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "format": "nhdrl-adapted-v1",
@@ -540,6 +589,16 @@ def _save_weights(path: Path, agents: dict[str, Agent],
         "reward_stats": {
             "ms": ms_stats.state_dict(),
             "tc": tc_stats.state_dict(),
+            "common": (None if reward_scales is None
+                       else {"ms": reward_scales[0].state_dict(),
+                             "tc": reward_scales[1].state_dict()}),
+        },
+        "fixes": {
+            "behaviour_logprob": bool(int(args.fix_behaviour_logprob)),
+            "reward_window": (int(args.reward_window)
+                              if int(args.fix_reward_window) else 0),
+            "common_reward_scale": bool(
+                int(args.fix_common_reward_scale)),
         },
         "args": {key: value for key, value in vars(args).items()},
         "agents": {
@@ -555,7 +614,10 @@ def _save_weights(path: Path, agents: dict[str, Agent],
 
 def _load_weights(path: Path, agents: dict[str, Agent],
                   ms_stats: RunningMinMax, tc_stats: RunningMinMax,
-                  device: torch.device) -> dict[str, Any]:
+                  device: torch.device,
+                  reward_scales: Optional[tuple[RunningStandardizer,
+                                                RunningStandardizer]] = None
+                  ) -> dict[str, Any]:
     ckpt = torch.load(path, map_location=device)
     if ckpt.get("format") != "nhdrl-adapted-v1":
         raise ValueError(f"{path}: not an adapted NHDRL checkpoint")
@@ -573,6 +635,12 @@ def _load_weights(path: Path, agents: dict[str, Agent],
     ms_stats.max_value = float(ckpt["reward_stats"]["ms"]["max"])
     tc_stats.min_value = float(ckpt["reward_stats"]["tc"]["min"])
     tc_stats.max_value = float(ckpt["reward_stats"]["tc"]["max"])
+    common = (ckpt.get("reward_stats") or {}).get("common")
+    if reward_scales is not None and isinstance(common, dict):
+        for scale, key in zip(reward_scales, ("ms", "tc")):
+            state = common.get(key)
+            if state is not None:
+                scale.load_state_dict(state)
     return ckpt
 
 
@@ -591,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lu-station", type=int, default=0,
                         help="1 = M2 transport model with load/unload "
                              "stations (default: M1)")
+    parser.add_argument("--idle-mode", default="trailing",
+                        choices=["trailing", "gap"],
+                        help="machine-idle term: trailing = "
+                             "sum_k (MKT - P_k) (default); gap = old "
+                             "leading idle plus internal gaps")
     parser.add_argument("--train-mix", default="6x6",
                         help="comma-separated JxM sizes for training; "
                              "use 6x6,10x6,10x10 for a mixed pool")
@@ -620,6 +693,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pref-ms", type=float, default=5.0)
     parser.add_argument("--pref-tc", type=float, default=5.0)
     parser.add_argument("--maxp", type=float, default=10.0)
+    parser.add_argument("--fix-behaviour-logprob", type=int, default=1,
+                        help="1 = store the epsilon-greedy behaviour-policy "
+                             "log probability (default); 0 = old behaviour")
+    parser.add_argument("--fix-reward-window", type=int, default=1,
+                        help="1 = normalise rewards with a recent window "
+                             "(default); 0 = old widening-only range")
+    parser.add_argument("--reward-window", type=int, default=2000,
+                        help="window length for --fix-reward-window")
+    parser.add_argument("--fix-common-reward-scale", type=int, default=1,
+                        help="1 = put the MS and cost OA branches on the "
+                             "common objective scale (default); 0 = old "
+                             "separate running ranges")
     parser.add_argument("--terminal-coef", type=float, default=1.0,
                         help="terminal reward coefficient (0 disables it)")
     parser.add_argument("--device", default="cpu")
@@ -679,13 +764,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rng = random.Random(int(args.seed))
 
     agents = build_agents(args, device)
-    ms_stats = RunningMinMax(-1.0, 0.0)
-    tc_stats = RunningMinMax(0.0, 1.0)
+    reward_window = (int(args.reward_window)
+                     if int(args.fix_reward_window) else 0)
+    ms_stats = RunningMinMax(-1.0, 0.0, window=reward_window)
+    tc_stats = RunningMinMax(0.0, 1.0, window=reward_window)
+    reward_scales = ((RunningStandardizer(reward_window),
+                      RunningStandardizer(reward_window))
+                     if int(args.fix_common_reward_scale) else None)
     loaded_ckpt: Optional[dict[str, Any]] = None
     if args.load_weights:
         print(f"[load] {args.load_weights}", flush=True)
         loaded_ckpt = _load_weights(Path(args.load_weights), agents,
-                                    ms_stats, tc_stats, device)
+                                    ms_stats, tc_stats, device,
+                                    reward_scales)
         saved_lu = bool((loaded_ckpt.get("args") or {}).get("lu_station", 0))
         if saved_lu != bool(args.lu_station):
             print(f"[warn] checkpoint lu_station={int(saved_lu)} but this run "
@@ -718,7 +809,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[data] pool {pool.tag}: {len(pool)} instances",
                   flush=True)
         train_info = train(args, pools, agents, device, rng,
-                           ms_stats, tc_stats)
+                           ms_stats, tc_stats, reward_scales)
         ms_stats = train_info["ms_stats"]
         tc_stats = train_info["tc_stats"]
         train_mix_label = str(args.train_mix)
@@ -740,7 +831,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         weights_path = (Path(tempfile.gettempdir())
                         / f"nhdrl_adapted_seed{args.seed}.pt")
     if not (args.eval_only and not args.weights_out):
-        _save_weights(weights_path, agents, ms_stats, tc_stats, args)
+        _save_weights(weights_path, agents, ms_stats, tc_stats, args,
+                      reward_scales)
 
     payload = {
         "mode": "NHDRL-adapted",
@@ -748,7 +840,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "source": SOURCE,
         "official_code": OFFICIAL_CODE,
         "deviations": DEVIATIONS,
+        "fixes": {
+            "behaviour_logprob": bool(int(args.fix_behaviour_logprob)),
+            "reward_window": reward_window,
+            "common_reward_scale": bool(
+                int(args.fix_common_reward_scale)),
+        },
         "lu_station": bool(args.lu_station),
+        "idle_mode": str(args.idle_mode),
         "instances": str(args.instances),
         "n": len(eval_info["records"]),
         "summary": eval_info["summary"],
@@ -783,6 +882,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "terminal_coef": float(args.terminal_coef),
                 "ms_stats": ms_stats.state_dict(),
                 "tc_stats": tc_stats.state_dict(),
+                "common_scale_stats": (
+                    None if reward_scales is None
+                    else {"ms": reward_scales[0].state_dict(),
+                          "tc": reward_scales[1].state_dict()}),
             },
             "updates": train_info["updates"],
             "last10_return": train_info["last10_return"],

@@ -198,12 +198,13 @@ Total & 18 \\
 
 Its action is a triple of rules:
 \begin{itemize}
-\item job rule: earliest start, earliest finish, shortest processing time, or
-most remaining operations (4);
-\item machine rule: shortest processing time, lowest processing energy, or
-shortest transport time (3);
-\item AGV rule: earliest free, nearest (minimum empty travel), or no rule
-(zero bias) (3).
+\item job rule: earliest finish, fewest remaining operations, or most
+remaining operations (3);
+\item machine rule: shortest processing time, lowest processing energy,
+shortest transport time, or earliest feasible start (4);
+\item AGV rule: nearest (minimum empty travel), earliest arrival (remaining
+busy time plus empty travel), or least utilized (minimum cumulative travel)
+(3).
 \end{itemize}
 
 The selected rule adds a bias $b$ to the logits of the corresponding
@@ -213,7 +214,7 @@ low-level head,
 \end{equation}
 where $\ell_i$ are the logits of head $i$ and $\alpha=0.5$. The low-level
 heads keep the final decision, so the rule acts as a prior rather than a hard
-constraint. The bias is zero for the ``no rule'' AGV action.
+constraint. Every rule adds a non-zero bias; there is no ``no rule'' arm.
 
 The top-level reward of segment $k$ is the negative change of the weighted
 cost,

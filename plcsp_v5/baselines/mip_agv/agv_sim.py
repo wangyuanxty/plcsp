@@ -28,7 +28,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from plcsp_v5.agv.state import (
-    RHO_EMPTY, AgvState, station_node, transport_timing, transport_timing_m2)
+    RHO_EMPTY, AgvState, idle_cost, station_node, transport_timing,
+    transport_timing_m2)
 from plcsp_v5.baselines.mip_agv.model_noagv import Instance, load_instance
 
 
@@ -295,14 +296,20 @@ def simulate(inst: Instance, order: Sequence[int],
     # Match the environment: idle is summed along the machine route in
     # scheduling order, not along start-time order.  Left-shift can make
     # those orders differ.
-    idle = 0.0
+    gap_idle = 0.0
     for m in range(m_count):
         route = routes[m]
         if not route:
             continue
-        idle += starts[route[0]]
+        gap_idle += starts[route[0]]
         for i in range(len(route) - 1):
-            idle += starts[route[i + 1]] - finishes[route[i]]
+            gap_idle += starts[route[i + 1]] - finishes[route[i]]
+    # v5 idle term.  "trailing" charges every machine from 0 to the makespan
+    # minus its processing time; "gap" keeps the old leading-plus-gap reading.
+    proc_by_machine = [0.0] * m_count
+    for task in range(len(machines)):
+        proc_by_machine[int(machines[task])] += float(finishes[task] - starts[task])
+    idle = idle_cost(None, gap_idle, proc_by_machine, makespan)
     trans_total = loaded_total + RHO_EMPTY * empty_total
     objective = 0.4 * makespan + 0.4 * (pec_mean + idle) + 0.2 * trans_total
     return SimResult(starts=starts, finishes=finishes,

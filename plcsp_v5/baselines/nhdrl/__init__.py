@@ -49,15 +49,18 @@ Deviations from the paper
        C = 0.4 * (processing energy / n_task + machine idle energy)
            + 0.2 * loaded transport time
        J = 0.4 * MS + C
+   Machine idle follows the published definition sum_k (MKT - P_k);
+   --idle-mode gap restores the old leading-idle-plus-gaps reading.
    This keeps OA's two-objective trade-off over the v5 cost components.
 6. Reward.  w1 = 0.8, w2 = 0.2; neutral preferences p_ms = p_tc = 5 with
    maxp = 10, as in the paper's non-sensitivity setting.  The MS signal is
    the partial-makespan gain (MS_before - MS_after, <= 0); the cost signal
    is the change of C (C_after - C_before, which can be negative because
    filling an idle gap reduces machine idle energy).  Both are normalised
-   with running min/max.  The paper does not state the sign convention of
-   mst; this implementation chooses the convention under which a smaller
-   makespan growth and a smaller cost increase give a higher reward.
+   to [0, 1]; by default they share one standardised scale (see deviation
+   19c).  The paper does not state the sign convention of mst; this
+   implementation chooses the convention under which a smaller makespan
+   growth and a smaller cost increase give a higher reward.
    The normalised cost reward is clipped to [0, 1].
 7. State features.  The dimensions are 31 / 24 / 30 as in the paper, but:
    (a) there is no dummy machine and no L/U station;
@@ -121,6 +124,21 @@ Deviations from the paper
 18. The simulator is checked against
     `plcsp_v5.baselines.agv_baselines.decode`, which matches the v5
     `Parallel_env` to about 1e-4.  Run `--check` to repeat the check.
+19. Implementation fixes (on by default; disable each flag to restore the
+    old behaviour):
+    (a) PPO stored the actor log probability for epsilon-greedy random
+        actions, although the behaviour policy is
+        ``(1 - eps) * pi + eps / |A|``.  ``--fix-behaviour-logprob 1`` stores
+        the behaviour-policy log probability;
+    (b) the reward min/max only widened, so early extremes fixed the range.
+        ``--fix-reward-window 1`` keeps the last ``--reward-window`` (2000)
+        observations;
+    (c) the MS and cost OA branches used separate running ranges.  With
+        ``--fix-common-reward-scale 1`` each branch's "badness" signal (the
+        negated MS gain and the cost delta) is divided by its own running
+        standard deviation over the same window, so one standard deviation
+        of either branch maps to the same reward change before the weighted
+        sum.
 
 Entry point
 -----------

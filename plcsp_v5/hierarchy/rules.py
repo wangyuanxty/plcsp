@@ -6,8 +6,9 @@ actor receives the bias of its own head.
 
 Task feature layout (see ``disjunctive_graph_jsp_env_singlestep._state_array``):
     0 estimated start time, 1 estimated finish time, 2 estimated processing
-    time, 3 scheduled flag, 4 in-degree, 5 assigned machine id, 6 assigned
-    processing time, 7 assigned power, 8 job id, 9..11 random weights.
+    energy (min p*t), 3 scheduled flag, 4 in-degree, 5 assigned machine id,
+    6 assigned processing time, 7 assigned power, 8 job id, 9..11 random
+    weights.
 
 Machine candidate feature layout (see
 ``Parallel_env.cal_cur_task_machine_feature``):
@@ -27,9 +28,10 @@ import torch
 
 
 # Three top-level heads: job, machine, AGV.
-JOB_RULES: Tuple[str, ...] = ("est", "eft", "spt", "mwko")
-MACHINE_RULES: Tuple[str, ...] = ("min_t", "min_pt", "min_trans")
-AGV_RULES: Tuple[str, ...] = ("earliest_free", "nearest", "random")
+JOB_RULES: Tuple[str, ...] = ("eft", "lwko", "mwko")
+MACHINE_RULES: Tuple[str, ...] = ("min_t", "min_pt", "min_trans",
+                                 "min_ready")
+AGV_RULES: Tuple[str, ...] = ("nearest", "earliest_arrival", "least_utilized")
 N_JOB_RULES: int = len(JOB_RULES)
 N_MACHINE_RULES: int = len(MACHINE_RULES)
 N_AGV_RULES: int = len(AGV_RULES)
@@ -37,7 +39,8 @@ N_AGV_RULES: int = len(AGV_RULES)
 N_RULE_PAIRS: int = N_JOB_RULES * N_MACHINE_RULES
 
 # Rule indices that maximise a feature instead of minimising it.
-_MAXIMISE_JOB_RULES = frozenset({3})
+_MAXIMISE_JOB_RULES = frozenset(
+    i for i, name in enumerate(JOB_RULES) if name == "mwko")
 
 
 def _as_tensor(value, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -140,12 +143,11 @@ def job_rule_bias(task_fea, candidate, mask_operation, rule_ids,
         rows = job_rule == rule
         if not bool(rows.any()):
             continue
-        if JOB_RULES[rule] == "mwko":
+        if JOB_RULES[rule] in ("mwko", "lwko"):
             # Remaining operations of the candidate job (including this one).
             x = (n_machine - (cand % n_machine)).float()
         else:
-            index = {"est": 0, "eft": 1, "spt": 2}[JOB_RULES[rule]]
-            x = feat[:, :, index]
+            x = feat[:, :, 1]  # eft
         pref = _preference(x, valid, maximise=rule in _MAXIMISE_JOB_RULES)
         bias[rows] = alpha * pref[rows]
     return bias
@@ -153,7 +155,8 @@ def job_rule_bias(task_fea, candidate, mask_operation, rule_ids,
 
 def machine_rule_bias(machine_fea1, machine_mask, rule_ids,
                       alpha: float = 1.0,
-                      device: Optional[torch.device] = None) -> torch.Tensor:
+                      device: Optional[torch.device] = None,
+                      machine_ctx=None) -> torch.Tensor:
     """Return a (B, n_machine) zero-centred bias for the selected machine rule."""
     dev = device or (machine_fea1.device if torch.is_tensor(machine_fea1)
                      else torch.device("cpu"))
@@ -171,7 +174,15 @@ def machine_rule_bias(machine_fea1, machine_mask, rule_ids,
         rows = machine_rule == rule
         if not bool(rows.any()):
             continue
-        x = m1[:, :, rule]
+        name = MACHINE_RULES[rule]
+        if name == "min_ready":
+            # Earliest feasible start, column 1 of the machine context.
+            if machine_ctx is None:
+                continue
+            ctx = _as_tensor(machine_ctx, dev, torch.float32)
+            x = ctx[:, :, 1]
+        else:
+            x = m1[:, :, {"min_t": 0, "min_pt": 1, "min_trans": 2}[name]]
         pref = _preference(x, valid, maximise=False)
         bias[rows] = alpha * pref[rows]
     return bias
@@ -183,7 +194,10 @@ def agv_rule_bias(agv_feat, avail_mask, rule_ids,
     """Return a (B, n_agv) zero-centred bias for the selected AGV rule.
 
     ``rule_ids`` are indices into :data:`AGV_RULES`:
-    0 earliest-free, 1 nearest (minimum deadhead), 2 random (zero bias).
+    0 nearest (minimum deadhead), 1 earliest arrival (remaining busy time
+    plus deadhead travel).  ``earliest_free`` is not an arm: the
+    earliest-arrival pick is never later and never travels farther on
+    deadhead.
     """
     dev = device or (agv_feat.device if torch.is_tensor(agv_feat)
                      else torch.device("cpu"))
@@ -198,12 +212,13 @@ def agv_rule_bias(agv_feat, avail_mask, rule_ids,
         rows = rid == rule
         if not bool(rows.any()):
             continue
-        if name == "earliest_free":
-            pref = _preference(feat[:, :, 10], valid, maximise=False)
-        elif name == "nearest":
+        if name == "nearest":
             pref = _preference(feat[:, :, 7], valid, maximise=False)
-        else:  # random: no prior
-            pref = torch.zeros_like(bias)
+        elif name == "least_utilized":
+            pref = _preference(feat[:, :, 3], valid, maximise=False)
+        else:  # earliest_arrival: remaining busy time plus deadhead travel
+            arrival = feat[:, :, 9] + feat[:, :, 7]
+            pref = _preference(arrival, valid, maximise=False)
         bias[rows] = alpha * pref[rows]
     return bias
 
@@ -214,8 +229,9 @@ def select_agv_by_rule(agv_feat, avail_mask, rule_ids,
                        ) -> torch.Tensor:
     """Pick one AGV per env by the selected rule.
 
-    Returns a (B,) int64 tensor.  ``random`` samples uniformly among the
-    selectable AGVs; the other rules pick the minimum score.
+    Returns a (B,) int64 tensor.  Every rule picks the minimum score:
+    nearest uses the deadhead travel, earliest arrival adds the remaining
+    busy time.
     """
     dev = agv_feat.device if torch.is_tensor(agv_feat) else torch.device("cpu")
     feat = _as_tensor(agv_feat, dev, torch.float32)
@@ -229,13 +245,12 @@ def select_agv_by_rule(agv_feat, avail_mask, rule_ids,
         rows = rid == rule
         if not bool(rows.any()):
             continue
-        if name == "earliest_free":
-            scores[rows] = -feat[rows, :, 10]
-        elif name == "nearest":
+        if name == "nearest":
             scores[rows] = -feat[rows, :, 7]
+        elif name == "least_utilized":
+            scores[rows] = -feat[rows, :, 3]
         else:
-            scores[rows] = torch.rand(
-                (int(rows.sum()), n_agv), device=dev, generator=generator)
+            scores[rows] = -(feat[rows, :, 9] + feat[rows, :, 7])
     scores = scores.masked_fill(~valid, float("-inf"))
     action = scores.argmax(dim=-1)
     no_valid = ~valid.any(dim=-1)

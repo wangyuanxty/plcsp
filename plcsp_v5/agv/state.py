@@ -119,7 +119,7 @@ def agv_features(agvs: list[AgvState], pickup: int, dropoff: int,
             1.0 - busy,
             0.0,
             busy,
-            0.0,
+            float(a.travelled),  # cumulative travel = busy time
             float(a.load),
             float(a.edge),
             float(a.location),

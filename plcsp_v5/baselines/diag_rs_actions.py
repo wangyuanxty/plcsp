@@ -62,6 +62,7 @@ def run_arm(arm: str, seed: int, data, limit: int, run_tag: str,
         "st_edge_features": 0,
         "use_agv": int(spec["use_agv"]),
         "n_agv": 6, "cross_delay": 5.0, "cross_leg_ratio": 0.5,
+        "lu_station": 1,
         "agv_rule": 0,
         "agv_top_rule": int(spec.get("agv_top_rule", 0)),
         "agv_dst_actor": int(spec.get("agv_dst_actor", 1)),
@@ -152,7 +153,7 @@ def main() -> None:
     data = Instance_Dataset(
         generate_true=0,
         dataset_pth=str(ROOT / "plcsp_v5" / "instance" /
-                        f"test_Instance_J{N_JOB}M{N_MACHINE}E{N_EDGE}.pkl"))
+                        f"test_Instance_J{N_JOB}M{N_MACHINE}E{N_EDGE}_lu.pkl"))
     results = []
     arms = ([args.arm] if args.arm else list(ARMS))
     for arm in arms:

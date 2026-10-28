@@ -23,7 +23,7 @@ import time
 
 import numpy as np
 
-from li2025.env_model import Instance, ScheduleSession
+from li2025.env_model import DEFAULT_IDLE_MODE, Instance, ScheduleSession
 from li2025.features import (FILTER_SIZE, JobContext, agv_rule_pvs,
                              agv_scores, agv_state, build_job_contexts,
                              job_attr_matrix, job_filter_state,

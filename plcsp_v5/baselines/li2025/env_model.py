@@ -355,7 +355,8 @@ class ScheduleSession:
             est_mk = max(est_mk, self.job_ready(j) + rtlp)
         est_proc = self.proc_energy + rem_e
         est_idle = self.idle_energy()
-        est_trans = self.trans_total + rem_tr        return float(W_MK * est_mk
+        est_trans = self.trans_total + rem_tr
+        return float(W_MK * est_mk
                      + W_EC * (est_proc / self.inst.n_task + est_idle)
                      + W_TT * est_trans)
 

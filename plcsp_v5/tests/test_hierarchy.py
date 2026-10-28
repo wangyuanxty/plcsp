@@ -21,11 +21,11 @@ def _task_features(values):
     return feat
 
 
-def test_job_rule_prefers_min_est():
+def test_job_rule_prefers_min_eft():
     feat = _task_features([(5.0, 8.0, 3.0), (10.0, 12.0, 2.0)])
     candidate = np.array([[0, 1]])
     mask = torch.zeros((1, 2), dtype=torch.bool)
-    # job rule 0 = est
+    # job rule 0 = eft
     bias = job_rule_bias(feat, candidate, mask, [0], 2, alpha=1.0)
     assert bias.shape == (1, 2)
     assert bias[0, 0] > bias[0, 1]
@@ -46,9 +46,24 @@ def test_mwko_prefers_more_remaining_operations():
     feat = _task_features([(0.0, 0.0, 0.0)] * 6)
     candidate = np.array([[2, 3]])
     mask = torch.zeros((1, 2), dtype=torch.bool)
-    # job rule 3 = mwko
-    bias = job_rule_bias(feat, candidate, mask, [3], 3, alpha=1.0)
+    # job rule 2 = mwko
+    bias = job_rule_bias(feat, candidate, mask, [2], 3, alpha=1.0)
     assert bias[0, 1] > bias[0, 0]
+
+
+def test_job_rule_set_is_three():
+    from plcsp_v5.hierarchy.rules import JOB_RULES, N_JOB_RULES
+    assert JOB_RULES == ("eft", "lwko", "mwko")
+    assert N_JOB_RULES == 3
+
+
+def test_lwko_prefers_fewer_remaining_operations():
+    feat = _task_features([(0.0, 0.0, 0.0)] * 6)
+    candidate = np.array([[2, 3]])
+    mask = torch.zeros((1, 2), dtype=torch.bool)
+    # job rule 1 = lwko; candidate 2 is job 0's last op, candidate 3 is job 1's first
+    bias = job_rule_bias(feat, candidate, mask, [1], 3, alpha=1.0)
+    assert bias[0, 0] > bias[0, 1]
 
 
 def test_machine_rule_prefers_its_feature():
@@ -316,38 +331,65 @@ def test_top_ppo_hybrid_requires_final_local():
 
 def _agv_features():
     feat = np.zeros((1, 3, 11), dtype=np.float32)
-    feat[0, :, 10] = [5.0, 1.0, 3.0]   # free time
+    feat[0, :, 9] = [5.0, 1.0, 3.0]    # remaining busy time
+    feat[0, :, 10] = [5.0, 1.0, 3.0]   # absolute free time (now = 0)
     feat[0, :, 7] = [1.0, 9.0, 2.0]    # deadhead
     return feat
 
 
-def test_agv_rule_bias_earliest_free():
-    feat = _agv_features()
+def test_agv_earliest_arrival_uses_remaining_not_absolute():
+    """A long-idle AGV must not look early because its free time is old."""
+    feat = np.zeros((1, 3, 11), dtype=np.float32)
+    feat[0, :, 9] = [0.0, 0.0, 0.0]     # every AGV is free now
+    feat[0, :, 10] = [100.0, 0.0, 50.0]  # historical free times
+    feat[0, :, 7] = [1.0, 9.0, 2.0]     # deadhead
     mask = np.ones((1, 3), dtype=bool)
-    bias = agv_rule_bias(feat, mask, [0], alpha=1.0)
-    assert int(torch.argmax(bias)) == 1
-    assert abs(float(bias.sum())) < 1e-6
+    assert int(select_agv_by_rule(feat, mask, [1])[0]) == 0
+    assert int(torch.argmax(agv_rule_bias(feat, mask, [1]))) == 0
 
 
 def test_agv_rule_bias_nearest():
     feat = _agv_features()
     mask = np.ones((1, 3), dtype=bool)
-    bias = agv_rule_bias(feat, mask, [1], alpha=1.0)
+    bias = agv_rule_bias(feat, mask, [0], alpha=1.0)
     assert int(torch.argmax(bias)) == 0
     assert abs(float(bias.sum())) < 1e-6
 
 
-def test_agv_rule_bias_random_is_zero():
+def test_agv_rule_bias_earliest_arrival():
     feat = _agv_features()
     mask = np.ones((1, 3), dtype=bool)
-    bias = agv_rule_bias(feat, mask, [2], alpha=1.0)
-    assert torch.equal(bias, torch.zeros_like(bias))
+    bias = agv_rule_bias(feat, mask, [1], alpha=1.0)
+    # free + deadhead is [6, 10, 5]; the minimum is AGV 2.
+    assert int(torch.argmax(bias)) == 2
+    assert abs(float(bias.sum())) < 1e-6
 
 
 def test_select_agv_by_rule():
     feat = _agv_features()
     mask = np.ones((1, 3), dtype=bool)
-    assert int(select_agv_by_rule(feat, mask, [0])[0]) == 1
-    assert int(select_agv_by_rule(feat, mask, [1])[0]) == 0
-    rand = int(select_agv_by_rule(feat, mask, [2])[0])
-    assert 0 <= rand < 3
+    assert int(select_agv_by_rule(feat, mask, [0])[0]) == 0
+    assert int(select_agv_by_rule(feat, mask, [1])[0]) == 2
+
+
+def test_agv_rule_set():
+    from hierarchy.rules import AGV_RULES, N_AGV_RULES
+    assert AGV_RULES == ("nearest", "earliest_arrival", "least_utilized")
+    assert N_AGV_RULES == 3
+
+
+def test_agv_least_utilized_prefers_least_travelled():
+    feat = _agv_features()
+    feat[0, :, 3] = [9.0, 1.0, 5.0]   # cumulative travel
+    mask = np.ones((1, 3), dtype=bool)
+    assert int(select_agv_by_rule(feat, mask, [2])[0]) == 1
+    assert int(torch.argmax(agv_rule_bias(feat, mask, [2]))) == 1
+
+
+def test_machine_min_ready_uses_context():
+    fea = np.zeros((1, 3, 10), dtype=np.float32)
+    ctx = np.zeros((1, 3, 3), dtype=np.float32)
+    ctx[0, :, 1] = [5.0, 1.0, 3.0]     # earliest feasible start
+    mask = torch.zeros((1, 1, 3), dtype=torch.bool)
+    bias = machine_rule_bias(fea, mask, [3], alpha=1.0, machine_ctx=ctx)
+    assert int(torch.argmax(bias)) == 1

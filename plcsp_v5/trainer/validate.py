@@ -1,5 +1,4 @@
 import numpy as np
-import random
 import copy
 import torch
 import csv
@@ -16,11 +15,12 @@ from trainer.DGenv_func import (
     task_context_features,
 )
 try:
-    from hierarchy.rules import (agv_rule_bias, job_rule_bias,
+    from hierarchy.rules import (N_AGV_RULES, agv_rule_bias, job_rule_bias,
                                  machine_rule_bias, top_state_features)
 except ImportError:
     from plcsp_v5.hierarchy.rules import (
-        agv_rule_bias, job_rule_bias, machine_rule_bias, top_state_features)
+        N_AGV_RULES, agv_rule_bias, job_rule_bias, machine_rule_bias,
+        top_state_features)
 try:
     from constraints import sample_repair, buffer_mask_for_env
 except ImportError:
@@ -63,19 +63,20 @@ def va_select_agv(ppo, agvs, pickup, dropoff, tt, edge_info, now, greedy=True,
     if not src_idx:
         raise ValueError(f"workshop edge {pickup_edge} has no AGV")
     if top_rule_arm and rule_id is not None:
-        rid = int(rule_id) % 3
-        if rid == 0:
-            action = min(src_idx, key=lambda k: (agvs[k].free_time, k))
-        elif rid == 1:
+        rid = int(rule_id) % N_AGV_RULES
+        if rid == 0:  # nearest: minimum deadhead travel
             action = min(src_idx,
                          key=lambda k: (_travel(agvs[k].location, pickup), k))
-        else:
-            action = random.choice(src_idx)
+        else:  # earliest arrival: remaining busy time plus deadhead
+            action = min(src_idx, key=lambda k: (
+                max(0.0, agvs[k].free_time - now)
+                + _travel(agvs[k].location, pickup), k))
         agv = agvs[action]
         wait = max(0.0, agv.free_time - now)
         return agv, wait
-    if agv_rule:
-        action = min(src_idx, key=lambda k: (agvs[k].free_time, k))
+    if agv_rule:  # NVS: nearest vehicle selection
+        action = min(src_idx,
+                     key=lambda k: (_travel(agvs[k].location, pickup), k))
         agv = agvs[action]
         wait = max(0.0, agv.free_time - now)
         return agv, wait
@@ -87,7 +88,7 @@ def va_select_agv(ppo, agvs, pickup, dropoff, tt, edge_info, now, greedy=True,
     logit_bias = None
     if rule_id is not None:
         logit_bias = agv_rule_bias(
-            feat, mask, np.asarray([int(rule_id) % 3]),
+            feat, mask, np.asarray([int(rule_id) % N_AGV_RULES]),
             alpha=rule_alpha, device=device)
     feat_t = torch.from_numpy(feat).float().to(device)
     ctx_t = torch.from_numpy(ctx).float().to(device)
@@ -537,7 +538,8 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
             if top_enabled:
                 machine_bias = machine_rule_bias(
                     va_m_fea1, va_mask_machine_batch_, _top_machine,
-                    args['hier_alpha'], device=device)
+                    args['hier_alpha'], device=device,
+                    machine_ctx=va_m_fea3)
 
             # 返回的是batch * m的选择m的概率 + 返回所有m节点的全局嵌入（求均值）：batch * hidden_dim
             va_mch_prob, va_h_mch_pooled, _ = ppo.machine_actor_gcn(machine_fea_1=va_m_fea1,   # 当前task的m的候选特征，作为自注意力的目标节点
