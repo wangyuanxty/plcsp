@@ -101,6 +101,7 @@ class Schedule:
     trans: float
     objective: float
     status: str = ""
+    bound_total: float = 0.0
 
 
 def _horizon(inst: Instance) -> int:
@@ -225,6 +226,7 @@ def solve(inst: Instance, time_limit: float = 60.0,
 
     sched = _cost(inst, starts, machines)
     sched.status = solver.StatusName(status)
+    sched.bound_total = float(solver.BestObjectiveBound())
     return sched
 
 def _cost(inst: Instance, starts: Sequence[float],
