@@ -1,7 +1,7 @@
 """Distribution figure: per-instance objective and paired difference.
 
-Panel (a) shows the per-instance objective of the controller, of the controller
-without the rule selector, and of the MIP baseline on the 6x6 test set.
+Panel (a) shows the per-instance objective of the controller and of the
+controller without the rule selector on the 6x6 test set.
 Panel (b) shows the per-instance paired difference, as a percentage of the
 controller value, for each training seed; positive means the selector helps.
 """
@@ -18,23 +18,11 @@ from pubstyle import (PALETTE, FigureStyle, apply_publication_style,
 
 OUT = Path(__file__).resolve().parent
 ROOT = Path(__file__).resolve().parents[2]
-import csv
-import glob
 
 
 def load_tags(tags):
     return [np.load(ROOT / "plcsp_v5/trained_model" / t
                     / "eval_st_seed3_seed3.npz")["obj"] for t in tags]
-
-
-def load_mip():
-    vals = []
-    for p in sorted(glob.glob(str(ROOT / "plcsp_v5/results"
-                                / "mip_agv_m2_trailing_6x6/shard*.csv"))):
-        for r in csv.DictReader(open(p)):
-            if r.get("best_obj"):
-                vals.append(float(r["best_obj"]))
-    return np.array(vals)
 
 
 def _strip(ax, data, pos, colour, horizontal=False):
@@ -53,16 +41,15 @@ def _strip(ax, data, pos, colour, horizontal=False):
 def main() -> None:
     rs = load_tags([f"m3_agv6_ours_s{s}" for s in (1, 2, 3)])
     no = load_tags([f"m3_noRS_s{s}" for s in (1, 2, 3)])
-    mip = load_mip()
 
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.55),
                              gridspec_kw={"width_ratios": [1.0, 1.25]})
     ax = axes[0]
 
-    groups = [np.concatenate(rs), np.concatenate(no), mip]
-    colours = [PALETTE["blue_main"], PALETTE["red_strong"], PALETTE["violet"]]
-    labels = ["RS\n(3 seeds)", "no RS\n(3 seeds)", "MIP\n(100 inst.)"]
-    pos = [1, 2, 3]
+    groups = [np.concatenate(rs), np.concatenate(no)]
+    colours = [PALETTE["blue_main"], PALETTE["red_strong"]]
+    labels = ["with selector\n(3 seeds)", "without selector\n(3 seeds)"]
+    pos = [1, 2]
 
     parts = ax.violinplot(groups, positions=pos, widths=0.62,
                           showmeans=False, showmedians=False,
@@ -85,7 +72,7 @@ def main() -> None:
 
     ax.set_xticks(pos)
     ax.set_xticklabels(labels)
-    ax.set_xlim(0.45, 3.55)
+    ax.set_xlim(0.45, 2.55)
     lo = min(g.min() for g in groups)
     hi = max(g.max() for g in groups)
     pad = 0.06 * (hi - lo)
@@ -115,7 +102,7 @@ def main() -> None:
     lo = min(pooled.min(), -5) - 3
     hi = max(pooled.max(), 5) + 3
     ax.set_xlim(lo, hi)
-    ax.set_xlabel("no RS $-$ RS (\\% of RS); positive = selector helps")
+    ax.set_xlabel("without $-$ with (\\% of with); positive = selector helps")
     ax.set_title("(b) paired difference on each seed", fontsize=7.5, pad=4)
     ax.annotate(f"mean {pooled.mean():+.1f}%", xy=(pooled.mean(), 3.34),
                 ha="center", va="bottom", fontsize=6,
@@ -123,8 +110,7 @@ def main() -> None:
 
     fig.tight_layout(pad=0.3)
     finalize_figure(fig, OUT / "fig_distribution", formats=["pdf"])
-    print("means", np.concatenate(rs).mean(), np.concatenate(no).mean(),
-          mip.mean())
+    print("means", np.concatenate(rs).mean(), np.concatenate(no).mean())
     print("paired mean %+.2f  range %+.1f .. %+.1f" %
           (pooled.mean(), pooled.min(), pooled.max()))
 

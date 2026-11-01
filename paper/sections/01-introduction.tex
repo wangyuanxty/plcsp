@@ -27,9 +27,10 @@ processing and idle energy, and loaded transport time.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_environment.pdf}
-\caption{The shop environment and the logistics process. (a) Four decisions:
-one rule selector agent above the operation, machine and AGV agents, and the
-four objective terms; the transport term counts loaded travel and
+\caption{The shop environment and the logistics process. (a) Four agents:
+one rule selector above the operation, machine and AGV agents, which make the
+three coupled decisions; the four objective terms are listed below them, and
+the transport term counts loaded travel and
 half-weighted empty travel. (b) Two workshops, six machines, one load/unload
 station and three AGVs per workshop; a job crosses the boundary.
 (c) Cross-workshop transport: empty travel to the pickup machine, a loaded leg
@@ -54,8 +55,9 @@ predictable, but their performance depends on the rule combination, and a
 fixed rule cannot adapt to the state of the shop. Metaheuristics search the
 assignment space and often return better schedules, at the cost of thousands
 of schedule evaluations per instance. Constraint programming and
-mixed-integer models give a bound or a strong incumbent, but their run time
-grows quickly with the number of operations and vehicles. Deep reinforcement
+mixed-integer models give a bound or a strong
+incumbent~\cite{yao2026cp}, but their run time grows quickly with the number of
+operations and vehicles. Deep reinforcement
 learning (DRL) offers a fourth option, a policy that constructs one schedule
 in a single pass and can be reused across instances. Recent work applies DRL
 to flexible job shops with AGVs~\cite{li2025tsmc,li2025plcsp,shi2025nested,
@@ -71,7 +73,7 @@ representation without imposing an order. Second, the three decisions share
 one return. A single scalar critic gives every agent the same advantage, so an
 agent whose action changed the objective receives the same signal as one
 whose action did not. Third, a top-level rule selector makes only four to
-seven decisions per episode. The sample is small, and a counterfactual
+thirteen decisions per episode. The sample is small, and a counterfactual
 baseline must generalize to actions that were not taken.
 
 This paper studies a controller that addresses the three difficulties with a
@@ -110,20 +112,26 @@ within a machine, and then compares machines. With no position
 embedding, the encoder applies the same weights to any number of operations, machines,
 and vehicles.
 
-\item \emph{A group-relative update for three heterogeneous agents.} The
-estimator is GRPO's~\cite{shao2024grpo}; the contribution here is its use with
-three agents that share one team advantage. Updates take the
-clipped ratio of the summed log-probabilities; no value critic, no
-reference model, and no KL penalty are used at the low level.
+\item \emph{A group-relative update for three heterogeneous agents.} The three
+shop actors are trained with one group-relative
+advantage~\cite{shao2024grpo}: the team return of an episode is normalised
+within the group, and no value critic, no
+reference model, and no KL penalty are used at the low level. With the same
+architecture and budget, this beats PPO by 72.98 at $6\times6$ under the
+protocol of Wang et al., by 98.38 under the full protocol, and by 56.02 at
+$10\times6$.
 
 \item \emph{A hierarchical rule selector with per-agent cost signals.} A
 top-level policy selects a rule prior for each agent every few steps. Each rule
 head receives the change of its own local cost as the reward, so the selector
-can attribute a cost change to the agent whose decision caused it.
+can attribute a cost change to the agent whose decision caused it. It lowers
+the objective by 3.1\% at $6\times6$ (paired $p=0.0023$) and by 1.3\% at
+$10\times6$, and the rule it selects shifts within an episode as the partial
+schedule fills.
 \end{enumerate}
 
 We compare the controller with rule-based,
-metaheuristic, mixed-integer, and adapted DRL baselines on the same instances,
+metaheuristic, and adapted DRL baselines on the same instances,
 against the same objective and under the same transport model. We report the
 objective and the run time of every method, the per-instance spread, and the
 scope of the transport model. One schedule takes about 0.95~s per instance.

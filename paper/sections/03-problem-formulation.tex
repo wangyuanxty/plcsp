@@ -78,10 +78,12 @@ m \;\xrightarrow{\text{AGV of }w}\; u_{w}
 \label{eq:split}
 \end{equation}
 where $w$ and $w'$ are the workshops of $m$ and $m'$. The transfer between
-the two stations consumes no AGV and takes $d_{u_w,u_{w'}}$. A
+the two stations consumes no AGV. In the experiments the machine-to-machine
+time $d_{m,m'}$ is cut into three parts: a source leg and a target leg that
+share the remaining time in equal halves, and a fixed transfer delay of five
+time units between them that consumes no AGV. A
 source-workshop AGV performs the first leg and stays at $u_w$ afterwards; a
-target-workshop AGV performs the last leg. There is no fixed delay and no
-fixed split ratio.
+target-workshop AGV performs the last leg.
 
 The transport term of the objective counts both the loaded and the empty
 AGV travel. The empty travel is charged at a fraction $\rho_e$ of the loaded
@@ -104,19 +106,18 @@ Let $\mathcal{O}_m$ be the set of operations assigned to machine $m$. The
 idle energy is
 \begin{equation}
 \Eidle=\sum_{m=1}^{M}\left(
-\max_{(j,o)\in\mathcal{O}_m} C_{j,o}
--\sum_{(j,o)\in\mathcal{O}_m} t_{j,o,m}\right).
+\Cmax-\sum_{(j,o)\in\mathcal{O}_m} t_{j,o,m}\right).
 \label{eq:idle}
 \end{equation}
-The expression equals the sum of the initial idle interval and all gaps on
-every machine. To see this, order the operations on machine $m$ by start
-time. The initial interval is $S_{m,1}$. Each gap is
-$S_{m,i+1}-C_{m,i}$. The sum telescopes to $C_{m,\mathrm{last}}-
-\sum_i t_{m,i}$, which is \eqref{eq:idle}. Idle power is constant and
-normalized to one, so \Eidle{} equals the total idle time; the two terms are
-used interchangeably.
+Every machine is charged from time zero to the makespan, so the term counts
+the gaps before and between its operations and the tail after the last one.
+Idle power is constant and normalized to one, so \Eidle{} equals the total
+idle time; the two terms are used interchangeably. The reading differs from
+the sum of the gaps alone, which stops at the last operation on each machine;
+Section~\ref{sec:experiments} states which reading the baselines use.
 
-Let $\Ttrans$ be the sum of loaded travel times over all transports. The
+Let $\Ttrans$ be the loaded travel time plus $\rho_e$ times the empty travel
+time, summed over all transports. The
 scalar objective is
 \begin{equation}
 F=w_{1}\Cmax+w_{2}\left(\Eproc+\Eidle\right)+w_{3}\Ttrans,
@@ -192,8 +193,7 @@ one AGV), so it is NP-hard. Its joint action space is the product of the
 three candidate sets, and the number of feasible schedules grows with the number
 of machine assignments and with the number of AGV sequences. An exact model
 must decide the assignment, the machine sequence, and the vehicle sequence
-together; the mixed-integer baseline in Section~\ref{sec:experiments} solves
-the first two and the third in two stages.
+together, so its size grows with all three.
 
 Two further couplings enter through the objective. The idle term couples the
 assignment with the sequence: an operation that starts earlier on one machine

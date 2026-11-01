@@ -25,12 +25,12 @@ while the per-agent costs, which are signals and not part of the objective,
 credit each selector head with the change of its own agent's cost.
 (b) Training
 pipeline for one group of eight episodes: group sampling, rollout, segment
-close, the GRPO and PPO updates, and checkpoint selection.}
+close, and the GRPO and PPO updates.}
 \label{fig:method}
 \end{figure*}
 
 Let $s_t$ be the state at low-level step $t$. The joint policy factorizes over
-the three agents,
+the three shop agents,
 \begin{equation}
 \pi_\theta(a_t\mid s_t)=
 \pi^{\mathrm{job}}_\theta(a^{\mathrm{job}}_t\mid s_t)\,
@@ -82,8 +82,8 @@ time and power on each eligible machine, the load of each machine, and the
 workshop of each machine. The resulting token has 33 features in the
 experiments.
 
-For the machine agent, each machine is a token. The token has three feature
-groups: identity and load ($m_1$), processing time and power for the current
+For the machine agent, each machine contributes three tokens, one per feature
+group: identity and load ($m_1$), processing time and power for the current
 operation ($m_2$), and transport distance to and from the current operation
 ($m_3$). The groups have 6, 8, and 3 features; $m_1$ becomes 10 features when
 the AGV module is enabled, and $m_3$ becomes 8 features when the full
@@ -207,10 +207,10 @@ Total & 18 \\
 
 Its action is a triple of rules:
 \begin{itemize}
-\item job rule: earliest finish, fewest remaining operations, or most
-remaining operations (3);
+\item job rule: earliest finish, least work remaining, or most
+remaining work (3);
 \item machine rule: shortest processing time, lowest processing energy,
-shortest transport time, or earliest feasible start (4);
+shortest transport time, or minimum ready time (4);
 \item AGV rule: nearest (minimum empty travel), earliest arrival (remaining
 busy time plus empty travel), or least utilized (minimum cumulative travel)
 (3).

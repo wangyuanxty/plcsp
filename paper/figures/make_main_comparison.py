@@ -23,7 +23,7 @@ METHODS = [
     ("Ours", PALETTE["blue_main"], [867.75, 808.67, 1836.64],
      [11.86, 12.83, 43.45]),
     ("RGA", PALETTE["teal"], [762.04, 796.70, 2298.63], [0, 0, 0]),
-    ("E2E", PALETTE["red_strong"], [1075.64, 1066.24, 3153.81],
+    ("Wang et al.", PALETTE["red_strong"], [1075.64, 1066.24, 3153.81],
      [73.82, 102.61, 530.01]),
     ("Li et al.", PALETTE["violet"], [1160.59, 1198.09, 2738.91],
      [42.40, 76.91, 82.76]),
@@ -50,9 +50,9 @@ def main() -> None:
     ax.set_xticklabels(SIZES)
     ax.set_ylabel("Objective")
     ax.set_ylim(0, 3700)
-    ax.legend(ncol=5, loc="lower center", bbox_to_anchor=(0.5, 1.01),
-              frameon=False, fontsize=6, handlelength=0.9,
-              columnspacing=1.2, handletextpad=0.4)
+    ax.legend(ncol=5, loc="lower center", bbox_to_anchor=(0.5, 1.02),
+              frameon=False, fontsize=5.8, handlelength=0.9,
+              columnspacing=0.7, handletextpad=0.25)
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
     ax.set_axisbelow(True)

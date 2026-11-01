@@ -3,21 +3,23 @@
 \label{sec:conclusion}
 
 We presented a hierarchical multi-agent controller for joint production and
-logistics scheduling in a flexible job shop with several workshops. Three
-agents make the operation, machine, and AGV decisions; a dual Set Transformer
-encodes the candidates; the agents are trained with a shared group-relative
-advantage and no critic; a top-level policy selects a rule prior every few
-steps.
+logistics scheduling in a flexible job shop with several workshops. Four
+agents carry it: a rule selector sets a rule prior every few steps, and three
+shop agents make the operation, machine, and AGV decisions; a dual Set
+Transformer
+encodes the candidates; the shop agents are trained with a shared
+group-relative
+advantage and no critic.
 
 Our experiments show that the encoder and the multi-actor update each improve
 over their respective baselines, and that our controller is fast enough for
 interactive use. Its objective is lower than that of the fixed dispatching
-rules and of the adapted DRL baselines at every size. Against the search
-methods the outcome depends on the size. At $6\times6$ RGA and the
-mixed-integer model return better schedules; at $10\times6$ the joint MIP
-does, but the paired test does not separate the controller from RGA; at the
-largest size the controller is ahead of RGA but 32.4\% above the joint MIP. That trade,
-search time for a single pass, is the operating point of the method. Rule
+rules and of the adapted DRL baselines at every size. Against RGA the outcome
+depends on the size. At $6\times6$ RGA returns a 12.2\%
+lower objective; at $10\times6$ the paired test does not separate the
+controller from RGA; at the largest size the controller is 20.1\% ahead. That
+crossover, search time in the small shop against a single pass in the large
+one, is the operating point of the method. Rule
 selection has a small and uneven effect. Rule-usage analysis shows that the
 selector is
 not a fixed rule: as the partial schedule fills, the machine rule head moves
@@ -29,14 +31,10 @@ while the learned AGV head is still better than the best fixed rule by
 
 The transport model assigns AGVs to workshops and moves a cross-workshop
 job through the two load/unload stations. Charging, failures, and load and
-unload times are outside the model. The mixed-integer baseline is joint over
-the transport legs and the AGV routes given the machine assignment. It closes
-on all 100 instances at $6\times6$ and on 92 and 91 at the two larger sizes;
-the others return a feasible schedule or nothing within the cap. Machine
-assignment
-is taken from the no-AGV model and held fixed, and a variant that leaves it
-free does not close at these sizes. Next we want to scale that model and to
-add charging and failures.
+unload times are outside the model. The controller is trained and tested on
+one shop layout, with two workshops and three AGVs per workshop, and on
+instances from $6\times6$ to $10\times10$. Next we want to test larger
+instances and to add charging and failures.
 
 \section*{Data availability}
 

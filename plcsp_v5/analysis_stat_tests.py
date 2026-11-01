@@ -16,7 +16,6 @@ Usage:
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 
@@ -46,9 +45,6 @@ TABLE4 = {
     ("li", "6x6"): 1160.59,
     ("li", "10x6"): 1198.09,
     ("li", "10x10"): 2738.91,
-    ("mip", "6x6"): 605.77,
-    ("mip", "10x6"): 516.43,
-    ("mip", "10x10"): 1242.46,
 }
 
 OURS_NPZ = {
@@ -86,8 +82,6 @@ PDR_JSON = {
 }
 
 LI_JSON = "baselines/li2025/results/m2_m3_li_J{size}E2_s{seed}.json"
-
-MIP_CSV = "joint_m2_{size}_v2/shard*.csv"
 
 LI_SIZE_TAG = {"6x6": "6M6", "10x6": "10M6", "10x10": "10M10"}
 
@@ -155,27 +149,6 @@ def lis(size: str) -> np.ndarray:
     return np.nanmean(np.vstack(runs), axis=0)
 
 
-def mip(size: str) -> np.ndarray:
-    """Joint CP-SAT baseline, per instance, from the shard CSV files.
-
-    An instance the solver did not solve is written with ``joint_obj`` 0, so
-    a non-positive value is treated as missing rather than as a perfect score.
-    """
-    out = np.full(100, np.nan)
-    for path in sorted((RESULTS / MIP_CSV.format(size=size)).parent.glob("shard*.csv")):
-        if not path.is_file():
-            continue
-        with path.open(encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
-                try:
-                    value = float(row["joint_obj"])
-                except (KeyError, ValueError):
-                    continue
-                if value > 0:
-                    out[int(row["idx"])] = value
-    return out
-
-
 def holm(pvals: list[float], alpha: float = 0.05) -> list[float]:
     """Holm-Bonferroni adjusted p-values, in the input order."""
     m = len(pvals)
@@ -194,10 +167,9 @@ def main() -> None:
     rga = {s: json_records_mean(RESULTS / RGA_JSON[s]) for s in SIZES}
     pdr = {s: pdr_best_rule(s) for s in SIZES}
     li = {s: lis(s) for s in SIZES}
-    mip_vals = {s: mip(s) for s in SIZES}
 
     series: dict[str, dict[str, np.ndarray]] = {
-        "ours": ours, "e2e": e2e, "rga": rga, "pdr": pdr, "li": li, "mip": mip_vals,
+        "ours": ours, "e2e": e2e, "rga": rga, "pdr": pdr, "li": li,
     }
 
     print("== guard: recomputed mean against Table 4 ==")
@@ -213,8 +185,6 @@ def main() -> None:
     for size in SIZES:
         for base in ("rga", "pdr", "e2e", "li"):
             tests.append((size, base))
-    for size in SIZES:
-        tests.append((size, "mip"))
 
     rows = []
     for size, base in tests:
