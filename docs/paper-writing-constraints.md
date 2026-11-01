@@ -113,3 +113,20 @@
 - 图表生成脚本：`paper/figures/make_figures.py`（数据逐项对应 `progress-log` §52）。
   ⚠️ 图 3 的 ρ 报的是 **makespan 与能耗本身**的秩相关（0.978 / 0.582），
   **不是**比值的秩相关（那会得到 −0.73）——两个量同名易混，改动时注意。
+
+## 术语必须与结构主张一致（2026-10-30）
+
+用错术语等于否掉自己的主张。每个词写之前先确认它对应的实体：
+
+| 词 | 必须对应 | 不得用于 |
+|---|---|---|
+| **agent** | 独立网络（`job_actor` / `machine_actor` / `agv_actor`，各有编码器与优化器） | 顶层选择器的规则输出 |
+| **rule head** | 顶层选择器对某类规则（job / machine / AGV）的输出 | 低层三个 actor |
+| **head**（无限定） | 仅注意力/池化/线性输出层（multi-head attention、pooling head） | 策略本体 |
+| **seed** | 一次独立训练 | 实例编号 |
+
+⚠️ 2026-10-30 事故：全文 58 处把三个**独立网络**写成 "head"，读者会理解成"一个策略网络的三个输出分支"，
+直接否掉 multi-agent 主张。同时 `paper/figures/make_fig1.py` 与 `make_overview.py` 里的
+"Job head / Machine head / AGV head" 也要同步改，改完**必须重新生成 PDF**。
+
+检查方法：`grep -n -i "head" sections/*.tex`，逐个确认落在上表哪一行。
