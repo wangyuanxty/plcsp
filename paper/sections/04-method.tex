@@ -5,26 +5,32 @@
 
 The controller makes three decisions at every low-level step: which operation
 to schedule next, on which machine, and with which AGV. Each decision is
-produced by its own policy head. A top-level policy selects one rule for each
-head every $\Delta T$ low-level steps. The selected rules bias the low-level
-heads; they do not replace them. We refer to the resulting controller as
+produced by its own agent. A top-level policy selects one rule for each
+agent every $\Delta T$ low-level steps. The selected rules bias the low-level
+agents; they do not replace them. We refer to the resulting controller as
 H-ST-GRPO. Figure~\ref{fig:method} summarizes the architecture and the
 training loop.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_method.pdf}
-\caption{Method overview. (a) Architecture: the shop state and the three
-candidate sets enter three Set Transformer encoders and three heads; a
-top-level selector sets a rule prior every eight steps; the joint action
-updates the shop, and the per-head costs return to the selector.
-(b) Training pipeline for one group of eight episodes: group sampling,
-rollout, segment close, the GRPO and PPO updates, and checkpoint selection.}
+\caption{Method overview. (a) Four agents. The rule selector agent holds one
+rule head per shop agent and sets their rule priors every eight steps. Each
+shop agent reads its own token set, encodes it, scores its candidates, masks
+the infeasible ones and returns one action; the machine encoder applies
+attention within a machine and then across machines. The three actions form
+the joint action, and the shop updates. Credit returns along two paths: the
+team return gives the three shop agents one shared group-relative advantage,
+while the per-agent costs, which are signals and not part of the objective,
+credit each selector head with the change of its own agent's cost.
+(b) Training
+pipeline for one group of eight episodes: group sampling, rollout, segment
+close, the GRPO and PPO updates, and checkpoint selection.}
 \label{fig:method}
 \end{figure*}
 
 Let $s_t$ be the state at low-level step $t$. The joint policy factorizes over
-the three heads,
+the three agents,
 \begin{equation}
 \pi_\theta(a_t\mid s_t)=
 \pi^{\mathrm{job}}_\theta(a^{\mathrm{job}}_t\mid s_t)\,
@@ -39,48 +45,51 @@ is complete, a machine is feasible when the operation can be processed on it,
 and an AGV is feasible when it belongs to the required workshop.
 
 \paragraph{Multi-agent formulation}
-The controller is a cooperative multi-agent system. Each agent is one policy
-head with its own action space and its own candidate encoding. The agents
+The controller has four agents: one rule selector and three shop agents for the
+operation, machine and AGV decisions. The three shop agents are separate
+actor networks, each with its own action space and its own candidate encoding;
+the selector is a policy over rule heads that biases their action space. All
+three shop agents
 decide at the same step (the AGV agent when a transport is needed) and receive
-one team return, and training uses a centralized group-relative advantage. The
+one team return, and training uses a centralized group-relative advantage. This
 scheme therefore follows centralized training with decentralized execution: no
-per-agent reward is required, and each head selects from its own candidates.
+per-agent reward is required, and each agent selects from its own candidates.
 
-The low-level heads are trained with group-relative policy optimization
-(GRPO) and no value critic. The top-level policy is trained with proximal
-policy optimization (PPO) on the weighted-cost change of each segment. The
-two levels are trained online in the same episode loop.
+Low-level training uses group-relative policy optimization
+(GRPO) and no value critic, while the top-level policy is trained with proximal
+policy optimization (PPO) on the weighted-cost change of each segment. Both
+levels run online in the same episode loop.
 
 \paragraph{Design rationale}
 The joint action is a product of three candidate sets, and its size grows
 with the number of jobs, machines, and vehicles. The factorized policy
-\eqref{eq:factor} avoids enumerating the product: each head scores its own
+\eqref{eq:factor} avoids enumerating the product: each agent scores its own
 candidate set and the log-probabilities are summed. A shared advantage is
-used because the team objective is scalar; a per-head critic would need
-per-head return targets, which the environment does not provide. The rule
-prior restricts the effective support of each head early in training; the
-bias is soft, so a head can override the rule once its own estimate is more
-accurate. The per-head costs at the top level give each head a signal that
+used because the team objective is scalar; a per-agent critic would need
+per-agent return targets, which the environment does not provide. A rule
+prior restricts the effective support of each agent early in training; the
+bias is soft, so an agent can override the rule once its own estimate is more
+accurate. The per-agent costs at the top level give each agent a signal that
 the shared return does not provide, because the shared return changes for
-reasons that are not attributable to a single head.
+reasons that are not attributable to a single agent.
 
 \subsection{State and action}
 
 The state contains the partial disjunctive graph, the machine routes, the AGV
-states, and the current weights. For the operation head, each unscheduled
+states, and the current weights. For the operation agent, each unscheduled
 operation is a token. A token carries operation attributes, the processing
 time and power on each eligible machine, the load of each machine, and the
 workshop of each machine. The resulting token has 33 features in the
 experiments.
 
-For the machine head, each machine is a token. The token has three feature
+For the machine agent, each machine is a token. The token has three feature
 groups: identity and load ($m_1$), processing time and power for the current
 operation ($m_2$), and transport distance to and from the current operation
 ($m_3$). The groups have 6, 8, and 3 features; $m_1$ becomes 10 features when
 the AGV module is enabled, and $m_3$ becomes 8 features when the full
 transport context is enabled.
 
-For the AGV head, each AGV in the relevant workshop is a token. The token
+For the AGV agent, each AGV in the relevant workshop is a token. The token
 carries its home workshop, its current position, its free time, and the empty
 and loaded travel times to the pickup and drop-off machines.
 
@@ -106,30 +115,30 @@ needed.
 
 \paragraph{Job encoder}
 The job encoder applies two self-attention blocks to the operation tokens.
-The output embeddings are scored by a linear head, and the masked softmax
-over the scores gives $\pi^{\mathrm{job}}$. The number of tokens changes with
-the number of unscheduled operations; the encoder has no position embedding,
-so the same weights apply to any number of operations.
+A linear head scores the output embeddings, and the masked softmax
+over the scores gives $\pi^{\mathrm{job}}$. The token count changes with
+the number of unscheduled operations, and the encoder has no position
+embedding, so the same weights apply to any number of operations.
 
 \paragraph{Machine encoder}
-The three feature groups of a machine are projected separately to the same
+Three feature groups of a machine are projected separately to the same
 width and form three tokens. An intra-machine layer (one layer, two heads)
 compares the three tokens of that machine. The output is
 pooled into one token per machine. A second stack (three layers, four
-heads) compares machines. The machine head scores the
+heads) compares machines. The machine agent scores the
 eligible machines for the chosen operation.
 
 Grouping the features before attention keeps the token count at $3M$ instead
 of one token per feature. It also lets the model compare the three feature
-views of one machine before it compares machines. The intra-machine layer is
-ablated in Section~\ref{sec:ablations}: removing it costs 65.32 on
+views of one machine before it compares machines. We ablate the intra-machine
+layer in Section~\ref{sec:ablations}; removing it costs 47.75 on
 $6\times6$.
 
 \paragraph{AGV encoder}
-The AGV encoder applies one self-attention block to the AGV tokens. The AGV
-head scores the AGVs of the source workshop. For a cross-workshop transport,
-the same head scores the AGVs of the target workshop; the two scores use the
-same weights.
+The AGV encoder applies one self-attention block to the AGV tokens, and the
+AGV agent scores the AGVs of the source workshop. For a cross-workshop
+transport, the same agent scores the AGVs of the target workshop; the two
+scores use the same weights.
 
 All three encoders are permutation-invariant over their candidate sets, so
 the same weights apply to different numbers of jobs, machines, and AGVs.
@@ -144,7 +153,7 @@ under the weights of the group. The group advantage is
 {\operatorname{std}(R_{1:G})+\epsilon}.
 \label{eq:grpo}
 \end{equation}
-The same $\hat{A}_i$ is used by the job, machine, and AGV heads. Each head
+The same $\hat{A}_i$ is used by the job, machine, and AGV agents. Each agent
 maximizes the clipped objective
 \begin{equation}
 L_i=\min\left(\rho_i\hat{A}_i,\
@@ -155,7 +164,7 @@ where
 \rho_i=\frac{\pi_\theta(a_i\mid s_i)}
 {\pi_{\theta_{\mathrm{old}}}(a_i\mid s_i)}
 \end{equation}
-is the ratio of the summed log-probabilities of the active heads. The update
+is the ratio of the summed log-probabilities of the active agents. The update
 maximizes $L_i$ over the group. At the low level, no value critic, no
 reference model, and no KL penalty are used.
 
@@ -163,9 +172,9 @@ The weights $w$ in \eqref{eq:objective} are sampled once per group and stay
 fixed inside the group, so all returns in \eqref{eq:grpo} are comparable. At
 evaluation the weights are fixed to $(0.4,0.4,0.2)$.
 
-Sharing one advantage across heads keeps the team objective. It does not
-distinguish the contribution of each head; the next subsection adds a
-per-head cost signal at the top level.
+Sharing one advantage across agents keeps the team objective. It does not
+distinguish the contribution of each agent; the next subsection adds a
+per-agent cost signal at the top level.
 
 \subsection{Top-level rule selection}
 
@@ -208,12 +217,12 @@ busy time plus empty travel), or least utilized (minimum cumulative travel)
 \end{itemize}
 
 The selected rule adds a bias $b$ to the logits of the corresponding
-low-level head,
+low-level agent,
 \begin{equation}
 \ell'_{i}(a)=\ell_{i}(a)+\alpha\,b_{i}(a),
 \end{equation}
-where $\ell_i$ are the logits of head $i$ and $\alpha=0.5$. The low-level
-heads keep the final decision, so the rule acts as a prior rather than a hard
+where $\ell_i$ are the logits of agent $i$ and $\alpha=0.5$. The low-level
+agents keep the final decision, so the rule acts as a prior rather than a hard
 constraint. Every rule adds a non-zero bias; there is no ``no rule'' arm.
 
 The top-level reward of segment $k$ is the negative change of the weighted
@@ -223,26 +232,31 @@ r_k=-\left(F_{k+1}-F_k\right),
 \end{equation}
 and the top-level policy is updated with PPO and generalized advantage
 estimation. The top-level state includes the current weights, so the selector
-can condition the rule on the objective. This shared reward gives every head
-the same signal; the next subsection replaces it with a cost per head.
+can condition the rule on the objective. This shared reward gives every agent
+the same signal; the next subsection replaces it with a cost per agent.
 
-\subsection{Per-head cost signals}
+\subsection{Per-agent cost signals}
 
-The three rule heads share one segment reward. To give each head its own
-signal, we define a local cost for each head:
+The three rule heads, one per agent, share one segment reward. To give each
+agent its own signal, we define a local cost for each agent:
 \begin{align}
 c^{\mathrm{job}}_k &= C_{\max}+E_{\mathrm{idle}},\\
 c^{\mathrm{mach}}_k &= \Eproc+\Ttrans,\\
 c^{\mathrm{agv}}_k &= \Ttrans+W_{\mathrm{agv}},
 \end{align}
-where $W_{\mathrm{agv}}$ is the accumulated AGV wait in the segment. The
-reward of head $i$ is the negative change of its own cost. Each head has its
-own normalization, its own value baseline, and its own advantage. The three
-heads are updated with the PPO clip on their own advantages.
+where $W_{\mathrm{agv}}$ is the accumulated non-loaded delay of the AGV: its
+waiting time, its empty travel and the station transfer. The split follows
+Wang et al.~\cite{wang2025multitarget}, who give the job agent the makespan
+and the standby energy and the machine agent the processing and the transport
+energy. The AGV cost is new, because their controller has no AGV agent. The
+reward of rule head $i$ is the negative change of its own cost. Each rule head
+has its own normalization, its own value baseline, and its own advantage. The
+three rule heads are updated with the PPO clip on their own advantages.
 
 The local costs are not a decomposition of \eqref{eq:objective}: the terms
-overlap, and the sum of the three does not equal $F$. They are signals that
-attribute a cost change to the head whose action is most directly related to
+overlap, the sum of the three does not equal $F$, and $W_{\mathrm{agv}}$ is
+not an objective term at all. They are signals that
+attribute a cost change to the agent whose action is most directly related to
 it. Section~\ref{sec:experiments} reports the effect of the selector against
 the same controller without it.
 
@@ -250,7 +264,8 @@ the same controller without it.
 
 Low-level actors and the top-level policy are trained online for 200
 episodes. A group contains $G=8$ episodes; the instance batch is resampled
-every 8 episodes. The learning rate is $10^{-3}$ with Adam and no decay. The
+every 8 episodes. We use a learning rate of $10^{-3}$ with Adam and no
+decay. The
 PPO clip is 0.2, the entropy bonus of the top level is 0.01, and the gradient
 norm is clipped at 0.5. The top-level policy performs four epochs per
 episode. Evaluation is greedy on 100 instances with fixed weights.
@@ -265,7 +280,7 @@ Algorithm~\ref{alg:train} summarizes one episode.
 \State Sample the group weights $w$; reset the AGV fleet.
 \State Observe the top-level state $z$; select the rule triple $u$.
 \For{each low-level step $t=1,\dots,JO$}
-    \State Apply the rule bias to the three heads.
+    \State Apply the rule bias to the three agents.
     \State Mask infeasible operations, machines, and AGVs.
     \State Select the operation, the machine, and the AGV.
     \State Update the partial schedule and the AGV states.
@@ -273,7 +288,7 @@ Algorithm~\ref{alg:train} summarizes one episode.
         \State Close the segment; observe $z$; select a new rule triple.
     \EndIf
 \EndFor
-\State Close the last segment; compute $R_i$; update the low-level heads.
+\State Close the last segment; compute $R_i$; update the low-level agents.
 \State Update the top-level policy from the segment rewards.
 \end{algorithmic}
 \end{algorithm}

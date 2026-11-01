@@ -9,40 +9,45 @@ two workshops), $10\times6\times2$, and $10\times10\times2$. Each family has
 methods are evaluated on the same instances, with the weights fixed to
 $(0.4,0.4,0.2)$ in \eqref{eq:objective}. The learned policies are evaluated
 greedily. Each learned method is trained with three seeds; the reported value
-is the mean of the three seed-level test means. The rule-based and
+is the mean of the three seed-level test means. Rule-based and
 metaheuristic baselines are deterministic given their own seed.
 
-The training budget is 200 episodes for every learned method. The group size
+Every learned method gets 200 training episodes. The group
+size
 is 8, the instance batch is resampled every 8 episodes, and the learning rate
 is $10^{-3}$ with Adam and no decay. These settings are identical across the
 ablations; only the factor under test changes.
 
-Instances are generated with the generator of Wang
-et al.~\cite{wang2025multitarget}; the parameter ranges are theirs. Each
-job has $M$ operations, and each
-operation is eligible on a subset of machines. The mean processing time is
-drawn from $U(1,99)$ and the mean processing power from $U(1,20)$; the value
-on a given machine is the mean multiplied by a factor from $U(0.8,1.2)$.
-Same-workshop travel times are drawn from $U(1,10)$ and cross-workshop travel
-times from $U(10,20)$. The machines are split equally between the two
-workshops, and each workshop has three AGVs. The training pool contains
-12{,}800 instances (seed 0), the validation set 100 instances (seed 1), and
-the test set 100 instances (seed 3); the three pools are disjoint. A
-checkpoint is selected on the validation set, and the test set is used once
-after training.
+Instances are the published pools of Wang et
+al.~\cite{wang2025multitarget}, used unchanged: their training pool
+(12{,}800 instances, seed 0), their validation pool (100, seed 1) and their
+test pool (100, seed 3). The processing times, the processing powers, the
+travel times and the workshop assignment are element-wise identical to the
+released files, so every method in this paper is measured on the same
+instances as the E2E baseline of that paper. We append two arrays to each
+instance, the machine-to-station distances and the station-to-station
+transfer times that the load/unload stations require; the four original
+arrays are not modified. Each job has $M$ operations, and each operation is
+eligible on a subset of machines. The mean processing time is drawn from
+$U(1,99)$ and the mean processing power from $U(1,20)$; the value on a given
+machine is the mean multiplied by a factor from $U(0.8,1.2)$. Same-workshop
+travel times are drawn from $U(1,10)$ and cross-workshop travel times from
+$U(10,20)$. The machines are split equally between the two workshops, and
+each workshop has three AGVs. A checkpoint is selected on the validation set,
+and the test set is used once after training.
 
 The objective of Wang et al.~\cite{wang2025multitarget} uses the same four
 terms. They set the standby power of the machines and the transport power of
 the vehicles to one, so their energy terms equal the idle time and the loaded
 transport time used here. The transport model differs: they assume that the
 transport machines of a workshop are adequate, whereas here each workshop has
-three AGVs and a cross-workshop trip includes a station transfer. The absolute
-objective values in Table~\ref{tab:baselines} are therefore not directly
-comparable with those reported in that paper.
+three AGVs and a cross-workshop trip includes a station transfer. So the absolute
+objective values in Table~\ref{tab:baselines} are not directly
+comparable with those reported there.
 
 \subsection{Baselines}
 
-The baselines are adaptations of published methods, not reproductions. Two of the papers release no code; those baselines are written from the paper and are labelled as adapted below. Every baseline is evaluated on the same instances and the same objective as the controller.
+The baselines are adaptations of published methods, not reproductions. Two of the papers release no code; those baselines are written from the paper and are labelled as adapted below. Every baseline is evaluated on the same instances and the same objective as the controller. The ablation study of Section~\ref{sec:ablations} uses the transport protocol of Wang et al.~\cite{wang2025multitarget} -- no AGV fleet, machine-to-machine travel, loaded travel only -- which is the protocol of their released code; Section~\ref{sec:e2eproto} explains why those values are not placed beside the published ones.
 
 \paragraph{Rule-based} Twelve dispatching rules combine six job rules (FIFO,
 MOR, and the most- and least-work-remaining forms on processing time and on
@@ -54,22 +59,37 @@ controller selects from; the better one is reported.
 \paragraph{RGA} A random-key genetic algorithm with population 50 and 100
 generations, i.e.\ 4850 schedule evaluations per instance, with the operators
 of Zhang et al.~\cite{zhang2011rga}. It optimises the operation sequence and
-the machine assignment; AGVs are dispatched by the earliest-arrival rule. The
-objective values are computed with a direct decoder, which reproduces the four
-simulator cost components exactly on random schedules; for the run-time
-measurement, each of the 4850 evaluations is replayed through the same DG
-simulator as the controller.
+the machine assignment; AGVs are dispatched by the earliest-arrival rule.
+Every candidate schedule is scored by the same simulator that scores the
+controller, so the search optimises exactly the objective of
+\eqref{eq:objective} and its cost includes the evaluation cost. One run takes
+3.07~s per instance at $6\times6$ and 2.97~s at $10\times6$.
 
-\paragraph{MIP (two-stage CP-SAT)} Stage~A solves the
-machine assignment and the operation start times with a CP-SAT model. Stage~B
-routes the AGVs with a second CP-SAT model that assigns each transport leg to
-a workshop fleet and sequences the legs of each AGV; Stage~B minimises a
-routing proxy, the sum of the final-leg completion times. The resulting
-schedule is re-simulated and scored with \eqref{eq:objective}, and the best of
-three alternations is kept. The idle term \eqref{eq:idle} and the station
-transfer \eqref{eq:split} follow the simulator. The time limit is 10~s for
-Stage~A and 8~s for each Stage~B solve; at $10\times10$, half the instances
-need a 60~s routing limit.
+\paragraph{MIP (joint CP-SAT)} The baseline is a mixed-integer program solved
+with CP-SAT. One model decides the operation start times, the transport legs
+and the AGV routes together, so routing is no longer decided after the
+schedule is fixed, which is what separated the two-stage baseline from the
+objective. The machine side is the no-overlap model of the FJSP; the transport
+side is one route per AGV, encoded as a circuit over a depot and the legs the
+AGV may serve, with the deadhead distance carried on each arc. A leg is an
+entry leg from the load/unload station of the first operation's workshop, a
+single leg between two machines of one workshop, or one of two legs of a
+cross-workshop move, the two separated by the fixed delay of
+\eqref{eq:split} that consumes no AGV. The objective is \eqref{eq:objective},
+and the four components were checked against the simulator instance by
+instance: the makespan, the energy and the trailing idle agree exactly.
+
+The machine assignment is the one exception. It is taken from the no-AGV model
+and held fixed; the fully joint variant, which leaves the assignment free, was
+tried and does not close at these sizes within the time budget. The gap we
+report is the gap of the transport-and-timing model given that
+assignment, not the gap of the fully joint problem.
+
+Each run uses a 60~s assignment stage and a 300~s cap on the joint model. At
+$6\times6$ the model closes on all 100 test instances with a zero gap in 36~s
+on average; at $10\times6$ and $10\times10$ it closes 92 and 91, returns a
+feasible schedule for 6 and 8, and returns nothing for 2 and 1. The assignment
+stage is time-limited, so this is one draw of the solver.
 
 \paragraph{E2E} The architecture of Wang et
 al.~\cite{wang2025multitarget} uses a GIN job encoder and a GAT machine
@@ -99,43 +119,60 @@ training procedure, not from the environment. One seed reaches 1255.72 at
 $6\times6$; the other two give 2045.72 and 2571.56. We exclude the method
 because this spread does not support a fair comparison.
 
-\paragraph{Learned baselines} PPO with per-head critics replaces GRPO in the
+\paragraph{Learned baselines} PPO with per-agent critics replaces GRPO in the
 same architecture. The no-RS variant removes the top-level rule selector.
 
 \subsection{Quality and run time}
 
-Table~\ref{tab:baselines} reports the objective and the run time on the three
-instance families. The MIP column is the two-stage CP-SAT heuristic of
-Section~\ref{sec:experiments}, not a joint model. At $6\times6$ the MIP median
-is 500.66 and its interquartile range is [464.59, 548.50]. The AGV routing stage improves on the
-earliest-free rule in 50 instances and ties in 50; the mean improvement is
-3.33 and the maximum is 21.24. At $10\times10$ the routing stage needs a
-60~s limit on half the instances; the mean solver time in the table includes
-those runs. The per-instance standard deviations at
-$6\times6$ are 139.5 (PDR), 94.7 (E2E), 68.7 (ours), 72.1 (MIP),
-and 56.1 (RGA). Table~\ref{tab:pdr} lists the twelve rule
-pairs at the three sizes. The best pair changes with size: mor/spt at
-$6\times6$ and $10\times10$, mor/seyc at $10\times6$.
+Table~\ref{tab:baselines} reports the objective on the three instance
+families. Every method is evaluated on the same instances and scored with the
+same objective under the same transport model; the learned methods are averaged
+over three seeds on the 100 test instances, and the rule-based rows are
+deterministic.
+
+The objective is not normalised for instance size. Its idle term is
+$\sum_k(\mathsf{MKT}-P_k)$, which grows with the number of machines and the
+makespan rather than with the work content, so a larger family can score lower
+than a smaller one. The same non-monotonicity appears in the reference paper:
+Wang et al. report 732.5 at $6\times6\times2$ and 674.5 at $10\times6\times2$
+under the same objective structure. So we compare absolute values
+within a column only, never across columns.
+
+The MIP column is the mixed-integer program of
+Section~\ref{sec:experiments}, solved with CP-SAT. It closes on all 100
+instances with a proven zero gap at $6\times6$ and at $10\times6$; the
+$10\times10$ run is still in progress. A two-stage variant, which fixes the
+machine schedule first and routes the AGVs afterwards, was also built; it
+obtains 881.43 at $6\times6$, that is, 13.68 worse than the controller and
+263.39 worse than the joint model, so we report the joint model only.
+
+Table~\ref{tab:pdr} lists the twelve rule pairs under the three AGV rules.
+The best pair is mor/spt at $6\times6$ and $10\times10$ and mor/seyc at
+$10\times6$, and the earliest-arrival rule is the best of the three at every
+pair and size.
 
 \begin{table*}[t]
 \centering
-\caption{Objective on the three instance families, all methods measured with
-the same decoder and the same transport model. Each value is the mean over the
-100 test instances; the learned methods are averaged over three seeds. Li is
-an adapted baseline written from the paper, not a reproduction. Cells
-marked \TBD{M}{run} are being regenerated under the revised idle term; only the
-rule baseline is current. Lower is better.}
+\caption{Objective on the three instance families. Every method is evaluated
+on the same instances and scored with the same objective under the same
+transport model; each value is the mean over the
+100 test instances. The learned methods are averaged over three seeds and show
+the seed standard deviation; PDR, RGA, and MIP are deterministic per instance
+and have no seed spread. Li is
+an adapted baseline written from the paper, not a reproduction. The MIP row is
+the mean over the instances the solver solved, 100, 98 and 99; on the others it
+returns no schedule. Lower is better.}
 \label{tab:baselines}
 \begin{tabular}{lccc}
 \toprule
 Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ \\
 \midrule
-Ours (H-ST-GRPO) & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
-MIP (two-stage CP-SAT) & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
-RGA & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
+Ours (H-ST-GRPO) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} \\
+MIP & 605.77 & 516.43 & 1242.46 \\
+RGA & 762.04 & 796.70 & 2298.63 \\
 PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 \\
-E2E (Wang et al., retrained) & \TBD{M}{run} & -- & -- \\
-Li et al. & \TBD{M}{run} & \TBD{M}{run} & \TBD{M}{run} \\
+E2E (Wang et al., retrained) & 1075.64 {\scriptsize$\pm$73.82} & 1066.24 {\scriptsize$\pm$102.61} & 3153.81 {\scriptsize$\pm$530.01} \\
+Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 2738.91 {\scriptsize$\pm$82.76} \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -194,28 +231,116 @@ lwkr\_t & seyc & least\_utilized & 4205.55 (570.32) & 6491.78 (852.05) & 21437.7
 \end{tabular}
 \end{table*}
 
-Four observations follow. First, the ranking depends on the size. At
-$6\times6$ and $10\times6$ the search methods return lower values: RGA by
-78.66 and 11.29, and MIP by 51.65 and 73.70. At $10\times10$ the order
-reverses: the controller obtains 1068.66 against 1415.34 for MIP and 1536.27
-for RGA. The controller builds one schedule in a single pass, in about a
-second; MIP solves two CP-SAT models and RGA evaluates 4850 schedules.
-Second, the AGV routing stage of MIP adds little on these instances: half
-of them are unchanged, and the mean gain is 3.33. The AGV fleet is not the
-binding resource at this size. Third, the retrained E2E architecture obtains
-743.62, which is 186.92 above the controller. Fourth, Li et al.\ is below the
-best rule pair at all three sizes, by 75.43, 283.19, and 645.02, and above the
-controller at the two sizes where both are measured, by 319.07 and 241.19.
+\begin{table}[t]
+\centering
+\caption{Wall-clock time to build one schedule for one instance, in seconds.
+All rows are measured on the same machine with one process at a time; the two
+learned methods run on the GPU, the others on one CPU core. PDR is one rule
+pair, RGA one run of 4850 schedule evaluations, and MIP the joint model with a
+60~s assignment stage and a 300~s cap. These are our own
+implementations; the times reported by other authors for their implementations
+are not comparable.}
+\label{tab:time}
+\begin{tabular}{lrrr}
+\toprule
+Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ \\
+\midrule
+PDR & 0.0004 & 0.0007 & 0.0011 \\
+Li et al. & 0.10 & 0.19 & 0.39 \\
+E2E & 0.77 & 1.65 & 3.85 \\
+Ours & 0.95 & 1.99 & 4.16 \\
+RGA & 3.07 & 2.97 & 4.05 \\
+MIP & 36 & 204 & 210 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three observations follow. First, the search methods are stronger where the
+shop is small. At $6\times6$ the joint MIP obtains 605.77, which is 261.98
+below the controller, and RGA obtains 762.04, which is 105.71 below; at
+$10\times6$ the joint MIP is 292.24 below and RGA 11.97. Both pay for that
+margin. RGA evaluates 4850 schedules per instance, and the joint MIP takes
+36 and 204~s; one controller pass takes 0.95 and 1.99~s. Second, the ordering
+reverses for RGA and the learned baselines but not for the solver. At
+$10\times10$ the controller obtains 1836.64, which is 20.1\% below RGA and
+below every learned baseline, while the joint MIP obtains 1242.46, which is
+32.4\% below the controller. The reversal against RGA is consistent with its
+configuration: one population size and one generation count at every size, so
+its advantage over a fixed policy shrinks as the instance grows. That is a
+limit on its generalization, not on its search. Third, the learned baselines are behind
+at all three sizes. The retrained E2E architecture is 207.89, 257.57 and
+1317.17 above the controller, and Li et al.\ is 292.84, 389.42 and 902.27
+above it.
+
+\paragraph{Significance} Table~\ref{tab:signif} reports a two-sided Wilcoxon
+signed-rank test on the paired per-instance objectives, with Holm's correction
+over the 15 comparisons; the learned methods enter as their seed mean on each
+instance. The controller is lower than
+PDR, E2E, and Li et al.\ at every size, at $p<10^{-16}$, on 97 to 100 of the
+100 instances, and the joint MIP is lower at every size, on 100, 98 and 99 of
+them. The disagreement is confined to RGA. At $6\times6$ RGA is lower, on
+84 instances; at $10\times10$ the controller is lower, on 97. At $10\times6$
+the test does not separate the two (median 6.92, controller lower
+on 43), so the mean gap of 11.97 is not resolved by the paired comparison.
+
+\begin{table}[t]
+\centering
+\caption{Paired Wilcoxon signed-rank test of the controller against each
+baseline over the 100 test instances, with Holm's correction over the 15
+comparisons. Median difference is the controller minus the baseline, so a
+negative value favours the controller; wins counts the instances on which the
+controller is lower. The joint MIP is tested on the 100, 98 and 99 instances
+it solved.}
+\label{tab:signif}
+\footnotesize
+\setlength{\tabcolsep}{3.0pt}
+\begin{tabular}{llrrr}
+\toprule
+Size & Baseline & Med.\ diff. & Wins & $p_{\mathrm{Holm}}$ \\
+\midrule
+$6\times6$ & RGA & $+115.82$ & 16 & $2.2\times10^{-13}$ \\
+ & PDR & $-409.44$ & 100 & $<10^{-16}$ \\
+ & E2E & $-199.77$ & 97 & $<10^{-16}$ \\
+ & Li et al. & $-279.39$ & 100 & $<10^{-16}$ \\
+ & Joint MIP & $+259.13$ & 0 & $<10^{-16}$ \\
+$10\times6$ & RGA & $+6.92$ & 43 & $0.312$ \\
+ & PDR & $-639.15$ & 100 & $<10^{-16}$ \\
+ & E2E & $-250.96$ & 100 & $<10^{-16}$ \\
+ & Li et al. & $-379.56$ & 100 & $<10^{-16}$ \\
+ & Joint MIP & $+273.43$ & 0 & $<10^{-16}$ \\
+$10\times10$ & RGA & $-476.77$ & 97 & $<10^{-16}$ \\
+ & PDR & $-1471.84$ & 100 & $<10^{-16}$ \\
+ & E2E & $-1251.67$ & 100 & $<10^{-16}$ \\
+ & Li et al. & $-899.10$ & 100 & $<10^{-16}$ \\
+ & Joint MIP & $+602.65$ & 0 & $<10^{-16}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
+\caption{Objective of every method on the three instance families, from
+Table~\ref{tab:baselines}. Bars are means over the 100 test instances; the
+error bar is the seed standard deviation of the learned methods, which the
+deterministic baselines do not have. Among the methods shown the controller is
+second at $6\times6$ and $10\times6$, behind RGA, and first at $10\times10$.}
+\label{fig:main}
+\end{figure*}
+
 Figure~\ref{fig:distribution} shows the per-instance distribution and the
 paired difference between RS and no RS.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_distribution.pdf}
-\caption{Per-instance objective on $6\times6$. (a) Violin and box plots for
-RS (three seeds, 300 values), no RS (three seeds, 300 values), and MIP
-(100 instances). White diamonds mark the mean. (b) Paired difference between
-RS and no RS on each seed; positive means RS is worse.}
+\caption{Per-instance objective on $6\times6$. (a) The controller with and
+without the rule selector (three seeds, 300 values each) and the MIP baseline
+(100 instances). The violin is thinned to a light point cloud, the thick bar
+is the interquartile range, the white dot the median and the white diamond the
+mean. (b) Paired difference on each seed, as a percentage of the controller
+value; positive means the selector helps. The vertical line marks zero and
+the label gives the mean of the pooled differences.}
 \label{fig:distribution}
 \end{figure*}
 
@@ -239,175 +364,177 @@ travel).}
 \label{fig:gantt}
 \end{figure*}
 
-\subsection{Comparison under the protocol of Wang et al.}
+\subsection{Absolute values against the published ones}
+\label{sec:e2eproto}
 
-Table~\ref{tab:e2eproto} removes the AGV fleet and returns to the transport
-model of Wang et al.~\cite{wang2025multitarget}: travel is machine to machine,
-it is charged when the two consecutive operations use different machines, and
-only loaded travel is counted. Under this protocol the instance generation and
-the objective are those of that paper, so the two studies can be compared.
+Wang et al.\ use two idle readings in their two tables: their rule-based table
+charges only the gap before a machine's first operation and between its
+operations, and their mixed-integer table also charges the interval from a
+machine's last operation to the makespan. Re-running their code reproduces the
+rule table to within 0.004\% under the first reading and misses it by 19--21\%
+under the second. This paper uses the second reading, because a machine is
+idle until the job leaves the shop.
 
-The controller obtains 559.31 at $6\times6$ and 575.27 at $10\times6$. The
-all-GNN encoder, which is the architecture of that paper trained under the
-same protocol, obtains 676.99 and 678.88. The published P-G model obtains
-732.5 and 674.5, and the published rule pair 1045.6 and 1288.2. The controller
-is therefore 23.6\% below P-G at $6\times6$ and 14.7\% below it at
-$10\times6$, 36.0\% and 31.4\% below the published DRL baseline, and 46.5\%
-and 55.3\% below the best published rule pair.
+Measured on their instances and their transport protocol under the first
+reading, our controller obtains $559.31 \pm 12.24$ at $6\times6$ and
+$575.27 \pm 4.12$ at $10\times6$, and the all-GNN encoder of their
+architecture, retrained here under the same protocol, obtains
+$676.99 \pm 14.49$ and $678.88 \pm 91.75$. The values published for P-G are
+732.5 and 674.5.
 
-Three caveats apply, and all three follow from re-running the code of that
-paper on our instances.
-
-First, the two decoders differ. The decoder used here packs an operation into
-the earliest feasible gap on its machine; the environment of that paper only
-appends to the end of the machine queue, because it disables gap filling for
-its rules. On the same operation sequences the two mechanisms differ by 40\% or
-more for the weaker rules: FIFO with SPT yields 1514.64 here and 2894.55 there,
-with a makespan of 686.9 against 1388.2. Our rule baseline is therefore an
-insertion-decoding baseline, and it must not be compared with the rule column
-of that paper entry by entry.
-
-Second, the idle term is not the same in the two tables of that paper. Its rule
-table matches an idle term that counts the gap before a machine's first
-operation and between its operations; its mixed-integer table matches an idle
-term that also counts the interval from a machine's last operation to the
-makespan. Re-running its code reproduces the rule table to within 0.004\% under
-the first reading and misses it by 19--21\% under the second. This paper uses
-the second reading, so it agrees with the mixed-integer table and not with the
-rule table.
-
-Third, eight entries of that rule table -- the LWKR and MWKR families -- carry
-the SPT and SEYC labels swapped relative to the code: the value printed for
-LWKR(t)+SPT, 2816.0, is what the code returns for LWKR(t)+SEYC (2815.98), and
-the value printed for MWKR(t)+SPT, 1189.3, is what it returns for MWKR(t)+SEYC
-(1189.34).
-
-With the decoder matched, the rule logic is identical. Ported into our decoder
-with gap filling disabled, ten of the twelve rule pairs reproduce the values of
-that table to 1e-12, and the two MOR pairs reproduce it within their own
-randomisation range. The instance generator and the transport model are
-therefore shared; the differences above are in the scoring path, not in the
-instances.
-
-\begin{table}[t]
-\centering
-\caption{Comparison under the protocol of Wang et al.: no AGV fleet,
-machine-to-machine travel, loaded travel only. The all-GNN encoder is the
-architecture of that paper trained under the same protocol. Entries marked
-$\ast$ are the published numbers of that paper.}
-\label{tab:e2eproto}
-\small
-\begin{tabular}{lcc}
-\toprule
-Method & $6\times6\times2$ & $10\times6\times2$ \\
-\midrule
-Ours (GRPO, no AGV, no RS) & 559.31 & 575.27 \\
-All-GNN encoder (E2E architecture) & 676.99 & 678.88 \\
-Our PDR (mor/spt) & 913.87 & 1032.77 \\
-\midrule
-Wang et al., P-G$^\ast$ & 732.5 & 674.5 \\
-Wang et al., DRL[23]$^\ast$ & 874.5 & 838.8 \\
-Wang et al., MOR/SPT$^\ast$ & 1045.6 & 1288.2 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Scale test at $10\times6$}
-
-At $10\times6$ the full model obtains 576.92, against 575.27 for the same
-controller without the selector and the AGV head. The difference is 1.65,
-smaller than the seed range of the full model (11.33), so the study is
-underpowered to separate the two configurations at this size. The controller
-beats PDR by 524.38 and is 11.29 behind RGA.
+These values are not carried into Table~\ref{tab:baselines} or
+Table~\ref{tab:encoder}, which use the second reading throughout; the encoder
+ordering reported there is an internal comparison and does not depend on the
+reading.
 
 \subsection{Ablations}
 \label{sec:ablations}
 
+Both ablations in this subsection are run under the protocol of Wang et
+al.~\cite{wang2025multitarget}: no AGV fleet,
+machine-to-machine travel, and loaded travel only. That is the protocol of the
+E2E baseline in Table~\ref{tab:baselines}, so the encoder and the estimator
+are compared with their architecture on the same footing rather than in a
+regime where only one side was measured. The AGV agent and the rule selector
+are not part of these ablations; each is removed from the full model
+separately below.
+
 \paragraph{Encoder} Table~\ref{tab:encoder} reports a $2\times2$ factorial
-over the job and machine encoders. On $6\times6$, the all-ST cell obtains
-559.31, the job-GNN/machine-ST cell 580.21, the job-ST/machine-GNN cell
-648.81, and the all-GNN cell 676.99. The all-ST cell is the best in the
-three-seed means. It is also better than the job-GNN/machine-ST cell and the
-all-GNN cell in each of the three seeds. The machine encoder accounts for most
-of the gap. With the job encoder fixed at ST, replacing the machine ST encoder
-by a GNN costs 89.50;
-with the job encoder fixed at GNN, it costs 96.78. Replacing the job encoder
-by a GNN costs 20.90 and 28.18 at the two machine settings. The interaction
-is small. The machine-internal attention is a design detail inside the ST
-machine encoder: removing it costs 65.32 (624.63 against 559.31). On
-$10\times6$, the all-ST cell obtains 575.27 and the all-GNN cell 678.88; the
-ordering holds in all three seeds.
+over the job and machine encoders at $6\times6$, without AGVs and without the
+rule selector. The all-ST cell obtains 798.06 and the job-GNN/machine-ST cell
+797.11; the two are indistinguishable, because the all-ST cell is better in
+one seed out of three and the 0.95 difference is far inside the seed spread.
+Machine encoding behaves differently. Replacing the ST machine encoder by a
+GNN costs
+85.80 with the job encoder at ST and 128.10 with the job encoder at GNN, and
+the ordering holds in all three seeds at both job settings. For the job
+encoder we find no such main effect: its cost appears only at the GNN machine
+setting. The interaction is not small, so we do not report a
+job-encoder main effect. Machine-internal attention is a design detail inside the ST
+machine encoder: removing it costs 47.75 (845.81 against 798.06). The
+$10\times6$ encoder cells were deferred and are not reported.
 
 \begin{table}[t]
 \centering
-\caption{Encoder ablation as a $2\times2$ factorial over the job and machine
-encoders. All rows use GRPO, no AGV, and no RS.}
+\caption{Encoder ablation at $6\times6$ under the protocol of Wang et
+al.~\cite{wang2025multitarget}: no AGV fleet and no rule selector. All rows
+use GRPO. Values are three-seed means over the 100 test
+instances, with the seed standard deviation. ST is the Set-Transformer;
+intra0 removes the machine-internal attention.}
 \label{tab:encoder}
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lllrr}
+\begin{tabular}{llrr}
 \toprule
-Size & Job encoder & Machine encoder & Objective & Seeds \\
+Job enc. & Machine enc. & Objective & Std \\
 \midrule
-$6\times6$ & ST & ST & 559.31 & 3 \\
-$6\times6$ & GNN & ST & 580.21 & 3 \\
-$6\times6$ & ST & GNN & 648.81 & 3 \\
-$6\times6$ & GNN & GNN & 676.99 & 3 \\
-$10\times6$ & ST & ST & 575.27 & 3 \\
-$10\times6$ & GNN & GNN & 678.88 & 3 \\
-\bottomrule
-\end{tabular}}
-\end{table}
-
-\paragraph{Algorithm} Table~\ref{tab:algo} compares GRPO with PPO in the
-same architecture. On $6\times6$, GRPO obtains 559.31 against 637.41 for PPO.
-On $10\times6$, GRPO obtains 575.27 against 605.14. The comparison uses each
-algorithm's standard weight-sampling protocol: one weight vector per group
-for GRPO, one per environment for PPO. Because the two protocols differ, we
-also ran PPO with one weight vector per group, which removes the sampling
-difference and leaves the critic as the only difference. PPO then obtains
-688.34 at $6\times6$, so the gap widens from 78.10 to 129.03. The critic-free
-update is therefore better under either sampling protocol, and the original
-comparison understates it.
-
-\begin{table}[t]
-\centering
-\caption{Algorithm ablation. Both methods use the same encoder, no AGV, and
-no RS. Values are three-seed means.}
-\label{tab:algo}
-\begin{tabular}{lrr}
-\toprule
-Size & Algorithm & Objective \\
+ST & ST (intra1) & 798.06 & 5.83 \\
+GNN & ST & 797.11 & 12.00 \\
+ST & GAT & 883.86 & 24.60 \\
+GNN & GAT & 925.21 & 26.56 \\
 \midrule
-$6\times6$ & GRPO & 559.31 \\
-$6\times6$ & PPO & 637.41 \\
-$10\times6$ & GRPO & 575.27 \\
-$10\times6$ & PPO & 605.14 \\
+ST & ST (intra0) & 845.81 & 13.30 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{AGV head} Under the same checkpoint, replacing the learned AGV head
-by the better fixed AGV rule changes the objective from \TBD{M}{run} to
-\TBD{M}{run} at $6\times6$, and from \TBD{M}{run} to \TBD{M}{run} at
-$10\times6$. The no-AGV configuration in Table~\ref{tab:encoder} is a
-different resource regime (an unbounded fleet), not an AGV-policy baseline.
-
-\paragraph{Rule selection} Table~\ref{tab:rs} compares the controller with
-and without the top-level rule selector. The selector obtains 556.70 against
-564.05 without it. It is better in two of three seeds; the mean difference is
-7.35, about 1.3\%.
+\paragraph{Encoder under the full protocol} Table~\ref{tab:encoderfull}
+repeats the ablation with the full protocol of this paper, with the AGV agent,
+the rule selector and the station transport model enabled. The ordering is the
+same as in Table~\ref{tab:encoder}, with smaller magnitudes. Swapping the job
+encoder from ST to GNN changes nothing: 865.01 against 867.75, inside the seed
+spread exactly as in Table~\ref{tab:encoder}. Swapping the machine encoder to
+GAT costs 95.10 with the job encoder at ST and 99.21 with it at GNN, and the
+ordering holds in all three seeds at both job settings. Removing the
+machine-internal attention costs 34.26. The
+job encoder carries no main effect in either protocol; the
+machine encoder is the component that matters.
 
 \begin{table}[t]
 \centering
-\caption{Rule-selection ablation on $6\times6$. Same encoder, algorithm, and
-AGV head; only the top-level selector is removed.}
-\label{tab:rs}
-\begin{tabular}{lrrrr}
+\caption{Encoder ablation at $6\times6$ under the full protocol of this paper:
+AGV agent, rule selector and station transport model enabled. All rows use
+GRPO. Values are three-seed means over the 100 test instances, with the seed
+standard deviation.}
+\label{tab:encoderfull}
+\begin{tabular}{llrr}
 \toprule
-Configuration & s1 & s2 & s3 & Mean \\
+Job enc. & Machine enc. & Objective & Std \\
 \midrule
-RS & 570.84 & 555.49 & 543.76 & 556.70 \\
-no RS & 558.11 & 558.35 & 575.69 & 564.05 \\
+ST & ST (intra1) & 867.75 & 11.86 \\
+GNN & ST & 865.01 & 18.50 \\
+ST & GAT & 962.85 & 3.95 \\
+GNN & GAT & 964.22 & 20.12 \\
+\midrule
+ST & ST (intra0) & 902.01 & 21.70 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Algorithm} Table~\ref{tab:algo} compares GRPO with PPO in the
+same architecture. Under the protocol of Wang et al.\ at $6\times6$, GRPO
+obtains 798.06 against 871.04 for PPO. With the AGV fleet and the rule
+selector enabled, the gap widens at $6\times6$ (867.75 against 966.13) and
+narrows at $10\times6$ (808.67 against 864.69). GRPO is better in all three
+seeds at every setting. The critic-free update is the better choice in both
+resource regimes.
+
+\begin{table}[t]
+\centering
+\caption{Algorithm ablation. The first block uses the protocol of Wang et
+al.~\cite{wang2025multitarget}, with no AGV fleet and no rule selector; the
+second uses the full protocol. Values are three-seed means over the 100 test
+instances, with the seed standard deviation.}
+\label{tab:algo}
+\begin{tabular}{lllrr}
+\toprule
+Protocol & Size & Algorithm & Objective & Std \\
+\midrule
+Wang et al. & $6\times6$ & GRPO & 798.06 & 5.83 \\
+ & $6\times6$ & PPO & 871.04 & 54.27 \\
+\midrule
+Full & $6\times6$ & GRPO & 867.75 & 11.86 \\
+ & $6\times6$ & PPO & 966.13 & 44.82 \\
+ & $10\times6$ & GRPO & 808.67 & 12.83 \\
+ & $10\times6$ & PPO & 864.69 & 30.60 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{AGV agent} Under the same checkpoint, replacing the learned AGV agent
+by the better fixed AGV rule changes the objective from 867.75 to 888.46 at
+$6\times6$ and from 808.67 to 867.99 at $10\times6$. The learned AGV agent is
+better in all three seeds at both sizes, by 0.4 to 3.5\% at $6\times6$ and by
+up to 5.3\% at $10\times6$. The no-AGV configuration in
+Table~\ref{tab:encoder} is a different resource regime (an unbounded fleet),
+not an AGV-policy baseline.
+
+\paragraph{Rule selection} Table~\ref{tab:rs} compares the controller with
+and without the top-level rule selector. At $6\times6$ the selector obtains
+867.75 against 895.21 and is better in all three seeds, a mean difference of
+27.46, or 3.1\%. At $10\times6$ the gap is 10.66, or 1.3\%, and it is better in
+two of the three seeds. A paired test over the 100 instances agrees: $p=0.0023$
+at $6\times6$ (Holm over the two sizes), where the selector is lower on 67 of
+them, and $p=0.167$ at $10\times6$, where it is lower on 54. So the selector is a small and consistent gain
+at the smaller size and a small and uneven one at the larger size. It is not
+the source of the margin over the rule baseline: without it the controller is
+still 424.03 below the best PDR pair. The rule-usage analysis below shows what
+the selector changes.
+
+\begin{table}[t]
+\centering
+\caption{Rule-selection ablation. Same encoder, algorithm, and AGV agent;
+only the top-level selector is removed. Values are three-seed means over the
+100 test instances.}
+\label{tab:rs}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrrrrr}
+\toprule
+Size & Config. & s1 & s2 & s3 & Mean & Std \\
+\midrule
+$6\times6$ & RS & 857.93 & 880.92 & 864.39 & 867.75 & 11.86 \\
+ & no RS & 887.75 & 896.53 & 901.36 & 895.21 & 6.90 \\
+$10\times6$ & RS & 796.81 & 822.29 & 806.91 & 808.67 & 12.83 \\
+ & no RS & 828.55 & 808.92 & 820.51 & 819.33 & 9.87 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -415,108 +542,111 @@ no RS & 558.11 & 558.35 & 575.69 & 564.05 \\
 \paragraph{Rule usage}
 The mean probability of each rule at the five top-level decision points, over
 20 test instances (seed 1), shows that the selector is not a fixed rule. The
-machine head moves from minimum energy (0.74 at
-decision 1) to minimum transport (\TBD{M}{run} at decision 5). The AGV head
-moves from nearest (\TBD{M}{run} at decision 1) to earliest arrival
-(\TBD{M}{run} at decision 5). The job head changes less: earliest finish
-stays near \TBD{M}{run}, and most remaining operations falls from
-\TBD{M}{run} to \TBD{M}{run}. The prior therefore shifts as the partial
-schedule fills, which is the behaviour the rule selector is meant to produce.
+machine rule head moves from minimum processing time (0.55 at decision 1) to
+minimum ready time (0.67 at decision 5). The AGV rule head moves from earliest
+arrival (0.78 at decision 1) to nearest (0.83 at decision 5). The job rule head
+moves from least work remaining (0.74 at decision 1) to earliest finish (0.59
+at decision 5). No arm keeps one rule above 0.85, so the prior
+shifts as the partial schedule fills, which is the behaviour the rule
+selector is meant to produce.
 
 \subsection{Analysis}
 
 \paragraph{Amortization against per-instance search}
-RGA and MIP are better than the controller by 78.66 and 51.65 on the
-$6\times6$ test set. The gap has a clear source. RGA evaluates 4850 schedules
-per instance, and MIP solves two CP-SAT models with a 10~s and an 8~s
-limit. The controller constructs one schedule per instance in a single pass
-and takes about 0.56~s. Through the same simulator, one RGA run takes about
-437.8~s; with a direct decoder, the same 4850 evaluations take 1.27~s. The
-controller amortizes the search over the training
-set; the baselines spend the search budget on each instance. The comparison
-therefore measures two operating points, not two implementations of the same
-search.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_anytime.pdf}
-\caption{Objective against wall-clock time on the $6\times6$ test instances.
-RGA uses five budgets from 530 to 4850 evaluations at 0.34~ms per evaluation
-on one CPU core; the controller is one pass on one GPU; PDR and MIP-AGV are
-single points. The dotted line marks 0.56~s.}
-\label{fig:anytime}
-\end{figure}
-
-\paragraph{Anytime comparison}
-Figure~\ref{fig:anytime} places the controller on the time--quality plane. At
-0.56~s the controller obtains 556.70; an RGA run with the same budget, about
-1600 evaluations, obtains 550.85. The crossover is about 0.5~s: below it the
-controller is better, above it RGA is. The controller's advantage over PDR,
-41.5\%, is the robust part of the comparison; its position against RGA depends
-on the time budget.
+RGA evaluates 4850 schedules per instance, each scored by the simulator, and
+the joint MIP takes 36~s per instance. The controller constructs one schedule
+in a single pass and takes about 0.95~s. RGA buys its margin with
+roughly three times the compute of one forward pass, and the MIP with
+thirty-eight times. The controller amortizes the search over the training set;
+the baselines spend the search budget on each instance. The
+comparison measures two cost budgets, not two implementations
+of the same search, and it does not support a claim that our controller is
+faster than RGA at this size.
 
 \paragraph{Training dynamics}
 RS and no RS both improve quickly in the first 50 episodes. After that, the
 seed range remains wide: at the same episode, the three seeds can differ by
-tens of points. The comparison in Table~\ref{tab:rs} is therefore made on the
-selected checkpoint of each seed, not on the last episode.
+tens of points. So we compare the selected checkpoint of each seed in
+Table~\ref{tab:rs}, not the last episode.
 
 \paragraph{Spread across instances}
-The mean hides a difference in the tail. The per-instance standard deviation
-of the seed-averaged controller values is 68.7; across individual seeds it
-ranges from 73.7 to 87.5. RGA has 56.1 on the same basis, and MIP has
-72.1. The controller's spread is wider than RGA's but not wider than MIP's.
-The same pattern
-appears in the validation readings: both configurations improve quickly in
-the first 50 episodes and then oscillate. A single-pass policy has no mechanism to recover from a
+A difference in the tail is hidden by the mean. The per-instance standard deviation
+of the seed-averaged controller values is 109.9, and across individual seeds it
+ranges from 127.0 to 140.0. RGA has 79.7 on the same basis and MIP has
+128.5, so the controller's spread is wider than RGA's and close to MIP's.
+The same pattern appears in the validation readings, and a single-pass policy
+has no mechanism to recover from a
 bad early assignment on a hard instance.
 
-\paragraph{Why the rule selector has a small and uneven effect}
-The selector obtains 556.70 against 564.05 without it. It is better in two
-of three seeds, and the mean difference is 7.35, about 1.3\%. The per-seed
-differences are uneven: $+12.73$, $-2.86$, and $-31.93$ (RS minus no RS). The
-selector makes
-four to thirteen decisions per episode, so its update sees a few dozen
-transitions per group. The variance across seeds is therefore large relative
-to the mean effect. We report the comparison as an analysis and do not use it
-as a headline claim.
+\paragraph{Why the rule selector has a small effect}
+The mean difference is 27.46, or 3.1\%, at $6\times6$, and the selector is
+better in all three seeds there.
+Per-seed
+differences are $-29.82$, $-15.61$, and $-36.97$ (RS minus no RS), so
+the sign is stable while the size varies by a factor of 2.4. At $10\times6$
+the mean difference falls to 10.66 and the sign is no longer stable. The selector makes a
+few decisions per episode, so its update sees a few dozen transitions per
+group. The effect is real but small next to the 451.49 that separates the
+controller from the best PDR pair. We report the comparison as an analysis
+and do not use it as a headline claim.
 
 \paragraph{Why the encoder matters more than the algorithm}
-The encoder ablation spans 117.68 between the all-Set-Transformer and the
-all-GNN configurations, and the ordering holds in all three seeds. The
-algorithm ablation spans 78.10 on $6\times6$ and 29.87 on $10\times6$. The
-encoder changes the representation that all three heads share; the algorithm
-changes how the same representation is updated. At this budget, the
-representation is the larger lever. The machine-internal attention accounts
-for 65.32 of the encoder gap, which is consistent with the three feature
-groups carrying complementary information: processing time, processing
+Under the protocol of Wang et al.\ the encoder ablation spans 127.15 between
+the all-Set-Transformer and the all-GNN configurations, and the ordering holds
+in all three seeds; under the full protocol the same span is 96.47. The
+algorithm ablation spans 72.98 at $6\times6$ under the first protocol and
+98.38 under the second. Whereas the
+encoder changes the representation that all three agents share, the algorithm
+changes how the same representation is updated. Representation is the
+larger lever in the first protocol and the smaller one in the second, so we do
+not claim a general ordering between the two. Machine-internal attention
+accounts for 47.75 of the encoder gap, which is consistent with the three
+feature groups carrying complementary information: processing time, processing
 energy, and transport distance.
 
 \paragraph{Why GRPO differs from PPO here}
-PPO trains a value critic for each head and a centralized critic for the team.
+PPO trains a value critic for each agent and a centralized critic for the team.
 The update sees one group of eight episodes, so each critic is fitted to eight
-returns per group while the policy heads are shared across all steps. The
-critic's error therefore enters the advantage of every head. GRPO replaces the
-critic with the within-group mean and standard deviation of the same eight
-returns. The comparison at two sizes is consistent with this explanation: the
-gap is larger at $6\times6$ (78.10) than at $10\times6$ (29.87), where each
-episode contains more decisions and the critic has more data. The two
-protocols also differ in weight sampling, one vector per group for GRPO and one
-per environment for PPO, so the gap is not attributed to the critic alone.
+returns per group while the actor networks are shared across all steps. So the
+critic's error enters the advantage of every agent. GRPO replaces
+those critics by the within-group mean and standard deviation of the same
+eight returns, so no critic is fitted at the low level. The gap is 72.98 at
+$6\times6$ under the protocol of Wang et al., 98.38 at $6\times6$ under the
+full protocol and 56.02 at $10\times6$. It does not grow with the instance, so
+we do not claim a trend with size. A paired test on the 100 instances gives
+$p=9.0\times10^{-16}$ at $6\times6$ and $p=1.4\times10^{-9}$ at $10\times6$,
+with GRPO lower on 90 and 77 of them. Both algorithms used one weight vector
+per group, so the gap is attributed to the estimator.
 
 \paragraph{What the controller is for}
-The controller is better than the rule-based and the adapted DRL baselines at
-every size. Against the search methods the result depends on the size: at
-$6\times6$ RGA is ahead by 16.5\% and MIP by 10.2\%, and at $10\times10$ the
-controller is ahead of both. The claim is therefore an operating point, not a
-dominance: a feasible schedule in about half a second, for a shop that
-reschedules frequently or evaluates many what-if scenarios, and a schedule
-that stays competitive when the instance grows and the search methods slow
-down.
+We do not claim the best objective at every size. The controller is better
+than the rule-based and the adapted DRL baselines at every size, but two
+search methods are ahead of it. RGA obtains 762.04 on the $6\times6$ test set
+against 867.75 for the controller, so it is 12.2\% ahead, and the joint MIP is
+ahead of the controller at all three sizes. The search methods pay
+for that quality
+in online time. Under the same budget of 4850 schedule evaluations per
+instance, and with every candidate scored by the same simulator the controller
+is scored with, one RGA run takes 3.07~s per instance at $6\times6$ against
+0.95~s for one pass of the controller. The cost of the search grows steeply
+with the instance: on the instances of Wang et
+al.~\cite{wang2025multitarget} their RGA needs 6.39~s per instance at
+$6\times6$, 19.94~s at $10\times6$ and 186.3~s at $10\times10$, while one
+controller pass takes 0.95, 1.99 and 4.16~s. The
+mixed-integer route fails differently. Our joint model is solved with the
+machine assignment fixed first; the variant that leaves the assignment free was
+tried and does not close at these sizes, and even with the assignment fixed a
+$10\times10$ instance takes 210~s on average. The claim is
+an operating point rather than a dominance: a feasible schedule in about a
+second, for a shop that reschedules often or evaluates many what-if scenarios,
+and a method whose cost grows slowly with the instance size.
 
 \paragraph{Scope} Section~\ref{sec:problem} states the transport
-assumptions (A1)--(A5). The MIP baseline is a two-stage heuristic, not a
-joint optimum. All learned results use three training seeds.
+assumptions (A1)--(A5). The joint MIP is solved to proven optimality on all
+100 instances at $6\times6$ and on 92 and 91 of the larger sizes; the others
+either return a feasible schedule or nothing within the cap. Its machine
+assignment is fixed in all three sizes.
+All learned results use three training seeds.
 
 
 

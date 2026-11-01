@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 580" width="7.1in" height="5.72in" font-family="Helvetica, Arial, sans-serif">
+<defs>
+<marker id="mB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4C78A8"/></marker>
+<marker id="mR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B64342"/></marker>
+<marker id="mG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2E7D32"/></marker>
+<marker id="mO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C55A11"/></marker>
+<marker id="mS" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7A4E6D"/></marker>
+</defs>
+<rect width="720" height="580" fill="#FFFFFF"/>
+<rect x="8" y="24" width="344" height="240" rx="10" fill="#FBFCFE" stroke="#DDE6F0" stroke-width="1"/>
+<rect x="368" y="24" width="344" height="240" rx="10" fill="#FBFCFE" stroke="#DDE6F0" stroke-width="1"/>
+<rect x="8" y="280" width="344" height="292" rx="10" fill="#FBFCFE" stroke="#DDE6F0" stroke-width="1"/>
+<rect x="368" y="280" width="344" height="292" rx="10" fill="#FBFCFE" stroke="#DDE6F0" stroke-width="1"/>
+<text x="18" y="42" font-size="8.6" font-weight="700" fill="#1A1A1A">(a) Four agents, three coupled decisions</text>
+<rect x="104" y="56" width="152" height="24" rx="7" fill="#FBE9E9" stroke="#B64342" stroke-width="1"/>
+<text x="180" y="72" font-size="6.8" font-weight="700" text-anchor="middle" fill="#8E2F2E">rule selector agent</text>
+<path d="M180 80 V88" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3"/>
+<path d="M62 88 H298" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3"/>
+<path d="M62 88 V96" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<path d="M180 88 V96" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<path d="M298 88 V96" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<text x="304" y="92" font-size="5.6" fill="#B64342">rule prior</text>
+<rect x="18" y="100" width="88" height="34" rx="5" fill="#E8F0FB" stroke="#0F4D92" stroke-width="1.1"/>
+<text x="62" y="121" font-size="6.6" text-anchor="middle" fill="#0F4D92">operation agent</text>
+<rect x="130" y="100" width="100" height="34" rx="5" fill="#FFF6DA" stroke="#B07D00" stroke-width="1.1"/>
+<text x="180" y="121" font-size="6.6" text-anchor="middle" fill="#B07D00">machine agent</text>
+<rect x="254" y="100" width="88" height="34" rx="5" fill="#E7F4E7" stroke="#2E7D32" stroke-width="1.1"/>
+<text x="298" y="121" font-size="6.6" text-anchor="middle" fill="#2E7D32">AGV agent</text>
+<path d="M108 117 H126" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M232 117 H250" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<text x="62" y="146" font-size="5.4" text-anchor="middle" fill="#0F4D92">picks the operation</text>
+<text x="180" y="146" font-size="5.4" text-anchor="middle" fill="#B07D00">picks the machine</text>
+<text x="298" y="146" font-size="5.4" text-anchor="middle" fill="#2E7D32">picks the AGV</text>
+<rect x="18" y="158" width="324" height="34" rx="6" fill="#F4F6F9"/>
+<text x="26" y="179" font-size="6.6" font-weight="700" fill="#4A4A4A">objective</text>
+<rect x="79" y="166" width="58" height="18" rx="9" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="108" y="178" font-size="5.8" text-anchor="middle" fill="#7A3E71">makespan</text>
+<rect x="155" y="166" width="34" height="18" rx="9" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="172" y="178" font-size="5.8" text-anchor="middle" fill="#7A3E71">PEC</text>
+<rect x="195" y="166" width="34" height="18" rx="9" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="212" y="178" font-size="5.8" text-anchor="middle" fill="#7A3E71">idle</text>
+<rect x="241" y="166" width="58" height="18" rx="9" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="270" y="178" font-size="5.8" text-anchor="middle" fill="#7A3E71">transport</text>
+<text x="18" y="210" font-size="5.6" fill="#777777">the weights set the trade-off; the transport term counts loaded travel</text>
+<text x="18" y="220" font-size="5.6" fill="#777777">plus half-weighted empty travel</text>
+<text x="378" y="42" font-size="8.6" font-weight="700" fill="#1A1A1A">(b) Shop environment</text>
+<rect x="378" y="52" width="138" height="196" rx="6" fill="#F5F9FD" stroke="#BBD3E8" stroke-width="1" stroke-dasharray="5 4"/>
+<rect x="560" y="52" width="138" height="196" rx="6" fill="#F5F9FD" stroke="#BBD3E8" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="447" y="68" font-size="7" font-weight="700" text-anchor="middle" fill="#2C5F8A">workshop 1</text>
+<text x="629" y="68" font-size="7" font-weight="700" text-anchor="middle" fill="#2C5F8A">workshop 2</text>
+<rect x="384" y="78" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="388" y="82" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="393" y="95" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="405" y="82" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="408" cy="93" r="1.5" fill="#B64342"/><rect x="385" y="104" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="387" y="108" width="3" height="2" fill="#999999"/><rect x="408" y="108" width="3" height="2" fill="#999999"/>
+<rect x="598" y="78" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="602" y="82" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="607" y="95" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="619" y="82" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="622" cy="93" r="1.5" fill="#B64342"/><rect x="599" y="104" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="601" y="108" width="3" height="2" fill="#999999"/><rect x="622" y="108" width="3" height="2" fill="#999999"/>
+<rect x="416" y="78" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="420" y="82" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="425" y="95" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="437" y="82" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="440" cy="93" r="1.5" fill="#B64342"/><rect x="417" y="104" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="419" y="108" width="3" height="2" fill="#999999"/><rect x="440" y="108" width="3" height="2" fill="#999999"/>
+<rect x="630" y="78" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="634" y="82" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="639" y="95" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="651" y="82" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="654" cy="93" r="1.5" fill="#B64342"/><rect x="631" y="104" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="633" y="108" width="3" height="2" fill="#999999"/><rect x="654" y="108" width="3" height="2" fill="#999999"/>
+<rect x="448" y="78" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="452" y="82" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="457" y="95" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="469" y="82" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="472" cy="93" r="1.5" fill="#B64342"/><rect x="449" y="104" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="451" y="108" width="3" height="2" fill="#999999"/><rect x="472" y="108" width="3" height="2" fill="#999999"/>
+<rect x="662" y="78" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="666" y="82" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="671" y="95" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="683" y="82" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="686" cy="93" r="1.5" fill="#B64342"/><rect x="663" y="104" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="665" y="108" width="3" height="2" fill="#999999"/><rect x="686" y="108" width="3" height="2" fill="#999999"/>
+<rect x="486" y="134" width="28" height="12" rx="2" fill="#F3E8F2" stroke="#7A4E6D" stroke-width="0.9"/><path d="M489 140 H511" stroke="#7A4E6D" stroke-width="0.8" stroke-dasharray="3 2"/><circle cx="491" cy="150" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="500" cy="150" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="509" cy="150" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/>
+<rect x="566" y="134" width="28" height="12" rx="2" fill="#F3E8F2" stroke="#7A4E6D" stroke-width="0.9"/><path d="M569 140 H591" stroke="#7A4E6D" stroke-width="0.8" stroke-dasharray="3 2"/><circle cx="571" cy="150" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="580" cy="150" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="589" cy="150" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/>
+<text x="500" y="162" font-size="5.2" text-anchor="middle" fill="#7A4E6D">L/U</text>
+<text x="580" y="162" font-size="5.2" text-anchor="middle" fill="#7A4E6D">L/U</text>
+<rect x="388" y="184" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="382" y="189" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="409" cy="193" r="1.5" fill="#2E7D32"/><circle cx="387" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="395" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="403" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="411" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<rect x="600" y="184" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="594" y="189" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="621" cy="193" r="1.5" fill="#2E7D32"/><circle cx="599" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="607" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="615" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="623" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<rect x="424" y="184" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="418" y="189" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="445" cy="193" r="1.5" fill="#2E7D32"/><circle cx="423" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="431" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="439" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="447" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<rect x="636" y="184" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="630" y="189" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="657" cy="193" r="1.5" fill="#2E7D32"/><circle cx="635" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="643" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="651" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="659" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<rect x="460" y="184" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="454" y="189" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="481" cy="193" r="1.5" fill="#2E7D32"/><circle cx="459" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="467" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="475" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="483" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<rect x="672" y="184" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="666" y="189" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="693" cy="193" r="1.5" fill="#2E7D32"/><circle cx="671" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="679" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="687" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="695" cy="200" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<circle cx="385" cy="184" r="2.4" fill="#2E7D32" stroke="#FFFFFF" stroke-width="0.45"/>
+<circle cx="421" cy="184" r="2.4" fill="#B64342" stroke="#FFFFFF" stroke-width="0.45"/>
+<circle cx="457" cy="184" r="2.4" fill="#2E7D32" stroke="#FFFFFF" stroke-width="0.45"/>
+<circle cx="599" cy="184" r="2.4" fill="#2E7D32" stroke="#FFFFFF" stroke-width="0.45"/>
+<circle cx="635" cy="184" r="2.4" fill="#B64342" stroke="#FFFFFF" stroke-width="0.45"/>
+<circle cx="671" cy="184" r="2.4" fill="#2E7D32" stroke="#FFFFFF" stroke-width="0.45"/>
+<path d="M516 140 H562" stroke="#9A4D8E" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<text x="538" y="132" font-size="5.2" text-anchor="middle" fill="#9A4D8E">a job crosses</text>
+<text x="538" y="214" font-size="5.6" text-anchor="middle" fill="#777777">3 machines and 3 AGVs per workshop</text>
+<circle cx="470" cy="230" r="2.4" fill="#2E7D32" stroke="#FFFFFF" stroke-width="0.45"/>
+<text x="477" y="233" font-size="5.2" fill="#555555">free AGV</text>
+<circle cx="542" cy="230" r="2.4" fill="#B64342" stroke="#FFFFFF" stroke-width="0.45"/>
+<text x="549" y="233" font-size="5.2" fill="#555555">busy AGV</text>
+<text x="18" y="298" font-size="8.6" font-weight="700" fill="#1A1A1A">(c) Cross-workshop transport</text>
+<rect x="18" y="308" width="148" height="184" rx="6" fill="#F5F9FD" stroke="#BBD3E8" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="92" y="324" font-size="6.6" font-weight="700" text-anchor="middle" fill="#2C5F8A">workshop 1</text>
+<rect x="190" y="308" width="148" height="184" rx="6" fill="#F5F9FD" stroke="#BBD3E8" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="264" y="324" font-size="6.6" font-weight="700" text-anchor="middle" fill="#2C5F8A">workshop 2</text>
+<rect x="26" y="344" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="30" y="348" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="35" y="361" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="47" y="348" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="50" cy="359" r="1.5" fill="#B64342"/><rect x="27" y="370" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="29" y="374" width="3" height="2" fill="#999999"/><rect x="50" y="374" width="3" height="2" fill="#999999"/>
+<rect x="134" y="346" width="28" height="12" rx="2" fill="#F3E8F2" stroke="#7A4E6D" stroke-width="0.9"/><path d="M137 352 H159" stroke="#7A4E6D" stroke-width="0.8" stroke-dasharray="3 2"/><circle cx="139" cy="362" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="148" cy="362" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="157" cy="362" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/>
+<rect x="32" y="440" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="26" y="445" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="53" cy="449" r="1.5" fill="#2E7D32"/><circle cx="31" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="39" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="47" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="55" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<rect x="194" y="346" width="28" height="12" rx="2" fill="#F3E8F2" stroke="#7A4E6D" stroke-width="0.9"/><path d="M197 352 H219" stroke="#7A4E6D" stroke-width="0.8" stroke-dasharray="3 2"/><circle cx="199" cy="362" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="208" cy="362" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/><circle cx="217" cy="362" r="2.2" fill="#FFFFFF" stroke="#7A4E6D" stroke-width="0.7"/>
+<rect x="300" y="344" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="304" y="348" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="309" y="361" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="321" y="348" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="324" cy="359" r="1.5" fill="#B64342"/><rect x="301" y="370" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="303" y="374" width="3" height="2" fill="#999999"/><rect x="324" y="374" width="3" height="2" fill="#999999"/>
+<rect x="306" y="440" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="300" y="445" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="327" cy="449" r="1.5" fill="#2E7D32"/><circle cx="305" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="313" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="321" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="329" cy="456" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<text x="148" y="366" font-size="5" text-anchor="middle" fill="#7A4E6D">L/U</text>
+<text x="208" y="366" font-size="5" text-anchor="middle" fill="#7A4E6D">L/U</text>
+<path d="M42 436 V378" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<path d="M57 356 H130" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M166 353 H192" stroke="#C55A11" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mO)"/>
+<path d="M226 353 H298" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M315 378 V436" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<circle cx="28" cy="406" r="4.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><text x="28" y="407.9" font-size="5.4" text-anchor="middle" fill="#2E7D32">1</text>
+<circle cx="94" cy="348" r="4.6" fill="#FFFFFF" stroke="#4C78A8" stroke-width="0.8"/><text x="94" y="349.9" font-size="5.4" text-anchor="middle" fill="#4C78A8">2</text>
+<circle cx="179" cy="340" r="4.6" fill="#FFFFFF" stroke="#C55A11" stroke-width="0.8"/><text x="179" y="341.9" font-size="5.4" text-anchor="middle" fill="#C55A11">3</text>
+<circle cx="262" cy="348" r="4.6" fill="#FFFFFF" stroke="#4C78A8" stroke-width="0.8"/><text x="262" y="349.9" font-size="5.4" text-anchor="middle" fill="#4C78A8">4</text>
+<circle cx="322" cy="406" r="4.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><text x="322" y="407.9" font-size="5.4" text-anchor="middle" fill="#2E7D32">5</text>
+<text x="24" y="498" font-size="5.8" font-weight="700" fill="#2C5F8A">one trip, as the AGV spends it</text>
+<rect x="24" y="512" width="44" height="16" fill="#FFFFFF" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="46.0" y="523" font-size="5.2" text-anchor="middle" fill="#2E7D32">empty</text>
+<circle cx="46.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><text x="46.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#2E7D32">1</text>
+<rect x="68" y="512" width="58" height="16" fill="#FFFFFF" stroke="#4C78A8" stroke-width="1"/>
+<text x="97.0" y="523" font-size="5.2" text-anchor="middle" fill="#4C78A8">loaded</text>
+<circle cx="97.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#4C78A8" stroke-width="0.8"/><text x="97.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#4C78A8">2</text>
+<rect x="126" y="512" width="30" height="16" fill="#FFFFFF" stroke="#C55A11" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="141.0" y="523" font-size="5.2" text-anchor="middle" fill="#C55A11">transfer</text>
+<circle cx="141.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#C55A11" stroke-width="0.8"/><text x="141.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#C55A11">3</text>
+<rect x="156" y="512" width="58" height="16" fill="#FFFFFF" stroke="#4C78A8" stroke-width="1"/>
+<text x="185.0" y="523" font-size="5.2" text-anchor="middle" fill="#4C78A8">loaded</text>
+<circle cx="185.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#4C78A8" stroke-width="0.8"/><text x="185.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#4C78A8">4</text>
+<rect x="214" y="512" width="44" height="16" fill="#FFFFFF" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="236.0" y="523" font-size="5.2" text-anchor="middle" fill="#2E7D32">empty</text>
+<circle cx="236.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><text x="236.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#2E7D32">5</text>
+<path d="M24 536 H258" stroke="#999999" stroke-width="0.8" marker-end="url(#mB)"/>
+<text x="262" y="539" font-size="5.2" fill="#777777">time</text>
+<text x="24" y="558" font-size="5.4" fill="#777777">the two loaded legs belong to different fleets; the transfer uses no AGV</text>
+<text x="378" y="298" font-size="8.6" font-weight="700" fill="#1A1A1A">(d) Same-workshop transport</text>
+<rect x="378" y="308" width="324" height="184" rx="6" fill="#F5F9FD" stroke="#BBD3E8" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="540" y="324" font-size="6.6" font-weight="700" text-anchor="middle" fill="#2C5F8A">one workshop</text>
+<rect x="410" y="352" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="414" y="356" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="419" y="369" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="431" y="356" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="434" cy="367" r="1.5" fill="#B64342"/><rect x="411" y="378" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="413" y="382" width="3" height="2" fill="#999999"/><rect x="434" y="382" width="3" height="2" fill="#999999"/>
+<rect x="628" y="352" width="30" height="26" rx="2" fill="#FFFFFF" stroke="#5F5F5F" stroke-width="0.9"/><rect x="632" y="356" width="14" height="11" rx="1" fill="#DDEBFA" stroke="#5F5F5F" stroke-width="0.6"/><rect x="637" y="369" width="4" height="6" fill="#C9C9C9" stroke="#5F5F5F" stroke-width="0.5"/><rect x="649" y="356" width="6" height="8" rx="1" fill="#F0F0F0" stroke="#5F5F5F" stroke-width="0.6"/><circle cx="652" cy="367" r="1.5" fill="#B64342"/><rect x="629" y="378" width="28" height="4" fill="#DCDCDC" stroke="#5F5F5F" stroke-width="0.6"/><rect x="631" y="382" width="3" height="2" fill="#999999"/><rect x="652" y="382" width="3" height="2" fill="#999999"/>
+<rect x="512" y="430" width="20" height="5" rx="1" fill="#EFEFEF" stroke="#888888" stroke-width="0.6"/><rect x="506" y="435" width="32" height="9" rx="2" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/><circle cx="533" cy="439" r="1.5" fill="#2E7D32"/><circle cx="511" cy="446" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="519" cy="446" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="527" cy="446" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><circle cx="535" cy="446" r="2.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/>
+<path d="M520 426 L438 384" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<path d="M438 384 H626" stroke="#4C78A8" stroke-width="1.2" marker-end="url(#mB)"/>
+<circle cx="486" cy="416" r="4.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><text x="486" y="417.9" font-size="5.4" text-anchor="middle" fill="#2E7D32">1</text>
+<circle cx="556" cy="374" r="4.6" fill="#FFFFFF" stroke="#4C78A8" stroke-width="0.8"/><text x="556" y="375.9" font-size="5.4" text-anchor="middle" fill="#4C78A8">2</text>
+<text x="384" y="498" font-size="5.8" font-weight="700" fill="#2C5F8A">one trip, as the AGV spends it</text>
+<rect x="384" y="512" width="56" height="16" fill="#FFFFFF" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="412.0" y="523" font-size="5.2" text-anchor="middle" fill="#2E7D32">empty</text>
+<circle cx="412.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.8"/><text x="412.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#2E7D32">1</text>
+<rect x="440" y="512" width="150" height="16" fill="#FFFFFF" stroke="#4C78A8" stroke-width="1"/>
+<text x="515.0" y="523" font-size="5.2" text-anchor="middle" fill="#4C78A8">loaded</text>
+<circle cx="515.0" cy="504" r="4.6" fill="#FFFFFF" stroke="#4C78A8" stroke-width="0.8"/><text x="515.0" y="505.9" font-size="5.4" text-anchor="middle" fill="#4C78A8">2</text>
+<path d="M384 536 H576" stroke="#999999" stroke-width="0.8" marker-end="url(#mB)"/>
+<text x="580" y="539" font-size="5.2" fill="#777777">time</text>
+<text x="384" y="558" font-size="5.4" fill="#777777">one fleet, no station hop, so the trip has no transfer segment</text>
+</svg>

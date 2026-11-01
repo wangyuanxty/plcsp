@@ -122,20 +122,20 @@ scalar objective is
 F=w_{1}\Cmax+w_{2}\left(\Eproc+\Eidle\right)+w_{3}\Ttrans,
 \label{eq:objective}
 \end{equation}
-with $w_{1}+w_{2}+w_{3}=1$. The evaluation uses $(w_1,w_2,w_3)=(0.4,0.4,0.2)$.
+with $w_{1}+w_{2}+w_{3}=1$. We evaluate with $(w_1,w_2,w_3)=(0.4,0.4,0.2)$.
 During training the weights are sampled at random and are fixed within a
 group of rollouts (Section~\ref{sec:method}).
 
-The three terms have different scales. The makespan and the transport time
-are in time units; the processing and idle energy are in energy units. The
-weights set the trade-off. The idle term depends on the assignment and the
-sequence, not only on the processing times: moving an operation to a machine
+The three terms have different scales. Makespan and transport time are in
+time units, and processing and idle energy are in energy units. The weights
+set the trade-off. Idle energy, by contrast, depends on the assignment and the
+sequence and not only on the processing times: moving an operation to a machine
 with a later release can reduce its processing energy and increase the idle
 energy of the machine it leaves.
 
 \subsection{Assumptions}
 
-The model makes the following assumptions.
+We make the following assumptions.
 \begin{itemize}
 \item[(A1)] AGVs are assigned to workshops and do not move between
 workshops.
@@ -147,8 +147,7 @@ target station to the target machine.
 \item[(A3)] AGVs are single-load. Loading and unloading take zero time.
 There is no charging and no AGV failure.
 \item[(A4)] The transport term of \eqref{eq:objective} counts loaded and
-empty AGV travel; empty travel is charged at $
-ho_e=0.5$ of the loaded
+empty AGV travel; empty travel is charged at $\rho_e=0.5$ of the loaded
 power. AGV waiting is not charged.
 \item[(A5)] The position of every AGV is tracked at all times, including
 a source AGV that has stopped at its station.
@@ -165,42 +164,41 @@ $s_t$ contains the partial disjunctive graph, the machine routes, the AGV
 states, and the current weights. The action is a triple
 $a_t=(a^{\mathrm{job}}_t,a^{\mathrm{mach}}_t,a^{\mathrm{agv}}_t)$. The
 operation is chosen from the unscheduled operations whose predecessor is
-complete. The machine is chosen from the eligible machines of that
-operation. The AGV is chosen from the AGVs of the source workshop when a
-transport is needed, and from the target workshop when the transport crosses
-a workshop boundary.
+complete, the machine from the eligible machines of that operation, and the
+AGV from the AGVs of the source workshop when a transport is needed, or from
+the target workshop when the transport crosses a workshop boundary.
 
-The transition applies the assignment, inserts the operation into the
-machine route, updates the AGV states, and returns the next state. The
-episode ends after $JO$ steps. The return is the negative objective
+A transition applies the assignment, inserts the operation into the machine
+route, updates the AGV states, and returns the next state. One episode ends
+after $JO$ steps, and the return is the negative objective
 \eqref{eq:objective} under the weights of the episode.
 
-The number of joint actions at step $t$ is
+At step $t$ the number of joint actions is
 \begin{equation}
 |\mathcal{A}_t|=
 |\mathcal{O}^{\mathrm{feas}}_t|\times
 |\mathcal{M}_{j,o}|\times
 |\mathcal{A}_{w}|,
 \end{equation}
-where the last factor is present only when a transport is needed. The
-product grows with the number of jobs, machines, and AGVs. A policy must rank
+where the last factor is present only when a transport is needed. It grows
+with the number of jobs, machines, and AGVs. A policy must rank
 the candidates without enumerating the product, which motivates the
 factorized policy in \eqref{eq:factor}.
 
 \subsection{Complexity}
 
 The problem contains the flexible job shop as a special case (one workshop,
-one AGV), so it is NP-hard. The joint action space is the product of the
-three candidate sets. The number of feasible schedules grows with the number
+one AGV), so it is NP-hard. Its joint action space is the product of the
+three candidate sets, and the number of feasible schedules grows with the number
 of machine assignments and with the number of AGV sequences. An exact model
 must decide the assignment, the machine sequence, and the vehicle sequence
 together; the mixed-integer baseline in Section~\ref{sec:experiments} solves
 the first two and the third in two stages.
 
-The objective adds two sources of coupling. The idle term couples the
+Two further couplings enter through the objective. The idle term couples the
 assignment with the sequence: an operation that starts earlier on one machine
-can leave a larger gap on another. The transport term couples the machine
-sequence with the vehicle sequence: a shorter loaded trip can require a
-longer empty trip. These couplings are why a fixed rule pair is not enough
-and why the controller learns the assignment, the sequence, and the vehicle
-choice together.
+can leave a larger gap on another. By the same argument, the transport term
+couples the machine sequence with the vehicle sequence, because a shorter
+loaded trip can require a longer empty trip. These couplings are why a fixed
+rule pair is not enough and why the controller learns the assignment, the
+sequence, and the vehicle choice together.

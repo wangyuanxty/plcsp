@@ -86,33 +86,27 @@ def main():
           "operations  $O_t$\nmachines  $M_{j,o}$\nAGVs  $A_w$", ec=GRAY)
     ax.text(0.142, 0.22, "$s_t$", ha="center", fontsize=8, color=BLUE)
 
-    # middle: selector
-    block(ax, 0.315, 0.775, 0.36, 0.115, "Top-level rule selector",
-          "18-dim state -> 4 / 3 / 3 rules, every 8 steps",
+    # middle, top tier: one selector
+    block(ax, 0.315, 0.795, 0.36, 0.10, "Rule selector agent",
+          "18-dim state -> 3 / 4 / 3 rules, every 8 steps",
           ec=BLUE, fc="#EEF3FA", fs=6.0)
 
-    # middle: encoders and heads
-    ys = [0.62, 0.47, 0.32]
-    enc = [("Job encoder", "33-d tokens, 2 layers"),
-           ("Machine encoder", "3 groups; intra 1L; inter 3L"),
-           ("AGV encoder", "AGV tokens, 1 layer")]
-    heads = ["Job head", "Machine head", "AGV head"]
-    for y, (h, b) in zip(ys, enc):
-        block(ax, 0.315, y, 0.16, 0.11, h, b, ec=BLUE, fs=5.9)
-    for y, h in zip(ys, heads):
-        block(ax, 0.515, y, 0.16, 0.11, h, "score over candidates",
-              ec=BLUE2, fc="#EEF3FA", fs=5.4)
-        arrow(ax, (0.475, y + 0.055), (0.515, y + 0.055))
-    for y in ys:
-        arrow(ax, (0.30, 0.55), (0.315, y + 0.055), color=GRAY)
-    arrow(ax, (0.495, 0.775), (0.495, 0.73))
-    ax.text(0.50, 0.745, "rule bias", fontsize=5.4, color=BLUE)
+    # middle, bottom tier: three agents in a row
+    ag_x = [0.315, 0.4375, 0.56]
+    ag_w, ag_y, ag_h = 0.115, 0.40, 0.16
+    agents = [("Job agent", "ST enc. 33-d, 2L"),
+              ("Machine agent", "3 groups, intra+inter"),
+              ("AGV agent", "AGV tokens, 1L")]
+    for x, (t, b) in zip(ag_x, agents):
+        block(ax, x, ag_y, ag_w, ag_h, t, b, ec=BLUE2, fc="#EEF3FA", fs=5.4)
+        arrow(ax, (x + ag_w / 2, 0.795), (x + ag_w / 2, ag_y + ag_h),
+              color=BLUE)
+    ax.text(0.302, 0.735, "rule prior", fontsize=5.0, color=BLUE, ha="left")
 
-    # middle: GRPO
-    block(ax, 0.315, 0.12, 0.36, 0.13, "GRPO update",
-          "group of 8 episodes | shared z-score advantage | no critic",
-          ec=BLUE, fc="#EEF3FA", fs=5.9)
-    arrow(ax, (0.495, 0.25), (0.495, 0.32))
+    # candidate sets feed the agent row
+    arrow(ax, (0.268, 0.44), (0.315, 0.48), color=GRAY)
+    ax.text(0.272, 0.455, "$s_t$", fontsize=7, color=BLUE)
+
 
     # right column
     block(ax, 0.725, 0.66, 0.26, 0.16, "Joint action",
@@ -120,7 +114,7 @@ def main():
     block(ax, 0.725, 0.44, 0.26, 0.16, "Shop update",
           "assignment, sequence,\nAGV routes", ec=GRAY)
     rbox(ax, 0.725, 0.12, 0.26, 0.24, ec=RED, lw=1.0)
-    ax.text(0.855, 0.32, "Per-head costs", ha="center", va="center",
+    ax.text(0.855, 0.32, "Per-agent costs", ha="center", va="center",
             fontsize=5.6, fontweight="bold")
     ax.text(0.855, 0.26, "job: mk + idle", ha="center", va="center",
             fontsize=4.8)
@@ -128,16 +122,19 @@ def main():
             fontsize=4.8)
     ax.text(0.855, 0.16, "AGV: trans + wait", ha="center", va="center",
             fontsize=4.8)
-    for y in ys:
-        ax.plot([0.675, 0.695], [y + 0.055, y + 0.055], color=BLUE, lw=0.9)
-    ax.plot([0.695, 0.695], [ys[-1] + 0.055, 0.74], color=BLUE, lw=0.9)
+    ax.plot([0.675, 0.695], [0.48, 0.48], color=BLUE, lw=0.9)
+    ax.plot([0.695, 0.695], [0.48, 0.74], color=BLUE, lw=0.9)
     arrow(ax, (0.695, 0.74), (0.725, 0.74))
+    ax.text(0.66, 0.44, "joint action", fontsize=4.8, color=BLUE, ha="left")
     arrow(ax, (0.855, 0.66), (0.855, 0.60), color=GRAY)
     arrow(ax, (0.855, 0.44), (0.855, 0.35), color=RED)
     ax.text(0.86, 0.395, "cost change", fontsize=5.4, color=RED)
-    # feedback to selector (right margin)
-    arrow(ax, (0.985, 0.27), (0.998, 0.27), color=RED, ls="--")
-    arrow(ax, (0.998, 0.27), (0.998, 0.845), color=RED, ls="--")
+    # per-agent costs return to the selector as its reward
+    ax.plot([0.725, 0.706], [0.24, 0.24], color=RED, ls="--", lw=0.9)
+    ax.plot([0.706, 0.706], [0.24, 0.845], color=RED, ls="--", lw=0.9)
+    arrow(ax, (0.706, 0.845), (0.675, 0.845), color=RED, ls="--")
+    ax.text(0.712, 0.55, "segment reward", fontsize=4.6, color=RED,
+            rotation=90, va="center")
     arrow(ax, (0.998, 0.845), (0.675, 0.845), color=RED, ls="--")
     # next state (bottom margin)
     arrow(ax, (0.855, 0.44), (0.855, 0.10), color=GRAY, ls="--")

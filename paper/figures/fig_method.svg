@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 570" width="7.1in" height="5.62in" font-family="Helvetica, Arial, sans-serif">
+<defs>
+<marker id="mB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4C78A8"/></marker>
+<marker id="mR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B64342"/></marker>
+<marker id="mG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2E7D32"/></marker>
+<marker id="mO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C55A11"/></marker>
+</defs>
+<rect width="720" height="570" fill="#FFFFFF"/>
+<text x="8" y="16" font-size="9" font-weight="700" fill="#1A1A1A">(a) Four agents and the flow of credit</text>
+<rect x="220" y="22" width="284" height="46" rx="8" fill="#FBE9E9" stroke="#B64342" stroke-width="1.1"/>
+<text x="362" y="36" font-size="8" font-weight="700" text-anchor="middle" fill="#8E2F2E">rule selector agent</text>
+<rect x="232" y="42" width="66" height="16" rx="8" fill="#FFFFFF" stroke="#B64342" stroke-width="0.8"/>
+<text x="265" y="53" font-size="6" text-anchor="middle" fill="#8E2F2E">3 job rules</text>
+<rect x="306" y="42" width="76" height="16" rx="8" fill="#FFFFFF" stroke="#B64342" stroke-width="0.8"/>
+<text x="344" y="53" font-size="6" text-anchor="middle" fill="#8E2F2E">4 machine rules</text>
+<rect x="390" y="42" width="66" height="16" rx="8" fill="#FFFFFF" stroke="#B64342" stroke-width="0.8"/>
+<text x="423" y="53" font-size="6" text-anchor="middle" fill="#8E2F2E">3 AGV rules</text>
+<rect x="8" y="78" width="196" height="316" rx="10" fill="#F5F9FD" stroke="#BBD3E8" stroke-width="1"/>
+<text x="18" y="94" font-size="7.4" font-weight="700" fill="#2C5F8A">State and candidates</text>
+<rect x="212" y="78" width="292" height="316" rx="10" fill="#FAFAFA" stroke="#CFCFCF" stroke-width="1"/>
+<text x="222" y="92" font-size="7.4" font-weight="700" fill="#444444">Actors: encode, score, mask</text>
+<rect x="520" y="78" width="192" height="316" rx="10" fill="#F3F9F3" stroke="#BDDCC0" stroke-width="1"/>
+<text x="530" y="94" font-size="7.4" font-weight="700" fill="#2E6B33">Shop environment</text>
+<rect x="20" y="110" width="140" height="40" rx="4" fill="#FFFFFF" stroke="#9C9C9C" stroke-width="0.8"/>
+<rect x="17" y="107" width="140" height="40" rx="4" fill="#FFFFFF" stroke="#9C9C9C" stroke-width="0.8"/>
+<rect x="14" y="104" width="140" height="40" rx="4" fill="#E8F0FB" stroke="#0F4D92" stroke-width="0.9"/>
+<text x="84" y="117" font-size="6.2" text-anchor="middle" fill="#0F4D92">operation tokens</text>
+<rect x="48.0" y="124" width="5.2" height="11.4" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.4"/><rect x="54.0" y="124" width="5.2" height="11.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.4"/><rect x="60.0" y="124" width="5.2" height="11.4" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.4"/><rect x="66.0" y="124" width="5.2" height="11.4" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.4"/><rect x="72.0" y="124" width="5.2" height="11.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.4"/><rect x="78.0" y="124" width="5.2" height="11.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.4"/><rect x="84.0" y="124" width="5.2" height="11.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.4"/><rect x="90.0" y="124" width="5.2" height="11.4" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.4"/><rect x="96.0" y="124" width="5.2" height="11.4" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.4"/><rect x="102.0" y="124" width="5.2" height="11.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.4"/><rect x="108.0" y="124" width="5.2" height="11.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.4"/><rect x="114.0" y="124" width="5.2" height="11.4" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.4"/>
+<rect x="20" y="202" width="140" height="40" rx="4" fill="#FFFFFF" stroke="#9C9C9C" stroke-width="0.8"/>
+<rect x="17" y="199" width="140" height="40" rx="4" fill="#FFFFFF" stroke="#9C9C9C" stroke-width="0.8"/>
+<rect x="14" y="196" width="140" height="40" rx="4" fill="#FFF6DA" stroke="#B07D00" stroke-width="0.9"/>
+<text x="84" y="209" font-size="6.2" text-anchor="middle" fill="#B07D00">machine tokens</text>
+<rect x="48.0" y="216" width="5.2" height="11.4" fill="#B07D00" stroke="#B07D00" stroke-width="0.4"/><rect x="54.0" y="216" width="5.2" height="11.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.4"/><rect x="60.0" y="216" width="5.2" height="11.4" fill="#B07D00" stroke="#B07D00" stroke-width="0.4"/><rect x="66.0" y="216" width="5.2" height="11.4" fill="#B07D00" stroke="#B07D00" stroke-width="0.4"/><rect x="72.0" y="216" width="5.2" height="11.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.4"/><rect x="78.0" y="216" width="5.2" height="11.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.4"/><rect x="84.0" y="216" width="5.2" height="11.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.4"/><rect x="90.0" y="216" width="5.2" height="11.4" fill="#B07D00" stroke="#B07D00" stroke-width="0.4"/><rect x="96.0" y="216" width="5.2" height="11.4" fill="#B07D00" stroke="#B07D00" stroke-width="0.4"/><rect x="102.0" y="216" width="5.2" height="11.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.4"/><rect x="108.0" y="216" width="5.2" height="11.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.4"/><rect x="114.0" y="216" width="5.2" height="11.4" fill="#B07D00" stroke="#B07D00" stroke-width="0.4"/>
+<rect x="20" y="294" width="140" height="40" rx="4" fill="#FFFFFF" stroke="#9C9C9C" stroke-width="0.8"/>
+<rect x="17" y="291" width="140" height="40" rx="4" fill="#FFFFFF" stroke="#9C9C9C" stroke-width="0.8"/>
+<rect x="14" y="288" width="140" height="40" rx="4" fill="#E7F4E7" stroke="#2E7D32" stroke-width="0.9"/>
+<text x="84" y="301" font-size="6.2" text-anchor="middle" fill="#2E7D32">AGV tokens</text>
+<rect x="48.0" y="308" width="5.2" height="11.4" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.4"/><rect x="54.0" y="308" width="5.2" height="11.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.4"/><rect x="60.0" y="308" width="5.2" height="11.4" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.4"/><rect x="66.0" y="308" width="5.2" height="11.4" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.4"/><rect x="72.0" y="308" width="5.2" height="11.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.4"/><rect x="78.0" y="308" width="5.2" height="11.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.4"/><rect x="84.0" y="308" width="5.2" height="11.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.4"/><rect x="90.0" y="308" width="5.2" height="11.4" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.4"/><rect x="96.0" y="308" width="5.2" height="11.4" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.4"/><rect x="102.0" y="308" width="5.2" height="11.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.4"/><rect x="108.0" y="308" width="5.2" height="11.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.4"/><rect x="114.0" y="308" width="5.2" height="11.4" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.4"/>
+<text x="84" y="348" font-size="5.6" text-anchor="middle" fill="#777777">one token per candidate</text>
+<text x="84" y="360" font-size="5.6" text-anchor="middle" fill="#777777">the set size varies with the step</text>
+<text x="262" y="101" font-size="6.4" font-weight="700" fill="#0F4D92">operation agent</text>
+<rect x="220" y="104" width="92" height="52" rx="4" fill="#E8F0FB" stroke="#0F4D92" stroke-width="1"/>
+<rect x="258.6" y="123.4" width="28" height="18" rx="2" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.7" opacity="0.45"/><rect x="256.0" y="126.0" width="28" height="18" rx="2" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.7" opacity="1.00"/>
+<line x1="261.3" y1="131.4" x2="270.0" y2="124.6" stroke="#0F4D92" stroke-width="0.6"/><line x1="270.0" y1="131.4" x2="270.0" y2="124.6" stroke="#0F4D92" stroke-width="0.6"/><line x1="278.7" y1="131.4" x2="270.0" y2="124.6" stroke="#0F4D92" stroke-width="0.6"/><circle cx="261.3" cy="135.0" r="3.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="270.0" cy="135.0" r="3.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="278.7" cy="135.0" r="3.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="270.0" cy="121.0" r="3.4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/>
+<text x="270" y="149" font-size="5.4" text-anchor="middle" fill="#0F4D92">2 blocks</text>
+<rect x="324" y="104" width="76" height="52" rx="4" fill="#FFFFFF" stroke="#0F4D92" stroke-width="1.1"/>
+<line x1="347.0" y1="114.0" x2="362.0" y2="117.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="114.0" x2="362.0" y2="127.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="122.0" x2="362.0" y2="117.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="122.0" x2="362.0" y2="127.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="130.0" x2="362.0" y2="117.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="130.0" x2="362.0" y2="127.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="362.0" y1="117.0" x2="377.0" y2="122.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><line x1="362.0" y1="127.0" x2="377.0" y2="122.0" stroke="#0F4D92" stroke-width="0.5" opacity="0.75"/><circle cx="347.0" cy="114.0" r="2.9" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="347.0" cy="122.0" r="2.9" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="347.0" cy="130.0" r="2.9" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="362.0" cy="117.0" r="2.9" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="362.0" cy="127.0" r="2.9" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/><circle cx="377.0" cy="122.0" r="2.9" fill="#FFFFFF" stroke="#0F4D92" stroke-width="0.9"/>
+<text x="362" y="145" font-size="5.8" text-anchor="middle" fill="#0F4D92">actor</text>
+<text x="362" y="153" font-size="5.4" text-anchor="middle" fill="#0F4D92">scores candidates</text>
+<rect x="412" y="104" width="88" height="52" rx="4" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="456" y="116" font-size="5.6" text-anchor="middle" fill="#9A4D8E">masked softmax</text>
+<rect x="422.9" y="134.2" width="8.6" height="10.8" fill="#D9D9D9" stroke="#0F4D92" stroke-width="0.35"/><rect x="437.3" y="128.2" width="8.6" height="16.8" fill="#D9D9D9" stroke="#0F4D92" stroke-width="0.35"/><rect x="451.7" y="136.6" width="8.6" height="8.4" fill="#D9D9D9" stroke="#0F4D92" stroke-width="0.35"/><rect x="466.1" y="121.0" width="8.6" height="24.0" fill="#0F4D92" stroke="#0F4D92" stroke-width="0.35"/><rect x="480.5" y="131.8" width="8.6" height="13.2" fill="#D9D9D9" stroke="#0F4D92" stroke-width="0.35"/>
+<text x="456" y="153" font-size="5.4" text-anchor="middle" fill="#9A4D8E">operation action</text>
+<path d="M154 130 H216" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M314 124 H322" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M402 124 H410" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M318 138 H322" stroke="#B64342" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<path d="M406 138 H402" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<text x="262" y="193" font-size="6.4" font-weight="700" fill="#B07D00">machine agent</text>
+<rect x="220" y="196" width="92" height="52" rx="4" fill="#FFF6DA" stroke="#B07D00" stroke-width="1"/>
+<rect x="226.0" y="208.0" width="34" height="24" rx="2" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.7" opacity="1.00"/>
+<line x1="232.3" y1="216.4" x2="243.0" y2="209.6" stroke="#B07D00" stroke-width="0.6"/><line x1="243.0" y1="216.4" x2="243.0" y2="209.6" stroke="#B07D00" stroke-width="0.6"/><line x1="253.7" y1="216.4" x2="243.0" y2="209.6" stroke="#B07D00" stroke-width="0.6"/><circle cx="232.3" cy="220.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="243.0" cy="220.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="253.7" cy="220.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="243.0" cy="206.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/>
+<path d="M262 220 H266" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<rect x="275.2" y="202.8" width="34" height="24" rx="2" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.7" opacity="0.45"/><rect x="272.6" y="205.4" width="34" height="24" rx="2" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.7" opacity="0.45"/><rect x="270.0" y="208.0" width="34" height="24" rx="2" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.7" opacity="1.00"/>
+<line x1="276.3" y1="216.4" x2="287.0" y2="209.6" stroke="#B07D00" stroke-width="0.6"/><line x1="287.0" y1="216.4" x2="287.0" y2="209.6" stroke="#B07D00" stroke-width="0.6"/><line x1="297.7" y1="216.4" x2="287.0" y2="209.6" stroke="#B07D00" stroke-width="0.6"/><circle cx="276.3" cy="220.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="287.0" cy="220.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="297.7" cy="220.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="287.0" cy="206.0" r="3.4" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/>
+<text x="243" y="243" font-size="5.2" text-anchor="middle" fill="#B07D00">within a machine</text>
+<text x="287" y="243" font-size="5.2" text-anchor="middle" fill="#B07D00">across machines</text>
+<rect x="324" y="196" width="76" height="52" rx="4" fill="#FFFFFF" stroke="#B07D00" stroke-width="1.1"/>
+<line x1="347.0" y1="206.0" x2="362.0" y2="209.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="206.0" x2="362.0" y2="219.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="214.0" x2="362.0" y2="209.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="214.0" x2="362.0" y2="219.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="222.0" x2="362.0" y2="209.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="222.0" x2="362.0" y2="219.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="362.0" y1="209.0" x2="377.0" y2="214.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><line x1="362.0" y1="219.0" x2="377.0" y2="214.0" stroke="#B07D00" stroke-width="0.5" opacity="0.75"/><circle cx="347.0" cy="206.0" r="2.9" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="347.0" cy="214.0" r="2.9" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="347.0" cy="222.0" r="2.9" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="362.0" cy="209.0" r="2.9" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="362.0" cy="219.0" r="2.9" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/><circle cx="377.0" cy="214.0" r="2.9" fill="#FFFFFF" stroke="#B07D00" stroke-width="0.9"/>
+<text x="362" y="237" font-size="5.8" text-anchor="middle" fill="#B07D00">actor</text>
+<text x="362" y="245" font-size="5.4" text-anchor="middle" fill="#B07D00">scores candidates</text>
+<rect x="412" y="196" width="88" height="52" rx="4" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="456" y="208" font-size="5.6" text-anchor="middle" fill="#9A4D8E">masked softmax</text>
+<rect x="422.9" y="226.2" width="8.6" height="10.8" fill="#D9D9D9" stroke="#B07D00" stroke-width="0.35"/><rect x="437.3" y="220.2" width="8.6" height="16.8" fill="#D9D9D9" stroke="#B07D00" stroke-width="0.35"/><rect x="451.7" y="228.6" width="8.6" height="8.4" fill="#D9D9D9" stroke="#B07D00" stroke-width="0.35"/><rect x="466.1" y="213.0" width="8.6" height="24.0" fill="#B07D00" stroke="#B07D00" stroke-width="0.35"/><rect x="480.5" y="223.8" width="8.6" height="13.2" fill="#D9D9D9" stroke="#B07D00" stroke-width="0.35"/>
+<text x="456" y="245" font-size="5.4" text-anchor="middle" fill="#9A4D8E">machine action</text>
+<path d="M154 222 H216" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M314 216 H322" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M402 216 H410" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M318 230 H322" stroke="#B64342" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<path d="M406 230 H402" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<text x="262" y="285" font-size="6.4" font-weight="700" fill="#2E7D32">AGV agent</text>
+<rect x="220" y="288" width="92" height="52" rx="4" fill="#E7F4E7" stroke="#2E7D32" stroke-width="1"/>
+<rect x="256.0" y="310.0" width="28" height="18" rx="2" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.7" opacity="1.00"/>
+<line x1="261.3" y1="315.4" x2="270.0" y2="308.6" stroke="#2E7D32" stroke-width="0.6"/><line x1="270.0" y1="315.4" x2="270.0" y2="308.6" stroke="#2E7D32" stroke-width="0.6"/><line x1="278.7" y1="315.4" x2="270.0" y2="308.6" stroke="#2E7D32" stroke-width="0.6"/><circle cx="261.3" cy="319.0" r="3.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="270.0" cy="319.0" r="3.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="278.7" cy="319.0" r="3.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="270.0" cy="305.0" r="3.4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/>
+<text x="270" y="333" font-size="5.4" text-anchor="middle" fill="#2E7D32">1 block</text>
+<rect x="324" y="288" width="76" height="52" rx="4" fill="#FFFFFF" stroke="#2E7D32" stroke-width="1.1"/>
+<line x1="347.0" y1="298.0" x2="362.0" y2="301.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="298.0" x2="362.0" y2="311.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="306.0" x2="362.0" y2="301.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="306.0" x2="362.0" y2="311.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="314.0" x2="362.0" y2="301.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="347.0" y1="314.0" x2="362.0" y2="311.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="362.0" y1="301.0" x2="377.0" y2="306.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><line x1="362.0" y1="311.0" x2="377.0" y2="306.0" stroke="#2E7D32" stroke-width="0.5" opacity="0.75"/><circle cx="347.0" cy="298.0" r="2.9" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="347.0" cy="306.0" r="2.9" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="347.0" cy="314.0" r="2.9" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="362.0" cy="301.0" r="2.9" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="362.0" cy="311.0" r="2.9" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/><circle cx="377.0" cy="306.0" r="2.9" fill="#FFFFFF" stroke="#2E7D32" stroke-width="0.9"/>
+<text x="362" y="329" font-size="5.8" text-anchor="middle" fill="#2E7D32">actor</text>
+<text x="362" y="337" font-size="5.4" text-anchor="middle" fill="#2E7D32">scores candidates</text>
+<rect x="412" y="288" width="88" height="52" rx="4" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="0.9"/>
+<text x="456" y="300" font-size="5.6" text-anchor="middle" fill="#9A4D8E">masked softmax</text>
+<rect x="422.9" y="318.2" width="8.6" height="10.8" fill="#D9D9D9" stroke="#2E7D32" stroke-width="0.35"/><rect x="437.3" y="312.2" width="8.6" height="16.8" fill="#D9D9D9" stroke="#2E7D32" stroke-width="0.35"/><rect x="451.7" y="320.6" width="8.6" height="8.4" fill="#D9D9D9" stroke="#2E7D32" stroke-width="0.35"/><rect x="466.1" y="305.0" width="8.6" height="24.0" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.35"/><rect x="480.5" y="315.8" width="8.6" height="13.2" fill="#D9D9D9" stroke="#2E7D32" stroke-width="0.35"/>
+<text x="456" y="337" font-size="5.4" text-anchor="middle" fill="#9A4D8E">AGV action</text>
+<path d="M154 314 H216" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M314 308 H322" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M402 308 H410" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M318 322 H322" stroke="#B64342" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<path d="M406 322 H402" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<path d="M318 68 V332" fill="none" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3"/>
+<path d="M406 332 V92" fill="none" stroke="#2E7D32" stroke-width="0.9" stroke-dasharray="4 3"/>
+<rect x="300" y="344" width="164" height="28" rx="5" fill="#E7F4E7" stroke="#2E7D32" stroke-width="1"/>
+<text x="382" y="362" font-size="6.6" font-weight="700" text-anchor="middle" fill="#2E7D32">group-relative advantage</text>
+<rect x="530" y="100" width="172" height="30" rx="5" fill="#FFE6CC" stroke="#C55A11" stroke-width="1"/>
+<text x="616" y="119" font-size="7" font-weight="700" text-anchor="middle" fill="#8F400C">joint action</text>
+<rect x="530" y="146" width="172" height="30" rx="5" fill="#E8F0FB" stroke="#0F4D92" stroke-width="1"/>
+<text x="616" y="165" font-size="7" font-weight="700" text-anchor="middle" fill="#0F4D92">shop update</text>
+<path d="M616 130 V144" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<rect x="530" y="192" width="172" height="66" rx="5" fill="#FDEEE2" stroke="#C55A11" stroke-width="1"/>
+<text x="616" y="206" font-size="6.6" font-weight="700" text-anchor="middle" fill="#A34A0E">per-agent costs</text>
+<text x="538" y="220" font-size="5.8" fill="#A34A0E">operation: makespan + idle</text>
+<text x="538" y="231" font-size="5.8" fill="#A34A0E">machine: PEC + transport</text>
+<text x="538" y="242" font-size="5.8" fill="#A34A0E">AGV: transport + delay</text>
+<path d="M616 176 V190" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<rect x="530" y="274" width="172" height="28" rx="5" fill="#E7F4E7" stroke="#2E7D32" stroke-width="1"/>
+<text x="616" y="292" font-size="6.8" font-weight="700" text-anchor="middle" fill="#2E7D32">team return (scalar)</text>
+<path d="M616 258 V272" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M530 288 H472 V358 H466" fill="none" stroke="#2E7D32" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mG)"/>
+<path d="M530 225 H510 V58 H506" fill="none" stroke="#C55A11" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#mO)"/>
+<text x="504" y="74" font-size="5.8" text-anchor="end" fill="#C55A11">segment reward</text>
+<rect x="8" y="512" width="704" height="20" rx="4" fill="#FAFAFA" stroke="#DDDDDD" stroke-width="0.8"/>
+<path d="M20 522 H42" stroke="#4C78A8" stroke-width="1.1"/>
+<text x="48" y="525" font-size="6.2" fill="#333333">state and action flow</text>
+<path d="M141.60000000000002 522 H163.60000000000002" stroke="#B64342" stroke-width="1.1" stroke-dasharray="4 3"/>
+<text x="169.60000000000002" y="525" font-size="6.2" fill="#333333">rule prior, selector to each actor</text>
+<path d="M310.0 522 H332.0" stroke="#2E7D32" stroke-width="1.1" stroke-dasharray="4 3"/>
+<text x="338.0" y="525" font-size="6.2" fill="#333333">team return to the shared advantage</text>
+<path d="M482.0 522 H504.0" stroke="#C55A11" stroke-width="1.1" stroke-dasharray="4 3"/>
+<text x="510.0" y="525" font-size="6.2" fill="#333333">per-agent costs to the selector</text>
+<text x="8" y="424" font-size="9" font-weight="700" fill="#1A1A1A">(b) Training pipeline</text>
+<rect x="8" y="438" width="162" height="26" rx="5" fill="#E8F0FB" stroke="#0F4D92" stroke-width="1"/>
+<text x="89" y="455" font-size="7" font-weight="700" text-anchor="middle" fill="#0F4D92">group sampling</text>
+<rect x="186" y="438" width="162" height="26" rx="5" fill="#FFF6DA" stroke="#B07D00" stroke-width="1"/>
+<text x="267" y="455" font-size="7" font-weight="700" text-anchor="middle" fill="#B07D00">rollout</text>
+<rect x="364" y="438" width="162" height="26" rx="5" fill="#E7F4E7" stroke="#2E7D32" stroke-width="1"/>
+<text x="445" y="455" font-size="7" font-weight="700" text-anchor="middle" fill="#2E7D32">segment close</text>
+<rect x="542" y="438" width="170" height="26" rx="5" fill="#F3E8F2" stroke="#9A4D8E" stroke-width="1"/>
+<text x="627" y="455" font-size="7" font-weight="700" text-anchor="middle" fill="#9A4D8E">update</text>
+<path d="M170 451 H184" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M348 451 H362" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M526 451 H540" stroke="#4C78A8" stroke-width="1" marker-end="url(#mB)"/>
+<path d="M627 464 V488 H89 V466" fill="none" stroke="#B64342" stroke-width="0.9" stroke-dasharray="4 3" marker-end="url(#mR)"/>
+<text x="358" y="500" font-size="6" text-anchor="middle" fill="#B64342">next group</text>
+</svg>

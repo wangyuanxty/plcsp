@@ -2,16 +2,18 @@ Flexible job shops with several workshops and one vehicle fleet per workshop
 must decide, for every operation, when it starts, on which machine it runs,
 and which vehicle moves it. The three decisions are coupled, and an
 energy-aware objective charges idle machines even when they do not change the
-makespan. We present a controller with three policy heads. The operation and
-machine heads use a dual Set Transformer; the machine encoder groups its
-features into three views and applies attention within a machine before
-attention across machines. The low-level heads are trained with a shared
-group-relative advantage and no value critic. A top-level policy selects a
-rule prior for each head every few steps. The controller builds a schedule in
-a single pass and is fast enough for interactive use. It returns a lower
-objective than rule-based dispatch and than adapted DRL baselines. Against
-the search methods the result depends on the instance size: they are better
-on the smaller instances, and on the largest the controller is ahead of both.
-The contribution is the operating point: a good schedule in one pass, at any
-size. The encoder and the multi-actor update also improve over their
-baselines.
+makespan. We build a controller with three actor networks. A dual Set
+Transformer encodes the operation and machine candidates; its machine encoder
+groups the features into three views, so the model compares the views of one
+machine before it compares machines. We train the low-level agents with a
+shared group-relative advantage and no value critic, and a top-level policy
+picks a rule prior for each agent every few steps. One pass produces a
+schedule, fast enough to use interactively. It returns a
+lower objective than rule-based dispatch and than adapted DRL baselines.
+Against the search methods the answer depends on the size: they win at
+$6\times6$, the mixed-integer model wins at $10\times6$ while the paired test
+does not separate us from RGA, and at $10\times10$ we are ahead of RGA but 32\%
+above the joint mixed-integer model.
+We see that operating point as the contribution, a good
+schedule in one pass at any size. The encoder and the multi-actor update also
+help in our runs.

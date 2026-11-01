@@ -126,7 +126,7 @@ Cooperative multi-agent methods use a centralized critic during training.
 Yu et al.~\cite{yu2022mappo} show that PPO with a centralized critic is a
 strong baseline in cooperative multi-agent games. QMIX~\cite{rashid2018qmix}
 factorizes a joint value function under a monotonicity constraint. When
-several policy heads act jointly, the team reward must be split among them.
+several actor networks act jointly, the team reward must be split among them.
 Counterfactual multi-agent policy gradients (COMA)~\cite{foerster2018coma}
 use a joint-action Q-function and subtract the value of the other heads'
 actions, averaged over the head's own policy. The Q-function must generalize
@@ -163,10 +163,10 @@ baseline that is tuned on the same objective.
 The works above cover the individual elements: flexible job shop scheduling,
 AGV transport, attention encoders, and group-relative or counterfactual
 policy optimization. We study their combination in a shop with several
-workshops and one vehicle fleet per workshop. Three heads make the operation,
-machine, and AGV decisions at the same step; the heads share a group-relative
+workshops and one vehicle fleet per workshop. Three agents make the operation, machine, and AGV decisions at the same
+step; the agents share a group-relative
 advantage and use no critic; a top-level policy selects the rule prior every
 few steps. The experiments compare the full controller with rule-based,
 metaheuristic, mixed-integer, and DRL baselines, and analyse the encoder, the
-algorithm, and the AGV head as components. The rule selector is evaluated
+algorithm, and the AGV agent as components. The rule selector is evaluated
 against the same controller without it.

@@ -1,110 +1,132 @@
-"""Distribution figure: per-instance objective (violin + box) and per-seed
-paired difference, following the AEI reference style."""
+"""Distribution figure: per-instance objective and paired difference.
+
+Panel (a) shows the per-instance objective of the controller, of the controller
+without the rule selector, and of the MIP baseline on the 6x6 test set.
+Panel (b) shows the per-instance paired difference, as a percentage of the
+controller value, for each training seed; positive means the selector helps.
+"""
 
 from pathlib import Path
-import csv, glob
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from pubstyle import (PALETTE, FigureStyle, apply_publication_style,
+                      finalize_figure)
+
 OUT = Path(__file__).resolve().parent
-TMP = Path("C:/Users/evari/AppData/Local/Temp/figrefs")
 ROOT = Path(__file__).resolve().parents[2]
-
-from pubstyle import (PALETTE, FigureStyle,
-                       apply_publication_style, finalize_figure)
-
+import csv
+import glob
 
 
-def load_npz(pattern):
-    return [np.load(p)["obj"] for p in sorted(TMP.glob(pattern))]
+def load_tags(tags):
+    return [np.load(ROOT / "plcsp_v5/trained_model" / t
+                    / "eval_st_seed3_seed3.npz")["obj"] for t in tags]
 
 
 def load_mip():
     vals = []
-    for p in sorted(glob.glob(str(ROOT / "plcsp_v5/results/mip_agv_100/shard*.csv"))):
+    for p in sorted(glob.glob(str(ROOT / "plcsp_v5/results"
+                                / "mip_agv_m2_trailing_6x6/shard*.csv"))):
         for r in csv.DictReader(open(p)):
             if r.get("best_obj"):
                 vals.append(float(r["best_obj"]))
     return np.array(vals)
 
 
-def violin(ax, data, positions, colors, labels):
-    parts = ax.violinplot(data, positions=positions, widths=0.72,
-                          showmeans=False, showmedians=False,
-                          showextrema=False)
-    for pc, c in zip(parts["bodies"], colors):
-        pc.set_facecolor(c)
-        pc.set_alpha(0.55)
-        pc.set_edgecolor(c)
-        pc.set_linewidth(0.8)
-    bp = ax.boxplot(data, positions=positions, widths=0.16,
-                    patch_artist=True, showfliers=False, whis=1.5)
-    for patch, c in zip(bp["boxes"], colors):
-        patch.set_facecolor("white")
-        patch.set_edgecolor(c)
-        patch.set_linewidth(0.9)
-    for med in bp["medians"]:
-        med.set_color("black")
-        med.set_linewidth(0.9)
-    for i, (d, c) in enumerate(zip(data, colors)):
-        ax.scatter(np.full(len(d), positions[i]) + np.random.uniform(-0.13, 0.13, len(d)),
-                   d, s=1.2, color=c, alpha=0.5, linewidths=0)
-        ax.scatter([positions[i]], [np.mean(d)], marker="D", s=14,
-                   color="white", edgecolor=c, zorder=5, linewidth=0.8)
-    ax.set_xticks(positions)
-    ax.set_xticklabels(labels)
+def _strip(ax, data, pos, colour, horizontal=False):
+    rng = np.random.default_rng(7)
+    for i, d in enumerate(data):
+        if horizontal:
+            jitter = rng.uniform(-0.10, 0.10, d.size)
+            ax.scatter(d, np.full(d.size, pos + 0.0) + jitter, s=0.5,
+                       color=colour, alpha=0.22, linewidths=0, zorder=2)
+        else:
+            jitter = rng.uniform(-0.10, 0.10, d.size)
+            ax.scatter(pos + jitter, d, s=0.5, color=colour, alpha=0.22,
+                       linewidths=0, zorder=2)
 
 
-def main():
-    rs = load_npz("rs_s*.npz")
-    no = load_npz("nors_s*.npz")
+def main() -> None:
+    rs = load_tags([f"m3_agv6_ours_s{s}" for s in (1, 2, 3)])
+    no = load_tags([f"m3_noRS_s{s}" for s in (1, 2, 3)])
     mip = load_mip()
-    rs_all = np.concatenate(rs)
-    no_all = np.concatenate(no)
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.6),
-                             gridspec_kw={"width_ratios": [1, 1]})
-
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.55),
+                             gridspec_kw={"width_ratios": [1.0, 1.25]})
     ax = axes[0]
-    violin(ax, [rs_all, no_all, mip], [1, 2, 3],
-           [PALETTE["blue_main"], PALETTE["red_strong"], PALETTE["teal"]],
-           ["RS\n(3 seeds)", "no RS\n(3 seeds)", "MIP\n(100 inst.)"])
-    ax.set_ylabel("Objective (6x6)")
-    ax.set_ylim(350, 850)
-    for pos, d in zip([1, 2, 3], [rs_all, no_all, mip]):
-        ax.text(pos, np.mean(d) + 18, f"{np.mean(d):.1f}",
-                ha="center", fontsize=6)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.set_title("(a) Per-instance objective", loc="left", fontsize=7)
+
+    groups = [np.concatenate(rs), np.concatenate(no), mip]
+    colours = [PALETTE["blue_main"], PALETTE["red_strong"], PALETTE["violet"]]
+    labels = ["RS\n(3 seeds)", "no RS\n(3 seeds)", "MIP\n(100 inst.)"]
+    pos = [1, 2, 3]
+
+    parts = ax.violinplot(groups, positions=pos, widths=0.62,
+                          showmeans=False, showmedians=False,
+                          showextrema=False, points=60)
+    for body, c in zip(parts["bodies"], colours):
+        body.set_facecolor(c)
+        body.set_edgecolor(c)
+        body.set_alpha(0.18)
+        body.set_linewidth(0.6)
+
+    for p, d, c in zip(pos, groups, colours):
+        _strip(ax, [d], p, c)
+        q1, med, q3 = np.percentile(d, [25, 50, 75])
+        ax.plot([p, p], [q1, q3], color=c, linewidth=3.2,
+                solid_capstyle="butt", zorder=4)
+        ax.plot([p], [med], marker="o", markersize=3.4, color="white",
+                markeredgecolor=c, markeredgewidth=0.9, zorder=5)
+        ax.plot([p], [d.mean()], marker="D", markersize=4.2, color="white",
+                markeredgecolor=c, markeredgewidth=1.0, zorder=6)
+
+    ax.set_xticks(pos)
+    ax.set_xticklabels(labels)
+    ax.set_xlim(0.45, 3.55)
+    lo = min(g.min() for g in groups)
+    hi = max(g.max() for g in groups)
+    pad = 0.06 * (hi - lo)
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_ylabel("Objective (6$\\times$6)")
+    ax.set_title("(a) per-instance objective", fontsize=7.5, pad=4)
 
     ax = axes[1]
-    diffs = [r - n for r, n in zip(rs, no)]
-    bp = ax.boxplot(diffs, positions=[1, 2, 3], widths=0.45,
-                    patch_artist=True, showfliers=False)
-    for patch in bp["boxes"]:
-        patch.set_facecolor("white")
-        patch.set_edgecolor(PALETTE["blue_main"])
-    for med in bp["medians"]:
-        med.set_color("black")
-    for i, d in enumerate(diffs):
-        ax.scatter(np.full(len(d), i + 1) + np.random.uniform(-0.12, 0.12, len(d)),
-                   d, s=1.4, color=PALETTE["blue_main"], alpha=0.5,
-                   linewidths=0)
-        ax.text(i + 1, np.max(d) + 3, f"{np.mean(d):+.1f}", ha="center",
-                fontsize=6)
-    ax.axhline(0, color=PALETTE["neutral"], lw=0.8, ls="--")
-    ax.set_xticks([1, 2, 3])
-    ax.set_xticklabels(["s1", "s2", "s3"])
-    ax.set_ylabel("RS - no RS")
-    ax.set_title("(b) Paired difference", loc="left", fontsize=7)
-    ax.spines[["top", "right"]].set_visible(False)
+    diff = [(no[s] - rs[s]) / rs[s] * 100.0 for s in range(3)]
+    for i, d in enumerate(diff):
+        y = 3 - i
+        c = PALETTE["blue_secondary"]
+        _strip(ax, [d], y, c, horizontal=True)
+        q1, med, q3 = np.percentile(d, [25, 50, 75])
+        ax.plot([q1, q3], [y, y], color=c, linewidth=3.2,
+                solid_capstyle="butt", zorder=4)
+        ax.plot([med], [y], marker="o", markersize=3.4, color="white",
+                markeredgecolor=c, markeredgewidth=0.9, zorder=5)
+        ax.plot([d.mean()], [y], marker="D", markersize=4.2, color="white",
+                markeredgecolor=c, markeredgewidth=1.0, zorder=6)
 
+    ax.axvline(0, color="black", linewidth=0.7, zorder=1)
+    ax.set_yticks([3, 2, 1])
+    ax.set_yticklabels(["seed 1", "seed 2", "seed 3"])
+    ax.set_ylim(0.45, 3.55)
+    pooled = np.concatenate(diff)
+    lo = min(pooled.min(), -5) - 3
+    hi = max(pooled.max(), 5) + 3
+    ax.set_xlim(lo, hi)
+    ax.set_xlabel("no RS $-$ RS (\\% of RS); positive = selector helps")
+    ax.set_title("(b) paired difference on each seed", fontsize=7.5, pad=4)
+    ax.annotate(f"mean {pooled.mean():+.1f}%", xy=(pooled.mean(), 3.34),
+                ha="center", va="bottom", fontsize=6,
+                color=PALETTE["blue_main"])
+
+    fig.tight_layout(pad=0.3)
     finalize_figure(fig, OUT / "fig_distribution", formats=["pdf"])
-    print("wrote fig_distribution.pdf")
-    print("means", rs_all.mean(), no_all.mean(), mip.mean())
+    print("means", np.concatenate(rs).mean(), np.concatenate(no).mean(),
+          mip.mean())
+    print("paired mean %+.2f  range %+.1f .. %+.1f" %
+          (pooled.mean(), pooled.min(), pooled.max()))
 
 
 if __name__ == "__main__":

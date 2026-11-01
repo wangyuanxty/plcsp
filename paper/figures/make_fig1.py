@@ -222,40 +222,52 @@ def panel_d(ax, title):
 
 
 def panel_concept(ax):
-    boxes = [("Job head", "which operation", C["blue"]),
-             ("Machine head", "which machine", C["blue"]),
-             ("AGV head", "which vehicle", C["orange"])]
+    # top level: one rule selector
+    rbox(ax, 0.30, 0.80, 0.40, 0.15, ec=C["purple"], lw=1.0)
+    ax.text(0.50, 0.895, "Rule selector agent", ha="center", va="center",
+            fontsize=6.0, fontweight="bold")
+    ax.text(0.50, 0.835, r"one rule per agent, every $\Delta T$ steps",
+            ha="center", va="center", fontsize=4.6)
+
+    # bottom level: three coupled shop decisions
+    boxes = [("Job agent", "which operation", C["blue"]),
+             ("Machine agent", "which machine", C["blue"]),
+             ("AGV agent", "which vehicle", C["orange"])]
     xs = [0.06, 0.38, 0.70]
-    w, y, h = 0.24, 0.42, 0.30
+    w, y, h = 0.24, 0.38, 0.28
     for x, (t, b, ec) in zip(xs, boxes):
         rbox(ax, x, y, w, h, ec=ec, lw=1.0)
         ax.text(x + w / 2, y + h - 0.06, t, ha="center", va="top",
                 fontsize=6.0, fontweight="bold")
         ax.text(x + w / 2, y + h / 2 - 0.04, b, ha="center", va="center",
                 fontsize=5.4)
+        ax.add_patch(FancyArrowPatch((0.50, 0.80), (x + w / 2, y + h),
+                                     arrowstyle="-|>", mutation_scale=7,
+                                     lw=0.9, color=C["purple"]))
     for i in range(2):
         ax.add_patch(FancyArrowPatch((xs[i] + w, y + h / 2),
                                      (xs[i + 1], y + h / 2),
                                      arrowstyle="-|>", mutation_scale=7,
                                      lw=1.0, color=C["blue"]))
-    ax.plot([0.82, 0.82, 0.18, 0.18], [y, 0.30, 0.30, y],
+    ax.plot([0.82, 0.82, 0.18, 0.18], [y, 0.28, 0.28, y],
             color=C["gray"], ls="--", lw=0.9)
-    ax.add_patch(FancyArrowPatch((0.18, 0.30), (0.18, y),
+    ax.add_patch(FancyArrowPatch((0.18, 0.28), (0.18, y),
                                  arrowstyle="-|>", mutation_scale=6,
                                  lw=0.9, color=C["gray"]))
-    ax.text(0.50, 0.345, "shop state", ha="center", fontsize=5.0,
+    ax.text(0.50, 0.315, "shop state", ha="center", fontsize=5.0,
             color=C["gray"])
-    ax.text(0.06, 0.16, "objective:", fontsize=5.2)
+    ax.text(0.06, 0.13, "objective:", fontsize=5.2)
     for x, cw, lab, col in ((0.16, 0.10, "mk", C["blue"]),
                             (0.29, 0.10, "PEC", C["orange"]),
                             (0.42, 0.12, "idleT", C["verm"])):
-        rbox(ax, x, 0.11, cw, 0.10, ec=col, lw=0.8)
-        ax.text(x + cw / 2, 0.16, lab, ha="center", va="center", fontsize=4.8)
-    rbox(ax, 0.57, 0.11, 0.30, 0.10, ec=C["sky"], lw=0.8)
-    ax.text(0.72, 0.16, r"$T_{\mathrm{loaded}} + 0.5\,T_{\mathrm{empty}}$",
-            ha="center", va="center", fontsize=4.8)
-    ax.set_title("(a) Conceptual architecture: three coupled decisions",
-                 loc="left", fontsize=6.2)
+        rbox(ax, x, 0.08, cw, 0.10, ec=col, lw=0.8)
+        ax.text(x + cw / 2, 0.13, lab, ha="center", va="center", fontsize=4.8)
+    rbox(ax, 0.57, 0.08, 0.12, 0.10, ec=C["sky"], lw=0.8)
+    ax.text(0.63, 0.13, "TEC", ha="center", va="center", fontsize=4.8)
+    ax.text(0.72, 0.13, r"$T_{\mathrm{loaded}} + 0.5\,T_{\mathrm{empty}}$",
+            ha="left", va="center", fontsize=4.2)
+    ax.set_title("(a) Four decisions: one rule selector above three "
+                 "coupled shop decisions", loc="left", fontsize=6.2)
 
 
 def main():
@@ -263,8 +275,8 @@ def main():
     base = fig.add_axes([0, 0, 1, 1])
     base.axis("off")
     for rect, fn, title in (
-            ([0.00, 0.80, 1.00, 0.18], panel_concept, None),
-            ([0.00, 0.44, 1.00, 0.34], panel_a, None),
+            ([0.00, 0.75, 1.00, 0.23], panel_concept, None),
+            ([0.00, 0.40, 1.00, 0.33], panel_a, None),
             ([0.00, 0.03, 0.32, 0.36], panel_b,
              "(c) Cross-workshop transport"),
             ([0.34, 0.03, 0.32, 0.36], panel_c,

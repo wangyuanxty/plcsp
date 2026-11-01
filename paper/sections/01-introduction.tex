@@ -1,51 +1,52 @@
 \section{Introduction}
 \label{sec:intro}
 
-Consider a shop with two workshops and six machines. A job is processed on a
-machine in the first workshop, then on a machine in the second. The second
-machine is free, but the job is not: it waits for a vehicle. The first
-workshop has an idle vehicle, and the second workshop has a busy one. If the
-dispatcher sends the idle vehicle, the job arrives at the boundary and waits
-for the second fleet. If it waits for a vehicle of the second workshop, the
-first machine stays idle. The choice changes the makespan, the idle energy of
-both workshops, and the loaded travel time. A rule that always sends the
-nearest vehicle cannot see this trade-off; a rule that always waits cannot
-see the first machine. Figure~\ref{fig:motivated} shows the shop and the three
-transport cases.
+Consider a shop with two workshops and six machines, where a job is processed
+on a machine in the first workshop and then on a machine in the second. The
+second machine is free, but the job is not, because it waits for a vehicle.
+The first workshop has an idle vehicle, and the second workshop has a busy one.
+If the dispatcher sends the idle vehicle, the job arrives at the boundary and
+waits for the second fleet; if it waits for a vehicle of the second workshop
+instead, the first machine stays idle. The choice changes the makespan, the
+idle energy of both workshops, and the loaded travel time. A rule that always
+sends the nearest vehicle cannot see this trade-off, and a rule that always
+waits cannot see the first machine. Figure~\ref{fig:motivated} shows the shop
+and the two transport cases.
 
-This example is the setting of the paper. A flexible job shop assigns each
-operation to one machine from a set of eligible machines and sequences the
-operations on each machine. When the shop uses automated guided vehicles
-(AGVs), a third decision appears: which vehicle moves the job between two
-machines. The three decisions are coupled. A machine that finishes early may
-wait for a vehicle, and a vehicle that is busy delays the next operation. In
-an energy-aware objective the coupling is tighter, because idle machines
-contribute to the objective even when they do not change the makespan. The
-objective in this paper combines makespan, processing and idle energy, and
-loaded transport time.
+This example is the setting of the paper. In a flexible job shop each
+operation is assigned to one machine from a set of eligible machines, and the
+operations on each machine are then sequenced. When the shop uses automated
+guided vehicles (AGVs), a third decision appears, namely which vehicle moves
+the job between two machines. The three decisions are coupled, because a
+machine that finishes early may wait for a vehicle and a vehicle that is busy
+delays the next operation. In an energy-aware objective the coupling is
+tighter, since idle machines contribute to the objective even when they do
+not change the makespan. The objective in this paper combines makespan,
+processing and idle energy, and loaded transport time.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_environment.pdf}
-\caption{Conceptual architecture and illustrative examples of the shop
-environment and logistics processes. (a) Three coupled decisions and the
-four objective terms; the transport term counts loaded travel and half-weighted
-empty travel. (b) Two workshops, six machines, one load/unload station per
-workshop, and one AGV fleet per workshop; a job crosses the boundary.
+\caption{The shop environment and the logistics process. (a) Four decisions:
+one rule selector agent above the operation, machine and AGV agents, and the
+four objective terms; the transport term counts loaded travel and
+half-weighted empty travel. (b) Two workshops, six machines, one load/unload
+station and three AGVs per workshop; a job crosses the boundary.
 (c) Cross-workshop transport: empty travel to the pickup machine, a loaded leg
 to the source station, a transfer between the two stations, and a loaded leg
-from the target station to the destination. (d) A job entering at the station,
-and a later operation within one workshop. (e) After the last operation.
-Shapes and line styles encode the same information as colour.}
+from the target station to the destination. (d) Same-workshop transport: one
+AGV moves the job between two machines of one workshop, with no station
+transfer. In (c) and (d) the bar under the route shows how one trip spends its
+time, segmented in the order the AGV meets them.}
 \label{fig:motivated}
 \end{figure*}
 
-The problem is hard for three reasons. The assignment, the machine sequence,
-and the vehicle sequence interact: a shorter loaded trip can require a longer
-empty trip, and a machine that starts earlier can leave a larger gap on
-another machine. The number of joint actions at a step is the product of the
+The problem is hard for three reasons. Assignment, machine sequence,
+and vehicle sequence interact, because a shorter loaded trip can require a
+longer empty trip and a machine that starts earlier can leave a larger gap on
+another machine. At a step the joint action count is the product of the
 candidate sets, which grows with the number of jobs, machines, and vehicles.
-The objective has three terms with different scales, and the weights set a
+Three objective terms with different scales make the weights a
 trade-off that changes across planning scenarios.
 
 Dispatching rules resolve the three decisions in one pass. They are fast and
@@ -55,7 +56,7 @@ assignment space and often return better schedules, at the cost of thousands
 of schedule evaluations per instance. Constraint programming and
 mixed-integer models give a bound or a strong incumbent, but their run time
 grows quickly with the number of operations and vehicles. Deep reinforcement
-learning (DRL) offers a fourth option: a policy that constructs one schedule
+learning (DRL) offers a fourth option, a policy that constructs one schedule
 in a single pass and can be reused across instances. Recent work applies DRL
 to flexible job shops with AGVs~\cite{li2025tsmc,li2025plcsp,shi2025nested,
 wang2025hierarchical}. Most of these controllers make the operation and
@@ -63,71 +64,69 @@ machine decisions and leave the vehicle to a rule, or solve the two layers
 in sequence.
 
 Three difficulties remain for a DRL controller in this setting. First, the
-candidate sets change size at every step: the number of eligible machines
-depends on the operation, and the number of available vehicles depends on
-the workshop. An encoder must map a variable-size set to a fixed-size
+candidate sets change size at every step, because the number of eligible
+machines depends on the operation and the number of available vehicles depends
+on the workshop. An encoder must map a variable-size set to a fixed-size
 representation without imposing an order. Second, the three decisions share
-one return. A single scalar critic gives every head the same advantage, so a
-head whose action changed the objective receives the same signal as a head
+one return. A single scalar critic gives every agent the same advantage, so an
+agent whose action changed the objective receives the same signal as one
 whose action did not. Third, a top-level rule selector makes only four to
 seven decisions per episode. The sample is small, and a counterfactual
 baseline must generalize to actions that were not taken.
 
 This paper studies a controller that addresses the three difficulties with a
-shared architecture. Three policy heads make the operation, machine, and AGV
-decisions. The operation and machine heads use a dual Set Transformer. The
-machine encoder groups its features into three views, applies attention
-within a machine, and then applies attention across machines. The heads are
-trained with a shared group-relative advantage and no value critic. A
-top-level policy selects a rule prior for each head every eight low-level
-steps. Each head receives its own cost as the credit signal. We refer to the
-controller as H-ST-GRPO.
+shared architecture. Three actor networks make the operation, machine, and AGV
+decisions. The operation and machine agents use a dual Set Transformer, whose
+machine encoder groups its features into three views and applies attention
+within a machine before it applies attention across machines. We train the
+agents with a shared group-relative advantage and no value critic, and a
+top-level policy selects a rule prior for each agent every eight low-level
+steps, so each agent receives its own cost as the credit signal. We refer to
+the controller as H-ST-GRPO.
 
-The design follows from the difficulties. A Set Transformer is
+Each choice follows from one of these difficulties. A Set Transformer is
 permutation-invariant over its input set, so the same weights apply to any
-number of operations or machines. The machine-internal grouping keeps the
+number of operations or machines. Machine-internal grouping keeps the
 token count linear in the number of machines and lets the model compare the
-three feature views of one machine before it compares machines. The
-group-relative advantage removes the critic, which is the component with the
-fewest targets in this setting. The rule prior gives the low-level heads a
-coarse action space to explore, and the per-head costs give the top level a
+three feature views of one machine before it compares machines.
+Group-relative advantage removes the critic, which is the component with the
+fewest targets in this setting. A rule prior gives the low-level agents a
+coarse action space to explore, and the per-agent costs give the top level a
 signal that a shared return does not provide.
 
-The contributions are as follows.
+We make four contributions.
 
 \begin{enumerate}
 \item \emph{A multi-agent controller for joint production and logistics
 scheduling across workshops.} The operation, machine, and vehicle decisions
-are produced by three policy heads in one step, so the transport decision is
+are produced by three actor networks in one step, so the transport decision is
 coupled to the machine decision that creates it. For a cross-workshop job, a
-single AGV head selects the source vehicle and, after the transfer between
+single AGV agent selects the source vehicle and, after the transfer between
 the stations, the target vehicle.
 
 \item \emph{A dual Set Transformer encoder with machine-internal grouping.}
 The machine encoder projects three feature groups separately, compares them
-within a machine, and then compares machines. The encoder has no position
-embedding, so the same weights apply to any number of operations, machines,
+within a machine, and then compares machines. With no position
+embedding, the encoder applies the same weights to any number of operations, machines,
 and vehicles.
 
-\item \emph{A group-relative update for three heterogeneous heads.} The
+\item \emph{A group-relative update for three heterogeneous agents.} The
 estimator is GRPO's~\cite{shao2024grpo}; the contribution here is its use with
-three heads that share one team advantage. The heads are updated with the
-clipped ratio of their summed log-probabilities, and no value critic, no
+three agents that share one team advantage. Updates take the
+clipped ratio of the summed log-probabilities; no value critic, no
 reference model, and no KL penalty are used at the low level.
 
-\item \emph{A hierarchical rule selector with per-head cost signals.} A
-top-level policy selects a rule prior for each head every few steps. Each rule
+\item \emph{A hierarchical rule selector with per-agent cost signals.} A
+top-level policy selects a rule prior for each agent every few steps. Each rule
 head receives the change of its own local cost as the reward, so the selector
-can attribute a cost change to the head whose decision caused it.
+can attribute a cost change to the agent whose decision caused it.
 \end{enumerate}
 
-Section~\ref{sec:experiments} compares the controller with rule-based,
-metaheuristic, mixed-integer, and adapted DRL baselines, all measured with the
-same decoder and the same transport model.
-
-The controller is fast: one schedule takes about 0.56~s per instance.
-Section~\ref{sec:experiments} reports the objective and the run time of every
-method, the per-instance spread, and the scope of the transport model.
+We compare the controller with rule-based,
+metaheuristic, mixed-integer, and adapted DRL baselines on the same instances,
+against the same objective and under the same transport model. We report the
+objective and the run time of every method, the per-instance spread, and the
+scope of the transport model. One schedule takes about 0.95~s per instance.
 
 The rest of the paper is organized as follows. Section~\ref{sec:related}
 reviews related work. Section~\ref{sec:problem} defines the problem,
