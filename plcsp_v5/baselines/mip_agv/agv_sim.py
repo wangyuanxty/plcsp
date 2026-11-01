@@ -96,7 +96,8 @@ def simulate(inst: Instance, order: Sequence[int],
              machines: Sequence[int], n_agv: int = 6,
              cross_delay: float = 5.0, leg_ratio: float = 0.5,
              pick: Optional[Callable[[int, dict], Tuple[int, int]]] = None,
-             lu_station: int = 0) -> SimResult:
+             lu_station: int = 0,
+             fixed_starts: Optional[Sequence[float]] = None) -> SimResult:
     """Run one fixed (order, machines) schedule.
 
     ``pick(step_index, ctx)`` returns ``(src_agv, dst_agv)``; ``dst_agv``
@@ -260,6 +261,12 @@ def simulate(inst: Instance, order: Sequence[int],
 
         # Left-shift placement, matching _schedule_task in the environment.
         route = routes[m]
+        if fixed_starts is not None:
+            start = float(fixed_starts[tau])
+            route.append(tau)
+            starts[tau] = start
+            finishes[tau] = start + duration
+            continue
         if not route:
             start = start_job
             route.append(tau)

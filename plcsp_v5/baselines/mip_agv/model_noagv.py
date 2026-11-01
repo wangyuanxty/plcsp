@@ -174,26 +174,14 @@ def solve(inst: Instance, time_limit: float = 60.0,
     total_energy = sum(inst.energy(tau, m) * x[tau, m]
                        for tau in range(n) for m in inst.eligible(tau))
 
-    idle_terms = []
-    for m in range(m_count):
-        ends_on_m = []
-        for tau in range(n):
-            if m not in inst.eligible(tau):
-                continue
-            e_tm = model.NewIntVar(0, horizon, f"em_{tau}_{m}")
-            model.Add(e_tm == end[tau]).OnlyEnforceIf(x[tau, m])
-            model.Add(e_tm == 0).OnlyEnforceIf(x[tau, m].Not())
-            ends_on_m.append(e_tm)
-        if not ends_on_m:
-            continue
-        last = model.NewIntVar(0, horizon, f"last_{m}")
-        model.AddMaxEquality(last, ends_on_m)
-        proc_sum = sum(inst.proc(tau, m) * x[tau, m]
-                       for tau in range(n) if m in inst.eligible(tau))
-        idle_terms.append(last - proc_sum)
-
+    # Trailing idle: sum over machines of (makespan - processing time on m),
+    # which equals n_machine * makespan - total processing time.  This is the
+    # term the simulator and the environment charge; the earlier gap-idle
+    # reading is kept only in the diagnostic path.
+    proc_total = sum(inst.proc(tau, m) * x[tau, m]
+                     for tau in range(n) for m in inst.eligible(tau))
     idle = model.NewIntVar(0, horizon * m_count, "idle")
-    model.Add(idle == sum(idle_terms))
+    model.Add(idle == m_count * makespan - proc_total)
 
     trans = model.NewIntVar(0, horizon * n, "trans")
     model.Add(trans == sum(
@@ -240,13 +228,12 @@ def _cost(inst: Instance, starts: Sequence[float],
                        for t in range(n))
     pec_mean = total_energy / n
 
+    # Trailing idle: every machine is charged from 0 to the makespan, which
+    # is what the environment and the simulator report.
     idle = 0.0
     for m in range(m_count):
-        tau_m = [t for t in range(n) if machines[t] == m]
-        if not tau_m:
-            continue
-        idle += max(end[t] for t in tau_m) - sum(
-            float(inst.t[t, m]) for t in tau_m)
+        idle += makespan - sum(
+            float(inst.t[t, m]) for t in range(n) if machines[t] == m)
 
     trans = 0.0
     for j in range(inst.n_job):

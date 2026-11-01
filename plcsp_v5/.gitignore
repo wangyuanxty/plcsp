@@ -26,3 +26,7 @@ __pycache__/
 
 # Vendored package build metadata
 graph-jsp-env/src/*.egg-info/
+
+# Instance pools and generation logs written by the generator (large, regenerable)
+instance/*_instances*.csv
+instance/*log_instance_generate*.txt

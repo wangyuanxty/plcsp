@@ -18,7 +18,8 @@ sys.path.insert(0, REPO)
 
 from parameters import args  # noqa: E402
 
-args.encoder_type = os.environ.get("EVAL_ENCODER", "settrans")
+if "--encoder_type" not in sys.argv:
+    args.encoder_type = os.environ.get("EVAL_ENCODER", "settrans")
 args.eval_seed = 3
 # Keep --use_agv from the command line (default 0 = no-AGV baseline).
 # EVAL_GREEDY=0 evaluates the sampled policy instead of the greedy policy.

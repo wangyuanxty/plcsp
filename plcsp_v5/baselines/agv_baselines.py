@@ -480,7 +480,7 @@ def _pox(a, b, rng):
 def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
                  return_schedule=False, lu_machine=None, lu_edge=None,
                  idle_mode=DEFAULT_IDLE_MODE,
-                 agv_rule="earliest_free"):
+                 agv_rule="earliest_free", eval_mode="fast", n_agv=6):
     idle_mode = resolve_idle_mode(idle_mode)
     rng = random.Random(seed)
     n_task, n_machine = t.shape
@@ -488,7 +488,38 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
     n_ops = n_machine
     base_os = [j for j in range(n_job) for _ in range(n_ops)]
 
+    # ``eval_mode="sim"`` scores every candidate with the reference simulator,
+    # which is what the published RGA of Wang et al. does.  The default
+    # "fast" mode uses the direct decoder.
+    _sim_inst = None
+    if eval_mode == "sim":
+        from plcsp_v5.baselines.mip_agv.model_noagv import Instance
+        _sim_inst = Instance(
+            n_job=n_job, n_op=n_ops, n_machine=n_machine,
+            t=np.asarray(t, dtype=float), power=np.asarray(p, dtype=float),
+            travel=np.asarray(tt, dtype=float),
+            edges=np.asarray(edge_info, dtype=np.int64), task=0,
+            lu_machine=(np.asarray(lu_machine, dtype=float)
+                        if lu_machine is not None else None),
+            lu_edge=(np.asarray(lu_edge, dtype=float)
+                     if lu_edge is not None else None))
+
+    def _to_order(os_seq):
+        cnt = {}
+        order = []
+        for j in os_seq:
+            j = int(j)
+            o = cnt.get(j, 0)
+            cnt[j] = o + 1
+            order.append(j * n_ops + o)
+        return order
+
     def cost(os_seq, ms):
+        if _sim_inst is not None:
+            from plcsp_v5.baselines.mip_agv.agv_sim import simulate
+            sim = simulate(_sim_inst, _to_order(os_seq), ms, n_agv=n_agv,
+                           lu_station=1)
+            return sim.objective
         return score_schedule(
             t, p, tt, edge_info, os_seq, ms, agv=agv,
             lu_machine=lu_machine, lu_edge=lu_edge,
@@ -646,6 +677,10 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--pop", type=int, default=50)
     ap.add_argument("--gen", type=int, default=100)
+    ap.add_argument("--eval_mode", choices=["fast", "sim"], default="fast",
+                    help="fast = direct decoder; sim = reference simulator "
+                         "(matches the evaluator of the published RGA)")
+    ap.add_argument("--n_agv", type=int, default=6)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--agv", type=int, default=1)
     ap.add_argument("--lu", type=int, default=0,
@@ -710,7 +745,9 @@ def main():
                 params = dict(instance=i, seed=s + 1, pop=args.pop,
                               gen=args.gen, agv=agv,
                               idle_mode=args.idle_mode,
-                              agv_rule=agv_rules[0])
+                              agv_rule=agv_rules[0],
+                              eval_mode=args.eval_mode,
+                              n_agv=args.n_agv)
                 if lu:
                     params.update(lu_machine=lu_m_all[i],
                                   lu_edge=lu_e_all[i])

@@ -1,6 +1,6 @@
 {
-  "max_parallel": 1,
-  "min_free_gb": 1.8,
+  "max_parallel": 2,
+  "min_free_gb": 1.2,
   "poll_seconds": 20.0,
   "stop_on_failure": false,
   "note": "Encoder cells 2 and 3 in the full protocol (AGV actor + rule selector), 6x6, 3 seeds.",
@@ -142,7 +142,9 @@
         "--train_seed",
         "2",
         "--run_tag",
-        "m3_enc_hybrid_agv_s2"
+        "m3_enc_hybrid_agv_s2",
+        "--resume_ckpt",
+        "D:\\research\\DeepReinforcementLearningScheduling\\plcsp_v5\\trained_model\\m3_enc_hybrid_agv_s2\\full_ckpt_hybrid_ep100.pt"
       ]
     },
     {
