@@ -131,7 +131,10 @@ Counterfactual multi-agent policy gradients (COMA)~\cite{foerster2018coma}
 use a joint-action Q-function and subtract the value of the other heads'
 actions, averaged over the head's own policy. The Q-function must generalize
 to actions that were not taken, which is difficult when each episode
-contains few joint decisions.
+contains few joint decisions. We use neither method here. The environment
+returns one scalar per episode and no per-agent return, so a per-agent critic
+has no target, and the attribution is placed at the top level instead
+(Section~\ref{sec:method}).
 
 Multi-objective and constrained formulations offer other ways to handle the
 trade-off. MGDA~\cite{sener2018mgda} treats multi-task learning as

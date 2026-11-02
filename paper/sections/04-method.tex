@@ -69,9 +69,10 @@ used because the team objective is scalar; a per-agent critic would need
 per-agent return targets, which the environment does not provide. A rule
 prior restricts the effective support of each agent early in training; the
 bias is soft, so an agent can override the rule once its own estimate is more
-accurate. The per-agent costs at the top level give each agent a signal that
+accurate. The per-agent costs at the top level give the selector a signal that
 the shared return does not provide, because the shared return changes for
-reasons that are not attributable to a single agent.
+reasons that are not attributable to a single agent. The three shop actors
+keep the shared advantage; no per-agent credit is assigned at that level.
 
 \subsection{State and action}
 
@@ -238,7 +239,7 @@ the same signal; the next subsection replaces it with a cost per agent.
 \subsection{Per-agent cost signals}
 
 The three rule heads, one per agent, share one segment reward. To give each
-agent its own signal, we define a local cost for each agent:
+rule head its own signal, we define a local cost for each agent:
 \begin{align}
 c^{\mathrm{job}}_k &= C_{\max}+E_{\mathrm{idle}},\\
 c^{\mathrm{mach}}_k &= \Eproc+\Ttrans,\\

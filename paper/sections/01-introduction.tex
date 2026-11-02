@@ -70,21 +70,21 @@ candidate sets change size at every step, because the number of eligible
 machines depends on the operation and the number of available vehicles depends
 on the workshop. An encoder must map a variable-size set to a fixed-size
 representation without imposing an order. Second, the three decisions share
-one return. A single scalar critic gives every agent the same advantage, so an
-agent whose action changed the objective receives the same signal as one
-whose action did not. Third, a top-level rule selector makes only four to
-thirteen decisions per episode. The sample is small, and a counterfactual
-baseline must generalize to actions that were not taken.
+one return, and the environment gives no per-agent return. A critic for each
+agent would have no target, so the contribution of one decision cannot be
+separated from that of the others. Third, a top-level rule selector makes only
+four to thirteen decisions per episode. The sample is small, and a
+counterfactual baseline must generalize to actions that were not taken.
 
-This paper studies a controller that addresses the three difficulties with a
+This paper studies a controller that responds to the three difficulties with a
 shared architecture. Three actor networks make the operation, machine, and AGV
 decisions. The operation and machine agents use a dual Set Transformer, whose
 machine encoder groups its features into three views and applies attention
 within a machine before it applies attention across machines. We train the
 agents with a shared group-relative advantage and no value critic, and a
 top-level policy selects a rule prior for each agent every eight low-level
-steps, so each agent receives its own cost as the credit signal. We refer to
-the controller as H-ST-GRPO.
+steps, where each rule head receives the change of its own agent's cost. We
+refer to the controller as H-ST-GRPO.
 
 Each choice follows from one of these difficulties. A Set Transformer is
 permutation-invariant over its input set, so the same weights apply to any

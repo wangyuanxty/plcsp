@@ -8601,3 +8601,32 @@ Gurobi 上限 3600 s，只在最小实例 2/16（82 s）关到最优，其余全
 
 新增文件：`results/rga_budget/rga_g18_m2_6x6.json`、`rga_g28_m2_6x6.json`。
 论文 §5.8 增加 Equal-budget comparison 段。
+
+## §154 2026-11-02 信用分配的说法：删掉未兑现的承诺，不补 COMA
+
+**外部批评**：引言把「三个决策共享一个 return」列为要解决的难点，但低层三个 actor
+共用一个 group-relative advantage，§4 自认 per-agent critic 没有 target；
+§4.6 的 c_job/c_mach/c_agv 用在顶层，且自认不是 F 的分解。相关工作引了 COMA/QMIX
+却不实现。建议要么改定位，要么补 COMA 基线。
+
+**判断**：核心成立。低层确实没有解决它提出的难点；引言那句
+「so each agent receives its own cost as the credit signal」把顶层信号说成了每个
+actor 的信用信号，是明确的错误陈述。但「补 COMA」不该做 —— 论文从未声称做多智能体
+信用分配，相关工作也给了不用的理由（每回合联合决策太少）。为一句不该说的话去补实验
+是本末倒置。
+
+**改法（三处，均不新增实验）**：
+
+1. 引言难点二：从「要解决的问题」改为「设计约束」——
+   环境不给 per-agent return，per-agent critic 没有 target，信用放在顶层。
+   同段「addresses the three difficulties」改「responds to」。
+2. 引言：`each agent receives its own cost` → `each rule head receives the change
+   of its own agent's cost`。
+3. 相关工作 COMA 段末尾加一句：本文两者都不用，原因同上，信用放在顶层。
+
+**连带修正**：§4.1 `give each agent a signal` → `give the selector a signal`，
+并补一句「三个 shop actor 仍用共享 advantage，该层不做 per-agent 信用分配」；
+§4.6 `To give each agent its own signal` → `To give each rule head its own signal`。
+
+**不做**：不实现 COMA/QMIX 基线，不改「三个 agent」的定位。
+18 页，编译通过。
