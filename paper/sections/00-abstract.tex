@@ -1,19 +1,15 @@
-In a flexible job shop with several workshops, each served by its own fleet of
-vehicles, every operation needs a start time, a machine, and a vehicle, and the
-three choices are coupled because a machine that finishes early can wait for a
+In a flexible job shop comprising multiple workshops, each equipped with its own transportation fleet, 
+scheduling each operation requires the coordinated determination of its start time, the machine on which it is processed, 
+and the transportation resource used. The three choices are coupled because a machine that finishes early can wait for a
 vehicle while a busy vehicle delays the next operation. The objective weighs
-makespan, energy, and transport time. Learning the three decisions together is
-difficult: the candidate sets change size at every step, and the three
-decisions share one return. We build a controller that
+makespan, energy, and transport time. The joint optimization of these three decisions is nontrivial, 
+since the candidate sets vary in size across steps and the three decisions share a common return. 
+To address this challenge, we build a controller that
 makes the three decisions in one step with four agents: a rule selector and
 three shop actors. Each of the three actors encodes its own candidates with a
-Set Transformer. We train the low-level agents with a shared group-relative
-advantage and no value critic, and a top-level policy picks a rule prior for
-each agent every few steps. One pass produces a schedule, fast enough to use
-interactively. It returns an objective 19 to 45\% lower than rule-based
-dispatch and than the adapted DRL baselines at every size. Against a
-random-key genetic algorithm
-the controller gives up ground only in the smallest shop; in the largest it is
-ahead, in seconds against minutes of search. In ablations, replacing the Set
-Transformer machine encoder and replacing the critic-free update each cost
-more than the rule selector returns.
+Set Transformer. Training of the low-level agents relies on a shared group-relative advantage and 
+omits the critic and a higher-level policy periodically assigns a rule prior to each agent. 
+It achieves objective values $19\%$ to $45\%$ lower than those of the rule-based dispatch and 
+the adapted DRL baselines across all problem sizes. 
+The controller outperforms the genetic algorithm on large instances, finding solutions in seconds rather than minutes. 
+Ablation experiments demonstrate the effectiveness of both the Set Transformer machine encoder and the critic-free update.
