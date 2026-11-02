@@ -11,6 +11,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 from pubstyle import (PALETTE, FigureStyle, apply_publication_style,
                       finalize_figure)
@@ -32,12 +33,14 @@ METHODS = [
 
 # One y-range per panel: the families are not comparable with each other.
 YLIM = [(0, 1520), (0, 1680), (0, 3720)]
+SHORT = ["Ours", "RGA", "Wang", "Li", "PDR"]
 
 
 def main() -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.25))
+    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.35))
 
     width = 0.78
+    x = np.arange(len(METHODS))
 
     for k, ax in enumerate(axes):
         for xi, (name, colour, vals, errs) in enumerate(METHODS):
@@ -50,7 +53,8 @@ def main() -> None:
         ax.set_title(SIZES[k], fontsize=7, pad=2)
         ax.set_xlim(-0.6, len(METHODS) - 0.4)
         ax.set_ylim(*YLIM[k])
-        ax.set_xticks([])
+        ax.set_xticks(x)
+        ax.set_xticklabels(SHORT, rotation=90, ha="center", fontsize=5.4)
         ax.spines[["top", "right"]].set_visible(False)
         ax.tick_params(labelsize=6.2, length=2.2)
         ax.grid(axis="y", linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
@@ -60,12 +64,7 @@ def main() -> None:
         else:
             ax.tick_params(labelleft=False)
 
-    handles = [plt.Rectangle((0, 0), 1, 1, color=m[1]) for m in METHODS]
-    fig.legend(handles, [m[0] for m in METHODS], ncol=5, loc="upper center",
-               frameon=False, fontsize=6.2, handlelength=0.9,
-               columnspacing=0.8, handletextpad=0.3, bbox_to_anchor=(0.5, 1.04))
-
-    fig.tight_layout(pad=0.25, w_pad=0.6)
+    fig.tight_layout(pad=0.25, w_pad=0.5)
     finalize_figure(fig, OUT / "fig_main_comparison", formats=["pdf"])
     for i, s in enumerate(SIZES):
         print(s, "best", min(m[2][i] for m in METHODS), "ours", METHODS[0][2][i])

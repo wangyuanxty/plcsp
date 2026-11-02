@@ -285,12 +285,12 @@ $10\times10$ & RGA & $-476.77$ & 97 & $<10^{-16}$ \\
 \centering
 \includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
 \caption{Objective of every method on the three instance families, from
-Table~\ref{tab:baselines}. Panels (a) to (c) are the three families, and each
-panel has its own vertical range, because the objective is not comparable
-across families. Bars are means over the 100 test instances; the error bar is
-the seed standard deviation of the learned methods, which the deterministic
-baselines do not have. The controller is second at the two
-smaller sizes and first at the largest.}
+Table~\ref{tab:baselines}. The panel title $a\times b\times c$ gives $a$ jobs,
+$b$ machines and $c$ workshops. Each panel has its own vertical range, because
+the objective is not comparable across families. Bars are means over the 100
+test instances; the error bar is the seed standard deviation of the learned
+methods, which the deterministic baselines do not have. The controller is
+second at the two smaller sizes and first at the largest.}
 \label{fig:main}
 \end{figure*}
 
@@ -303,10 +303,9 @@ paired difference with and without the rule selector.
 \caption{Per-instance objective on $6\times6$. (a) The controller with and
 without the rule selector (three seeds, 300 values each). The violin is
 thinned to a light point cloud, the thick bar is the interquartile range, the
-white dot the median and the filled diamond the mean. (b) Paired difference on
-each seed, as a percentage of the controller value; positive means the
-selector helps. The vertical line marks zero, and the bottom row pools the
-three seeds.}
+white dot the median and the filled diamond the mean. (b) The mean objective of
+each seed, without the selector above and with it below; the label gives the
+difference in points. Every seed is lower with the selector.}
 \label{fig:distribution}
 \end{figure*}
 
