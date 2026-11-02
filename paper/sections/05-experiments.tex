@@ -107,13 +107,15 @@ same objective under the same transport model; the learned methods are averaged
 over three seeds on the 100 test instances, and the rule-based rows are
 deterministic.
 
-The objective is not normalised for instance size. Its idle term,
-\eqref{eq:idle}, grows with the number of machines and the
-makespan rather than with the work content, so a larger family can score lower
-than a smaller one. The same non-monotonicity appears in the reference paper:
-Wang et al. report 732.5 at $6\times6\times2$ and 674.5 at $10\times6\times2$
-under the same objective structure. So we compare absolute values
-within a column only, never across columns.
+The objective is not normalised for instance size. By
+\eqref{eq:idlelinear} the idle term is $M\Cmax-\sum t$, so the coefficient of
+the makespan is $w_1+w_2M$: 2.8 at $M=6$ and 4.4 at $M=10$. The idle term grows
+with the number of machines and the makespan rather than with the work
+content, so a larger family can score lower than a smaller one, and the
+trade-off itself moves with the number of machines. The same non-monotonicity
+appears in the reference paper: Wang et al. report 732.5 at $6\times6\times2$
+and 674.5 at $10\times6\times2$ under the same objective structure. So we
+compare absolute values within a column only, never across columns.
 
 Table~\ref{tab:pdr} lists the twelve rule pairs under the three AGV rules.
 The best pair is mor/spt at $6\times6$ and $10\times10$ and mor/seyc at

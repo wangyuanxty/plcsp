@@ -129,10 +129,23 @@ group of rollouts (Section~\ref{sec:method}).
 
 The three terms have different scales. Makespan and transport time are in
 time units, and processing and idle energy are in energy units. The weights
-set the trade-off. Idle energy, by contrast, depends on the assignment and the
-sequence and not only on the processing times: moving an operation to a machine
-with a later release can reduce its processing energy and increase the idle
-energy of the machine it leaves.
+set the trade-off.
+
+The idle energy reduces to the makespan and the total processing time. With
+the reading of \eqref{eq:idle}, every machine is charged from time zero to the
+makespan, so
+\begin{equation}
+\Eidle=M\,\Cmax-\sum_{j,o} t_{j,o,m(j,o)}.
+\label{eq:idlelinear}
+\end{equation}
+It depends on the sequence through the makespan and on the assignment through
+the total processing time. It does not depend on how the gaps are distributed:
+two schedules with the same makespan and the same total processing time have
+the same idle energy. Substituting \eqref{eq:idlelinear} in
+\eqref{eq:objective}, the coefficient of the makespan is $w_1+w_2M$ and not
+$w_1$. With $(w_1,w_2)=(0.4,0.4)$ it is 2.8 at $M=6$ and 4.4 at $M=10$, so the
+nominal weights do not state the trade-off and the trade-off moves with the
+number of machines.
 
 \subsection{Assumptions}
 
@@ -196,8 +209,10 @@ must decide the assignment, the machine sequence, and the vehicle sequence
 together, so its size grows with all three.
 
 Two further couplings enter through the objective. The idle term couples the
-assignment with the sequence: an operation that starts earlier on one machine
-can leave a larger gap on another. By the same argument, the transport term
+assignment with the sequence, though not through the gaps: by
+\eqref{eq:idlelinear} the idle energy depends on the makespan and on the total
+processing time, and those change with the sequence and with the assignment.
+The transport term
 couples the machine sequence with the vehicle sequence, because a shorter
 loaded trip can require a longer empty trip. These couplings are why a fixed
 rule pair is not enough and why the controller learns the assignment, the
