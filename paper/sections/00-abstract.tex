@@ -1,19 +1,19 @@
-Flexible job shops with several workshops and one vehicle fleet per workshop
-must decide, for every operation, when it starts, on which machine it runs,
-and which vehicle moves it. The three decisions are coupled, and an
-energy-aware objective charges idle machines even when they do not change the
-makespan. We build a controller with four agents: a rule selector and three
-shop actors. A dual Set
-Transformer encodes the operation and machine candidates; its machine encoder
-groups the features into three views, so the model compares the views of one
-machine before it compares machines. We train the low-level agents with a
-shared group-relative advantage and no value critic, and a top-level policy
-picks a rule prior for each agent every few steps. One pass produces a
-schedule, fast enough to use interactively. It returns a
-lower objective than rule-based dispatch and than adapted DRL baselines.
-Against the random-key genetic algorithm the answer depends on the size. The
-search returns a 12\% lower objective at $6\times6$; at $10\times6$ the paired
-test does not separate the two; at $10\times10$ one pass is 20\% lower. That
-crossover, not dominance at every size, is the operating point of the method: a
-schedule in one pass for a shop that reschedules often. The encoder and the
-multi-actor update also help in our runs.
+In a flexible job shop with several workshops, each served by its own fleet of
+vehicles, every operation needs a start time, a machine, and a vehicle, and the
+three choices are coupled because a machine that finishes early can wait for a
+vehicle while a busy vehicle delays the next operation. The objective weighs
+makespan, energy, and transport time. Learning the three decisions together is
+difficult: the candidate sets change size at every step, and the three
+decisions share one return. We build a controller that
+makes the three decisions in one step with four agents: a rule selector and
+three shop actors. Each of the three actors encodes its own candidates with a
+Set Transformer. We train the low-level agents with a shared group-relative
+advantage and no value critic, and a top-level policy picks a rule prior for
+each agent every few steps. One pass produces a schedule, fast enough to use
+interactively. It returns an objective 19 to 45\% lower than rule-based
+dispatch and than the adapted DRL baselines at every size. Against a
+random-key genetic algorithm
+the controller gives up ground only in the smallest shop; in the largest it is
+ahead, in seconds against minutes of search. In ablations, replacing the Set
+Transformer machine encoder and replacing the critic-free update each cost
+more than the rule selector returns.
