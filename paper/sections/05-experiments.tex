@@ -285,9 +285,11 @@ $10\times10$ & RGA & $-476.77$ & 97 & $<10^{-16}$ \\
 \centering
 \includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
 \caption{Objective of every method on the three instance families, from
-Table~\ref{tab:baselines}. Bars are means over the 100 test instances; the
-error bar is the seed standard deviation of the learned methods, which the
-deterministic baselines do not have. The controller is second at the two
+Table~\ref{tab:baselines}. Panels (a) to (c) are the three families, and each
+panel has its own vertical range, because the objective is not comparable
+across families. Bars are means over the 100 test instances; the error bar is
+the seed standard deviation of the learned methods, which the deterministic
+baselines do not have. The controller is second at the two
 smaller sizes and first at the largest.}
 \label{fig:main}
 \end{figure*}
@@ -300,11 +302,11 @@ paired difference with and without the rule selector.
 \includegraphics[width=0.96\linewidth]{fig_distribution.pdf}
 \caption{Per-instance objective on $6\times6$. (a) The controller with and
 without the rule selector (three seeds, 300 values each). The violin is
-thinned to a light point cloud, the thick bar
-is the interquartile range, the white dot the median and the white diamond the
-mean. (b) Paired difference on each seed, as a percentage of the controller
-value; positive means the selector helps. The vertical line marks zero and
-the label gives the mean of the pooled differences.}
+thinned to a light point cloud, the thick bar is the interquartile range, the
+white dot the median and the filled diamond the mean. (b) Paired difference on
+each seed, as a percentage of the controller value; positive means the
+selector helps. The vertical line marks zero, and the bottom row pools the
+three seeds.}
 \label{fig:distribution}
 \end{figure*}
 
@@ -533,12 +535,35 @@ controller obtains 867.75 in one pass. RGA reaches the same objective at about
 about 127~s, which is 134 times one pass of 0.95~s. At its full budget of
 4{,}850 evaluations, 437.8~s, RGA is 12.2\% better. The search buys its margin
 by spending two orders of magnitude more online time.
+Figure~\ref{fig:budget} shows the curve.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_budget.pdf}
+\caption{Equal-budget comparison at $6\times6$. The line is the RGA objective
+at five budgets; the dashed line is one controller pass, which has no budget
+axis. The upper axis converts evaluations into wall time in the environment
+(0.0903~s per evaluation). The two are equal at about 1{,}400 evaluations,
+which cost 126~s against 0.95~s.}
+\label{fig:budget}
+\end{figure}
 
 \paragraph{Training dynamics}
-Both variants improve quickly in the first 50 episodes. After that, the
-seed range remains wide: at the same episode, the three seeds can differ by
-tens of points. So we compare the selected checkpoint of each seed in
-Table~\ref{tab:rule-selector}, not the last episode.
+The validation objective is noisy (Figure~\ref{fig:curve}). At the same
+episode the three seeds differ by 100 to 400 points, and no seed improves
+monotonically: the best checkpoint falls at episode 25 for one seed and at 150
+for another. Selecting the last episode would reward a lucky run, so we select
+one checkpoint per seed on the validation set and use that checkpoint
+throughout.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_training_curve.pdf}
+\caption{Validation objective of the three seeds of the controller, recorded
+every 25 episodes. The line is the seed mean and the band the seed range. The
+best checkpoint falls at a different episode for each seed.}
+\label{fig:curve}
+\end{figure}
 
 \paragraph{Spread across instances}
 A difference in the tail is hidden by the mean. The per-instance standard deviation

@@ -1,8 +1,9 @@
-"""Main comparison: objective of every method on the three instance families.
+"""Main comparison: objective of every method, one panel per instance family.
 
-Grouped bars, one group per instance family, one bar per method. The learned
-methods carry the seed standard deviation as an error bar; the deterministic
-baselines have none.
+The three families are not comparable across columns (the idle term grows with
+the number of machines), so each panel carries its own y-range. Bars are means
+over the 100 test instances; the learned methods carry the seed standard
+deviation.
 """
 
 from pathlib import Path
@@ -10,14 +11,13 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
 from pubstyle import (PALETTE, FigureStyle, apply_publication_style,
                       finalize_figure)
 
 OUT = Path(__file__).resolve().parent
 
-SIZES = ["$6\\times6\\times2$", "$10\\times6\\times2$", "$10\\times10\\times2$"]
+SIZES = [r"$6\times6\times2$", r"$10\times6\times2$", r"$10\times10\times2$"]
 
 METHODS = [
     ("Ours", PALETTE["blue_main"], [867.75, 808.67, 1836.64],
@@ -30,39 +30,45 @@ METHODS = [
     ("PDR", PALETTE["neutral"], [1319.24, 1461.63, 3288.35], [0, 0, 0]),
 ]
 
+# One y-range per panel: the families are not comparable with each other.
+YLIM = [(0, 1520), (0, 1680), (0, 3720)]
+
 
 def main() -> None:
-    fig, ax = plt.subplots(figsize=(7.0, 2.85))
-    n = len(METHODS)
-    width = 0.15
-    x = np.arange(len(SIZES))
+    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.25))
 
-    for k, (name, colour, vals, errs) in enumerate(METHODS):
-        off = (k - (n - 1) / 2) * width
-        ax.bar(x + off, vals, width * 0.92, label=name, color=colour,
-               edgecolor="white", linewidth=0.5, zorder=2)
-        if any(errs):
-            ax.errorbar(x + off, vals, yerr=errs, fmt="none",
-                        ecolor="#333333", elinewidth=0.7, capsize=1.6,
-                        capthick=0.7, zorder=3)
+    width = 0.78
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(SIZES)
-    ax.set_ylabel("Objective")
-    ax.set_ylim(0, 3700)
-    ax.legend(ncol=5, loc="lower center", bbox_to_anchor=(0.5, 1.02),
-              frameon=False, fontsize=5.8, handlelength=0.9,
-              columnspacing=0.7, handletextpad=0.25)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.grid(axis="y", linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
-    ax.set_axisbelow(True)
+    for k, ax in enumerate(axes):
+        for xi, (name, colour, vals, errs) in enumerate(METHODS):
+            ax.bar(xi, vals[k], width, label=name, color=colour,
+                   edgecolor="white", linewidth=0.4, zorder=2)
+            if errs[k]:
+                ax.errorbar(xi, vals[k], yerr=errs[k], fmt="none",
+                            ecolor="#333333", elinewidth=0.7, capsize=1.4,
+                            capthick=0.7, zorder=3)
+        ax.set_title(SIZES[k], fontsize=7, pad=2)
+        ax.set_xlim(-0.6, len(METHODS) - 0.4)
+        ax.set_ylim(*YLIM[k])
+        ax.set_xticks([])
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(labelsize=6.2, length=2.2)
+        ax.grid(axis="y", linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
+        ax.set_axisbelow(True)
+        if k == 0:
+            ax.set_ylabel("Objective", fontsize=7)
+        else:
+            ax.tick_params(labelleft=False)
 
-    fig.tight_layout(pad=0.25)
-    fig.subplots_adjust(top=0.80)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=m[1]) for m in METHODS]
+    fig.legend(handles, [m[0] for m in METHODS], ncol=5, loc="upper center",
+               frameon=False, fontsize=6.2, handlelength=0.9,
+               columnspacing=0.8, handletextpad=0.3, bbox_to_anchor=(0.5, 1.04))
+
+    fig.tight_layout(pad=0.25, w_pad=0.6)
     finalize_figure(fig, OUT / "fig_main_comparison", formats=["pdf"])
     for i, s in enumerate(SIZES):
-        best = min(m[2][i] for m in METHODS)
-        print(s, "best", best, "ours", METHODS[0][2][i])
+        print(s, "best", min(m[2][i] for m in METHODS), "ours", METHODS[0][2][i])
 
 
 if __name__ == "__main__":
