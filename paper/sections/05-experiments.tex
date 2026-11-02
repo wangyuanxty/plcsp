@@ -549,19 +549,20 @@ which cost 126~s against 0.95~s.}
 \end{figure}
 
 \paragraph{Training dynamics}
-The validation objective is noisy (Figure~\ref{fig:curve}). At the same
-episode the three seeds differ by 100 to 400 points, and no seed improves
-monotonically: the best checkpoint falls at episode 25 for one seed and at 150
-for another. Selecting the last episode would reward a lucky run, so we select
-one checkpoint per seed on the validation set and use that checkpoint
-throughout.
+The validation objective falls from 967 at episode 25 to 923 at episode 50 and
+then stays between 890 and 930 (Figure~\ref{fig:curve}). The seeds converge
+over the same run: they differ by 186 points at episode 25 and by 13 at episode
+200. The best checkpoint still falls at a different episode for each seed, 125,
+150 and 200, so we select one checkpoint per seed on the validation set rather
+than take the last episode.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{fig_training_curve.pdf}
-\caption{Validation objective of the three seeds of the controller, recorded
-every 25 episodes. The line is the seed mean and the band the seed range. The
-best checkpoint falls at a different episode for each seed.}
+\caption{Validation objective of the three seeds of the controller, the mean
+over the 100 validation instances, recorded every 25 episodes. The line is the
+seed mean and the band the seed range. The best checkpoint falls at a
+different episode for each seed.}
 \label{fig:curve}
 \end{figure}
 

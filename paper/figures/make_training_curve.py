@@ -30,7 +30,8 @@ EPISODES = np.arange(25, 201, 25)
 def read_run(name):
     text = (LOGS / name).read_text(encoding="utf-8", errors="ignore")
     vals = [float(v) for v in
-            re.findall(r"Evaluation/done: Objective=([0-9.]+)", text)]
+            re.findall(r"each_episode_result: .*obj_100ins_mean=([0-9.]+)",
+                       text)]
     if len(vals) != len(EPISODES):
         raise SystemExit(f"{name}: {len(vals)} evaluations")
     return np.array(vals)
@@ -53,14 +54,14 @@ def main() -> None:
 
     ax.set_xlabel("Training episode", fontsize=7)
     ax.set_ylabel("Validation objective", fontsize=7)
-    ax.set_xlim(0, 210)
-    ax.set_ylim(640, 1250)
+    ax.set_xlim(15, 210)
+    ax.set_ylim(830, 1110)
     ax.set_xticks(EPISODES)
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(labelsize=6.2, length=2.2)
     ax.grid(axis="y", linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
     ax.set_axisbelow(True)
-    ax.legend(loc="lower left", fontsize=5.8, handlelength=1.4,
+    ax.legend(loc="upper right", fontsize=5.8, handlelength=1.4,
               borderpad=0.2, labelspacing=0.3)
 
     fig.tight_layout(pad=0.25)
