@@ -1,6 +1,18 @@
 \section{Introduction}
 \label{sec:intro}
 
+In modern manufacturing systems, especially in multi-factory production environments, 
+automated guided vehicles (AGVs) play a critical role in transporting jobs between machines and workshops. 
+The performance of a multi-factory system depends not only on how machines are scheduled but also 
+on how AGVs are dispatched and coordinated across different workshops. Besides, 
+little attention has been paid to multi-factory environments with AGVs, where jobs must be transferred 
+across different workshops. This creates a non-trivial decision problem: whether to send a job from the 
+current workshop immediately, or to wait for a jon sended from the other workshop. 
+Existing research on integrated production and transportation scheduling has mainly focused on 
+single-workshop settings, where the interaction between production resources and AGVs is relatively 
+straightforward. Nevertheless, real-world factory operations often involve multiple workshops, 
+in which jobs must be transferred across different departments or factory zones.
+
 Consider a shop with two workshops and six machines, where a job is processed
 on a machine in the first workshop and then on a machine in the second. The
 second machine is free, but the job is not, because it waits for a vehicle.
