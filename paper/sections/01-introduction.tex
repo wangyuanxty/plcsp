@@ -25,25 +25,23 @@ and the loaded travel time. A nearest-vehicle-first rule cannot capture this tra
 whereas an always-wait rule fails to account for the first machine. Figure 1 shows the
 shop and the two transport cases.
 
-This example is the setting of the paper. In a flexible job shop each
-operation is assigned to one machine from a set of eligible machines, and the
-operations on each machine are then sequenced. When the shop uses automated
+This example is the setting of the paper. In a flexible job shop scheduling problem, 
+each operation must be assigned to one machine selected from a set of eligible machines, 
+and the operations assigned to each machine must then be sequenced. When the shop uses automated
 guided vehicles (AGVs), a third decision appears, namely which vehicle moves
 the job between two machines. The three decisions are coupled, because a
 machine that finishes early may wait for a vehicle and a vehicle that is busy
-delays the next operation. In an energy-aware objective the coupling is
-tighter, since idle machines contribute to the objective even when they do
-not change the makespan. The objective in this paper combines makespan,
-processing and idle energy, and loaded transport time.
+delays the next operation. In an energy-aware objective function, the coupling between scheduling decisions 
+and the objective becomes tighter, because idle machines incur energy consumption even when 
+they do not affect the makespan. The objective considered in this paper therefore integrates the makespan, 
+the processing and idle energy consumption, and the loaded travel time.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_environment.pdf}
-\caption{The shop environment and the logistics process. (a) Four agents:
-one rule selector above the operation, machine and AGV agents, which make the
-three coupled decisions; the four objective terms are listed below them, and
-the transport term counts loaded travel and
-half-weighted empty travel. (b) Two workshops, six machines, one load/unload
+\caption{The shop environment and the logistics process. (a) Four agents are included: 
+a rule selector and the operation, machine, and AGV agents. The latter three make the three coupled decisions, 
+and the four objective terms are listed below them. (b) Two workshops, six machines, one load/unload
 station and three AGVs per workshop; a job crosses the boundary.
 (c) Cross-workshop transport: empty travel to the pickup machine, a loaded leg
 to the source station, a transfer between the two stations, and a loaded leg
@@ -54,20 +52,19 @@ time, segmented in the order the AGV meets them.}
 \label{fig:motivated}
 \end{figure*}
 
-The problem is hard for three reasons. Assignment, machine sequence,
-and vehicle sequence interact, because a shorter loaded trip can require a
-longer empty trip and a machine that starts earlier can leave a larger gap on
-another machine. At a step the joint action count is the product of the
-candidate sets, which grows with the number of jobs, machines, and vehicles.
-Three objective terms with different scales make the weights a
-trade-off that changes across planning scenarios.
+The problem is challenging for three reasons. First, the assignment decisions are hard because 
+a shorter loaded trip may require a longer empty trip. Second, machine sequencing is difficult because 
+an earlier start on one machine can increase the idle gap on another. Third, vehicle sequencing 
+must be coordinated with both assignment and machine sequencing. 
+At each decision step, the number of joint actions is the product of the cardinalities of the candidate sets, 
+and this number grows with the numbers of jobs, machines, and vehicles.
+Because the three objective terms have different scales, the weights represent a trade-off that varies across planning scenarios.
 
-Dispatching rules resolve the three decisions in one pass. They are fast and
-predictable, but their performance depends on the rule combination, and a
-fixed rule cannot adapt to the state of the shop. Metaheuristics search the
-assignment space and often return better schedules, at the cost of thousands
-of schedule evaluations per instance. Constraint programming and
-mixed-integer models give a bound or a strong
+Dispatching rules make the three coupled decisions in a single pass. They are computationally efficient and 
+deterministic, but their solution quality depends heavily on the selected rule combination, 
+and a fixed combination cannot adapt to the current shop state. In contrast, metaheuristics search the 
+solution space more thoroughly and often return better schedules, at the expense of thousands of schedule 
+evaluations per instance. Constraint programming and mixed-integer models give a bound or a strong
 incumbent~\cite{yao2026cp}, but their run time grows quickly with the number of
 operations and vehicles. Deep reinforcement
 learning (DRL) offers a fourth option, a policy that constructs one schedule
@@ -98,37 +95,31 @@ top-level policy selects a rule prior for each agent every eight low-level
 steps, where each rule head receives the change of its own agent's cost. We
 refer to the controller as H-ST-GRPO.
 
-Each choice follows from one of these difficulties. A Set Transformer is
-permutation-invariant over its input set, so the same weights apply to any
-number of operations or machines. Machine-internal grouping keeps the
-token count linear in the number of machines and lets the model compare the
-three feature views of one machine before it compares machines.
-Group-relative advantage removes the critic, which is the component with the
-fewest targets in this setting. A rule prior gives the low-level agents a
-coarse action space to explore, and the per-agent costs give the top level a
-signal that a shared return does not provide.
+Each design choice is driven by one of these difficulties. The Set Transformer’s permutation invariance 
+allows the same weights to be used regardless of the number of operations or machines. 
+Machine-internal grouping keeps the token count linear in the number of machines while enabling the model 
+to compare the three feature views of a machine before comparing across machines. 
+Group-relative advantage removes the critic, which offers the least target information here. 
+A rule prior gives low-level agents a coarse action space to explore, and per-agent costs provide the top 
+level with a signal unavailable from a shared return. Overall, this paper makes four contributions.
 
-We make four contributions.
 
 \begin{enumerate}
 \item \emph{A multi-agent controller for joint production and logistics
 scheduling across workshops.} The operation, machine, and vehicle decisions
 are produced by three actor networks in one step, so the transport decision is
-coupled to the machine decision that creates it. For a cross-workshop job, a
-single AGV agent selects the source vehicle and, after the transfer between
-the stations, the target vehicle.
+coupled to the machine decision that creates it. For a cross-workshop job, a single AGV agent selects 
+the source vehicle before the transfer and the target vehicle after the transfer between the stations.
 
 \item \emph{A dual Set Transformer encoder with machine-internal grouping.}
-The machine encoder projects three feature groups separately, compares them
-within a machine, and then compares machines. With no position
-embedding, the encoder applies the same weights to any number of operations, machines,
-and vehicles.
+The machine encoder projects the three feature groups separately, first compares them within each machine, 
+and then compares across machines. Since no position embedding is used, the encoder applies the same 
+weights regardless of the number of operations, machines, and vehicles.
 
 \item \emph{A group-relative update for three heterogeneous agents.} The three
 shop actors are trained with one group-relative
-advantage~\cite{shao2024grpo}: the team return of an episode is normalised
-within the group, and no value critic, no
-reference model, and no KL penalty are used at the low level. With the same
+advantage~\cite{shao2024grpo}: The episodic team return is normalized within the group, 
+and the low level uses neither a value critic, a reference model, nor a KL penalty. With the same
 architecture and budget, this beats PPO by 72.98 at $6\times6$ under the
 protocol of Wang et al., by 98.38 under the full protocol, and by 56.02 at
 $10\times6$.
