@@ -1,29 +1,29 @@
 \section{Introduction}
 \label{sec:intro}
 
-In modern manufacturing systems, especially in multi-factory production environments, 
+In modern manufacturing systems, especially in multi-workshop production environments, 
 automated guided vehicles (AGVs) play a critical role in transporting jobs between machines and workshops. 
-The performance of a multi-factory system depends not only on how machines are scheduled but also 
+The performance of a multi-workshop system depends not only on how machines are scheduled but also 
 on how AGVs are dispatched and coordinated across different workshops. Besides, 
-little attention has been paid to multi-factory environments with AGVs, where jobs must be transferred 
+little attention has been paid to multi-workshop environments with AGVs, where jobs must be transferred 
 across different workshops. This creates a non-trivial decision problem: whether to send a job from the 
-current workshop immediately, or to wait for a jon sended from the other workshop. 
+current workshop immediately, or to wait for a job sended from the other workshop. 
 Existing research on integrated production and transportation scheduling has mainly focused on 
 single-workshop settings, where the interaction between production resources and AGVs is relatively 
 straightforward. Nevertheless, real-world factory operations often involve multiple workshops, 
-in which jobs must be transferred across different departments or factory zones.
+in which jobs must be transferred across different departments or workshop zones.
 
-Consider a shop with two workshops and six machines, where a job is processed
+Consider a factory with two workshops and six machines, where a job is processed
 on a machine in the first workshop and then on a machine in the second. The
 second machine is free, but the job is not, because it waits for a vehicle.
 The first workshop has an idle vehicle, and the second workshop has a busy one.
-If the dispatcher sends the idle vehicle, the job arrives at the boundary and
-waits for the second fleet; if it waits for a vehicle of the second workshop
-instead, the first machine stays idle. The choice changes the makespan, the
-idle energy of both workshops, and the loaded travel time. A rule that always
-sends the nearest vehicle cannot see this trade-off, and a rule that always
-waits cannot see the first machine. Figure~\ref{fig:motivated} shows the shop
-and the two transport cases.
+If the dispatcher sends the idle vehicle, the job arrives
+at the boundary and waits for the second fleet; or it waits for a
+vehicle of the second workshop instead, the first machine stays
+idle. The dispatching decision affects the makespan, the idle energy consumption of both workshops, 
+and the loaded travel time. A nearest-vehicle-first rule cannot capture this trade-off, 
+whereas an always-wait rule fails to account for the first machine. Figure 1 shows the
+shop and the two transport cases.
 
 This example is the setting of the paper. In a flexible job shop each
 operation is assigned to one machine from a set of eligible machines, and the
