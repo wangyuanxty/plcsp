@@ -137,7 +137,9 @@ def simulate(inst: Instance, order: Sequence[int],
              lu_station: int = 0,
              fixed_starts: Optional[Sequence[float]] = None,
              failures: Optional[dict] = None,
-             failure: Optional[dict] = None) -> SimResult:
+             failure: Optional[dict] = None,
+             weights: Tuple[float, float, float] = (0.4, 0.4, 0.2)
+             ) -> SimResult:
     """Run one fixed (order, machines) schedule.
 
     ``pick(step_index, ctx)`` returns ``(src_agv, dst_agv)``; ``dst_agv``
@@ -411,7 +413,8 @@ def simulate(inst: Instance, order: Sequence[int],
             inst.t[task, int(machines[task])])
     idle = idle_cost(None, gap_idle, proc_by_machine, makespan)
     trans_total = loaded_total + RHO_EMPTY * empty_total
-    objective = 0.4 * makespan + 0.4 * (pec_mean + idle) + 0.2 * trans_total
+    w1, w2, w3 = weights
+    objective = w1 * makespan + w2 * (pec_mean + idle) + w3 * trans_total
     return SimResult(starts=starts, finishes=finishes,
                      machines=list(machines), makespan=makespan,
                      pec_mean=pec_mean, idle=idle, trans=trans_total,

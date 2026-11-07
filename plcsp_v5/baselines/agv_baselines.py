@@ -190,7 +190,7 @@ def decode(t, p, tt, edge_info, os_seq, ms, agv=True, n_agv=N_AGV,
         for k in range(len(route) - 1):
             gap_idle += route[k + 1][0] - route[k][1]
     idle = idle_cost(idle_mode, gap_idle, proc_on_machine, mk)
-    obj = W_MK * mk + W_EC * (proc_energy / n_task + idle) + W_TT * trans_total
+    obj = w1 * mk + w2 * (proc_energy / n_task + idle) + w3 * trans_total
     return {"mk": mk, "pt": proc_energy, "transT": trans_total,
             "idleT": idle, "obj": obj,
             "start": start, "finish": finish}
@@ -261,7 +261,7 @@ def pdr_schedule(t, p, job_rule, machine_rule):
     return os_seq, ms
 
 
-def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
+def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms, weights=None,
               n_agv=N_AGV, idle_mode=DEFAULT_IDLE_MODE,
               agv_rule="earliest_free"):
     """M2 decoder: load/unload stations, entry transport, empty travel.
@@ -415,14 +415,15 @@ def decode_m2(t, p, tt, edge_info, lu_machine, lu_edge, os_seq, ms,
             gap_idle += route[k + 1][0] - route[k][1]
     idle = idle_cost(idle_mode, gap_idle, proc_on_machine, mk)
     trans_total = loaded_total + RHO_EMPTY * empty_total
-    obj = W_MK * mk + W_EC * (proc_energy / n_task + idle) + W_TT * trans_total
+    w1, w2, w3 = weights if weights else (W_MK, W_EC, W_TT)
+    obj = w1 * mk + w2 * (proc_energy / n_task + idle) + w3 * trans_total
     return {"mk": mk, "pt": proc_energy, "transT": trans_total,
             "loaded": loaded_total, "empty": empty_total,
             "idleT": idle, "obj": obj,
             "start": start, "finish": finish}
 
 
-def score_schedule(t, p, tt, edge_info, os_seq, ms, agv=True,
+def score_schedule(t, p, tt, edge_info, os_seq, ms, agv=True, weights=None,
                    lu_machine=None, lu_edge=None,
                    idle_mode=DEFAULT_IDLE_MODE,
                    agv_rule="earliest_free"):
@@ -433,7 +434,7 @@ def score_schedule(t, p, tt, edge_info, os_seq, ms, agv=True,
     """
     if lu_machine is not None:
         return decode_m2(t, p, tt, edge_info, lu_machine, lu_edge,
-                         os_seq, ms, idle_mode=idle_mode,
+                         os_seq, ms, weights=weights, idle_mode=idle_mode,
                          agv_rule=agv_rule)
     return decode(t, p, tt, edge_info, os_seq, ms, agv=agv,
                   idle_mode=idle_mode)
@@ -481,7 +482,7 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
                  return_schedule=False, lu_machine=None, lu_edge=None,
                  idle_mode=DEFAULT_IDLE_MODE,
                  agv_rule="earliest_free", eval_mode="fast", n_agv=6,
-                 failure=None):
+                 failure=None, weights=(0.4, 0.4, 0.2)):
     idle_mode = resolve_idle_mode(idle_mode)
     rng = random.Random(seed)
     n_task, n_machine = t.shape
@@ -519,7 +520,8 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
         if _sim_inst is not None:
             from plcsp_v5.baselines.mip_agv.agv_sim import simulate
             sim = simulate(_sim_inst, _to_order(os_seq), ms, n_agv=n_agv,
-                           lu_station=1, failure=failure)
+                           lu_station=1, failure=failure,
+                           weights=weights)
             return sim.objective
         return score_schedule(
             t, p, tt, edge_info, os_seq, ms, agv=agv,
@@ -557,6 +559,7 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
         population = new
     best = population[0]
     out = score_schedule(t, p, tt, edge_info, best[0], best[1], agv=agv,
+                         weights=weights,
                          lu_machine=lu_machine, lu_edge=lu_edge,
                          idle_mode=idle_mode, agv_rule=agv_rule)
     result = {"obj": out["obj"], "mk": out["mk"], "pt": out["pt"],
@@ -697,6 +700,9 @@ def main():
                     help="0 = no failures; otherwise the exposure model")
     ap.add_argument("--fail_mttr", type=float, default=10.0)
     ap.add_argument("--fail_seed", type=int, default=1)
+    ap.add_argument("--wm", type=float, default=0.4)
+    ap.add_argument("--we", type=float, default=0.4)
+    ap.add_argument("--wt", type=float, default=0.2)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -752,7 +758,8 @@ def main():
                               idle_mode=args.idle_mode,
                               agv_rule=agv_rules[0],
                               eval_mode=args.eval_mode,
-                              n_agv=args.n_agv)
+                              n_agv=args.n_agv,
+                              weights=(args.wm, args.we, args.wt))
                 if args.fail_mtbf > 0:
                     params["failure"] = {"mtbf": args.fail_mtbf,
                                          "mttr": args.fail_mttr,
