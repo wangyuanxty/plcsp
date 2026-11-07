@@ -92,12 +92,52 @@ def _new_agvs(n_agv: int, edges: np.ndarray,
     return out
 
 
+Downtime = Sequence[Tuple[float, float]]
+
+
+def _up_at(t: float, downs: Optional[Downtime]) -> float:
+    """Earliest instant at or after ``t`` at which the resource is up."""
+    if not downs:
+        return t
+    moved = True
+    while moved:
+        moved = False
+        for a, b in downs:
+            if a <= t < b:
+                t = b
+                moved = True
+    return t
+
+
+def _place(start: float, duration: float,
+           downs: Optional[Downtime]) -> Tuple[float, float]:
+    """Start and finish when the resource is down for part of the interval.
+
+    An operation that is running when the resource fails is suspended and
+    resumes when it is repaired; it is not restarted.  The downtime windows
+    are scanned once in time order, so an interval is charged once.
+    """
+    if not downs:
+        return start, start + duration
+    t = _up_at(start, downs)
+    finish = t + duration
+    for a, b in sorted(downs):
+        if b <= t:
+            continue
+        if a >= finish:
+            break
+        finish += b - max(a, t)
+    return t, finish
+
+
 def simulate(inst: Instance, order: Sequence[int],
              machines: Sequence[int], n_agv: int = 6,
              cross_delay: float = 5.0, leg_ratio: float = 0.5,
              pick: Optional[Callable[[int, dict], Tuple[int, int]]] = None,
              lu_station: int = 0,
-             fixed_starts: Optional[Sequence[float]] = None) -> SimResult:
+             fixed_starts: Optional[Sequence[float]] = None,
+             failures: Optional[dict] = None,
+             failure: Optional[dict] = None) -> SimResult:
     """Run one fixed (order, machines) schedule.
 
     ``pick(step_index, ctx)`` returns ``(src_agv, dst_agv)``; ``dst_agv``
@@ -106,6 +146,15 @@ def simulate(inst: Instance, order: Sequence[int],
 
     ``lu_station=1`` selects the M2 transport model and requires an
     instance with ``lu_machine`` / ``lu_edge``.
+
+    ``failure`` turns on the same exposure model the environment uses:
+    ``{"mtbf": 300, "mttr": 10, "seed": 1}``.  Each operation samples one
+    repair from ``constraints.sample_repair``, and the repair is added to its
+    processing time, exactly as the disjunctive-graph environment does.
+
+    ``failures`` optionally gives downtime windows,
+    ``{"machine": {m: [(a, b), ...]}, "agv": {k: [(a, b), ...]}}``, one list
+    per resource.  ``None`` reproduces the no-failure schedule exactly.
     """
     n, m_count = inst.n_task, inst.n_machine
     travel = inst.travel
@@ -114,6 +163,12 @@ def simulate(inst: Instance, order: Sequence[int],
         raise ValueError(
             "lu_station=1 needs an instance with lu_machine / lu_edge; "
             "use a *_lu.pkl pool")
+    if failures is not None and not lu_station:
+        raise ValueError("failures are implemented for lu_station=1 only")
+    fail_base = None
+    if failure is not None:
+        from plcsp_v5.constraints import sample_repair
+        fail_base = int(failure.get("seed", 1))
     agvs = _new_agvs(n_agv, edges, n_machine=m_count,
                      lu_station=lu_station)
     machine_edge = (_machine_edge(edges, m_count) if lu_station else None)
@@ -134,6 +189,14 @@ def simulate(inst: Instance, order: Sequence[int],
         m = int(machines[tau])
         o = tau % inst.n_op
         duration = float(inst.t[tau, m])
+        if fail_base is not None:
+            # The repair follows the operation, not its position in the order:
+            # the generator is keyed by (seed, task, machine), so a search
+            # cannot place long operations where the random draws are small.
+            rng_tm = np.random.default_rng([fail_base, tau, m])
+            duration += sample_repair(rng_tm, duration,
+                                      float(failure["mtbf"]),
+                                      float(failure["mttr"]))
         start_job = 0.0
 
         if lu_station:
@@ -187,6 +250,30 @@ def simulate(inst: Instance, order: Sequence[int],
                     src, pickup, m, ready, _travel,
                     m_count, machine_edge, inst.lu_machine, inst.lu_edge,
                     dst=dst)
+                if fail_base is not None:
+                    rng_ag = np.random.default_rng([fail_base, 7919, tau])
+                    rep = sample_repair(rng_ag, float(timing["loaded"]),
+                                        float(failure.get("agv_mtbf",
+                                                          failure["mtbf"])),
+                                        float(failure.get("agv_mttr",
+                                                          failure["mttr"])))
+                    timing["src_free"] += rep
+                    if dst is not None:
+                        timing["dst_free"] += rep
+                if failures is not None:
+                    downs = failures["agv"]
+                    d_src = downs.get(src_idx)
+                    if d_src:
+                        s0 = max(float(ready), float(src.free_time))
+                        _, f1 = _place(s0, timing["src_free"] - s0, d_src)
+                        timing["src_free"] = f1
+                    if dst is not None:
+                        d_dst = downs.get(dst_idx)
+                        if d_dst:
+                            s0 = max(timing["src_free"] + timing["transfer"],
+                                     float(dst.free_time))
+                            _, f2 = _place(s0, timing["dst_free"] - s0, d_dst)
+                            timing["dst_free"] = f2
                 if dst is not None:
                     dst.free_time = timing["dst_free"]
                     dst.location = timing["dst_location"]
@@ -200,7 +287,8 @@ def simulate(inst: Instance, order: Sequence[int],
                     used=True, src=src_idx, dst=dst_idx,
                     loaded=timing["loaded"], wait=timing["wait"],
                     cross=cross, empty=timing["empty"])
-                start_job = ready + timing["wait"] + timing["loaded"]
+                start_job = (timing["dst_free"] if dst is not None
+                             else timing["src_free"])
         elif o > 0:
             prev = tau - 1
             prev_m = int(machines[prev])
@@ -260,40 +348,44 @@ def simulate(inst: Instance, order: Sequence[int],
                 start_job = ready + timing["wait"] + timing["loaded"]
 
         # Left-shift placement, matching _schedule_task in the environment.
+        down_m = (failures["machine"].get(m) if failures else None)
         route = routes[m]
+
+        def fit(candidate: float) -> Tuple[float, float]:
+            return _place(candidate, duration, down_m)
+
         if fixed_starts is not None:
-            start = float(fixed_starts[tau])
+            start, finish = fit(float(fixed_starts[tau]))
             route.append(tau)
             starts[tau] = start
-            finishes[tau] = start + duration
+            finishes[tau] = finish
             continue
         if not route:
-            start = start_job
+            start, finish = fit(start_job)
             route.append(tau)
-        elif start_job + duration <= starts[route[0]]:
-            start = start_job
+        elif fit(start_job)[1] <= starts[route[0]]:
+            start, finish = fit(start_job)
             route.insert(0, tau)
         elif len(route) == 1:
-            start = max(start_job, finishes[route[-1]])
+            start, finish = fit(max(start_job, finishes[route[-1]]))
             route.append(tau)
         else:
             placed = False
             for i in range(len(route) - 1):
                 prev_t, next_t = route[i], route[i + 1]
-                if start_job + duration > starts[next_t]:
+                s, f = fit(max(start_job, finishes[prev_t]))
+                if f > starts[next_t]:
                     continue
-                if starts[next_t] - finishes[prev_t] < duration:
-                    continue
-                start = max(start_job, finishes[prev_t])
+                start, finish = s, f
                 route.insert(i + 1, tau)
                 placed = True
                 break
             if not placed:
-                start = max(start_job, finishes[route[-1]])
+                start, finish = fit(max(start_job, finishes[route[-1]]))
                 route.append(tau)
 
         starts[tau] = start
-        finishes[tau] = start + duration
+        finishes[tau] = finish
 
     makespan = max(finishes)
     total_energy = sum(float(inst.t[t, machines[t]])
@@ -315,7 +407,8 @@ def simulate(inst: Instance, order: Sequence[int],
     # minus its processing time; "gap" keeps the old leading-plus-gap reading.
     proc_by_machine = [0.0] * m_count
     for task in range(len(machines)):
-        proc_by_machine[int(machines[task])] += float(finishes[task] - starts[task])
+        proc_by_machine[int(machines[task])] += float(
+            inst.t[task, int(machines[task])])
     idle = idle_cost(None, gap_idle, proc_by_machine, makespan)
     trans_total = loaded_total + RHO_EMPTY * empty_total
     objective = 0.4 * makespan + 0.4 * (pec_mean + idle) + 0.2 * trans_total

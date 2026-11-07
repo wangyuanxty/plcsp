@@ -645,3 +645,44 @@ case study read one seed, and say so where they are reported.
 
 
 
+
+\subsection{One repair in the middle of the schedule}
+\label{sec:repair}
+
+The protocol above has no failures, by assumption~(A3). We relax that
+assumption once, as a separate scenario, to see what each method does when a
+resource needs a repair halfway through.
+
+At step 14 of 36, the machine that step used needs 100 time units of repair.
+Every operation the method places on that machine later pays the repair; the
+vehicle that made the last trip pays it too. Machine and vehicle stay in the
+candidate set, so a method that re-decides at every step can take another one,
+and a method that fixes its plan up front cannot. Nothing is retrained for this
+scenario: the same checkpoints and the same baselines. The repair falls on the
+machine each method used itself at step 14, so the three methods meet the same
+kind of disruption rather than the same machine.
+
+\begin{table}[t]
+\centering
+\caption{Objective with and without one repair, mean over the 100 test
+instances. The controller row is the mean of the three seeds. Lower is
+better.}
+\label{tab:repair}
+\begin{tabular}{lrrr}
+\toprule
+Method & No repair & One repair & Change \\
+\midrule
+Ours & 867.75 & 1173.95 & $+35.3\%$ \\
+PDR & 1363.86 & 1993.58 & $+46.2\%$ \\
+RGA & 750.10 & 1484.57 & $+97.9\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:repair} reports the result. The controller loses 35.3\%, PDR
+46.2\% and RGA 97.9\%. With the repair the controller has the lowest objective
+of the three, 1173.95 against 1484.57 for RGA. RGA is the strongest method
+without a repair and the most fragile with one: its plan leaves little slack
+and concentrates the work on few machines, so one repair is paid many times.
+The controller gives up 35.3\%, which is the price of a plan that was built
+without knowing the repair would come.

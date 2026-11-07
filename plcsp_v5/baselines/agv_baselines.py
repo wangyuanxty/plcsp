@@ -480,7 +480,8 @@ def _pox(a, b, rng):
 def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
                  return_schedule=False, lu_machine=None, lu_edge=None,
                  idle_mode=DEFAULT_IDLE_MODE,
-                 agv_rule="earliest_free", eval_mode="fast", n_agv=6):
+                 agv_rule="earliest_free", eval_mode="fast", n_agv=6,
+                 failure=None):
     idle_mode = resolve_idle_mode(idle_mode)
     rng = random.Random(seed)
     n_task, n_machine = t.shape
@@ -518,7 +519,7 @@ def rga_instance(t, p, tt, edge_info, seed=1, pop=50, gen=100, agv=True,
         if _sim_inst is not None:
             from plcsp_v5.baselines.mip_agv.agv_sim import simulate
             sim = simulate(_sim_inst, _to_order(os_seq), ms, n_agv=n_agv,
-                           lu_station=1)
+                           lu_station=1, failure=failure)
             return sim.objective
         return score_schedule(
             t, p, tt, edge_info, os_seq, ms, agv=agv,
@@ -692,6 +693,10 @@ def main():
     ap.add_argument("--agv_rules", default="earliest_free",
                     help="comma list of AGV dispatch rules for --mode pdr: "
                          "earliest_free,nearest,earliest_arrival")
+    ap.add_argument("--fail_mtbf", type=float, default=0.0,
+                    help="0 = no failures; otherwise the exposure model")
+    ap.add_argument("--fail_mttr", type=float, default=10.0)
+    ap.add_argument("--fail_seed", type=int, default=1)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -748,6 +753,10 @@ def main():
                               agv_rule=agv_rules[0],
                               eval_mode=args.eval_mode,
                               n_agv=args.n_agv)
+                if args.fail_mtbf > 0:
+                    params["failure"] = {"mtbf": args.fail_mtbf,
+                                         "mttr": args.fail_mttr,
+                                         "seed": args.fail_seed}
                 if lu:
                     params.update(lu_machine=lu_m_all[i],
                                   lu_edge=lu_e_all[i])
