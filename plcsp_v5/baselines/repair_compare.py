@@ -26,6 +26,9 @@ from plcsp_v5.baselines.mip_agv.model_noagv import load_instance
 from plcsp_v5.baselines.mip_agv.agv_sim import simulate
 
 POOL = "plcsp_v5/instance/test_Instance_J6M6E2_lu.pkl"
+POOLS = {"6x6": "plcsp_v5/instance/test_Instance_J6M6E2_lu.pkl",
+         "10x6": "plcsp_v5/instance/test_Instance_J10M6E2_lu.pkl",
+         "10x10": "plcsp_v5/instance/test_Instance_J10M10E2_lu.pkl"}
 
 
 def to_order(os_seq, n_op):
@@ -50,15 +53,18 @@ def inflate(inst, order, machines, after, repair):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--size", default="6x6",
+                    choices=["6x6", "10x6", "10x10"])
     ap.add_argument("--instances", type=int, nargs="+", required=True)
     ap.add_argument("--after", type=int, default=14)
     ap.add_argument("--repair", type=float, default=100.0)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
+    pool = POOLS[a.size]
     rows = []
     for i in a.instances:
-        inst = load_instance(POOL, i)
+        inst = load_instance(pool, i)
         for name in ("PDR", "RGA"):
             if name == "PDR":
                 os_seq, ms = pdr_schedule(inst.t, inst.power, "mor", "spt")

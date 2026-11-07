@@ -28,7 +28,9 @@ if not hasattr(matplotlib.cm, "get_cmap"):
     matplotlib.cm.get_cmap = matplotlib.colormaps.get_cmap
 
 _OWN = argparse.ArgumentParser()
-_OWN.add_argument("--run-tag", required=True)
+_OWN.add_argument("--size", default="6x6",
+                  choices=["6x6", "10x6", "10x10"])
+_OWN.add_argument("--run-tag", default="")
 _OWN.add_argument("--instances", type=int, nargs="+", required=True)
 _OWN.add_argument("--machine", type=int, default=-1)
 _OWN.add_argument("--after", type=int, default=14)
@@ -94,6 +96,12 @@ def _install_hooks() -> None:
 
 
 def main() -> int:
+    SIZE = {"6x6": (6, 6, 2), "10x6": (10, 6, 2), "10x10": (10, 10, 2)}
+    if OWN.size != "6x6":
+        args.n_job, args.n_machine, args.n_edge = SIZE[OWN.size]
+    if not OWN.run_tag:
+        OWN.run_tag = (f"m3_agv6_ours_s1" if OWN.size == "6x6"
+                       else f"m3_agv_s1_J{args.n_job}M{args.n_machine}")
     args.encoder_type = "settrans"
     args.eval_seed = 3
     args.use_agv = 1

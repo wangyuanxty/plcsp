@@ -1,4 +1,5 @@
 \section{Experiments}
+
 \label{sec:experiments}
 
 \subsection{Protocol}
@@ -665,24 +666,36 @@ kind of disruption rather than the same machine.
 \begin{table}[t]
 \centering
 \caption{Objective with and without one repair, mean over the 100 test
-instances. The controller row is the mean of the three seeds. Lower is
-better.}
+instances of each family. The controller row is the mean of the three seeds.
+Lower is better.}
 \label{tab:repair}
-\begin{tabular}{lrrr}
+\begin{tabular}{llrrr}
 \toprule
-Method & No repair & One repair & Change \\
+Family & Method & No repair & One repair & Change \\
 \midrule
-Ours & 867.75 & 1173.95 & $+35.3\%$ \\
-PDR & 1363.86 & 1993.58 & $+46.2\%$ \\
-RGA & 750.10 & 1484.57 & $+97.9\%$ \\
+$6\times6$ & Ours & 867.75 & 1173.95 & $+35.3\%$ \\
+ & PDR & 1363.86 & 1993.58 & $+46.2\%$ \\
+ & RGA & 750.10 & 1484.57 & $+97.9\%$ \\
+\midrule
+$10\times6$ & Ours & 808.67 & 1050.96 & $+30.0\%$ \\
+ & PDR & 1524.30 & 2626.60 & $+72.3\%$ \\
+ & RGA & 784.86 & 2067.90 & $+163.5\%$ \\
+\midrule
+$10\times10$ & Ours & 1836.64 & 2269.87 & $+23.6\%$ \\
+ & PDR & 3476.35 & 4744.06 & $+36.5\%$ \\
+ & RGA & 2374.02 & 4245.15 & $+78.8\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:repair} reports the result. The controller loses 35.3\%, PDR
-46.2\% and RGA 97.9\%. With the repair the controller has the lowest objective
-of the three, 1173.95 against 1484.57 for RGA. RGA is the strongest method
-without a repair and the most fragile with one: its plan leaves little slack
-and concentrates the work on few machines, so one repair is paid many times.
-The controller gives up 35.3\%, which is the price of a plan that was built
-without knowing the repair would come.
+Table~\ref{tab:repair} reports the result on the three families. The
+controller loses 35.3, 30.0 and 23.6\%, PDR 46.2, 72.3 and 36.5\%, and RGA
+97.9, 163.5 and 78.8\%. With the repair the controller has the lowest absolute
+objective of the three at every size: 1173.95 against 1484.57 for RGA at
+$6\times6$, 1050.96 against 2067.90 at $10\times6$, and 2269.87 against
+4245.15 at $10\times10$. RGA is the strongest method without a repair and the
+most fragile with one, because its plan leaves little slack and concentrates
+the work on few machines, so one repair is paid many times. The gap is widest
+at $10\times6$, where the controller gives up 30.0\% and RGA 163.5\%. What the
+controller loses is the price of a plan built without knowing that the repair
+would come.
