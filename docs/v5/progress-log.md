@@ -8853,3 +8853,31 @@ _place(0, 100, [(40,60)])  -> (0, 120)
 最终用「断言目标字符串只出现一次」定位，并用代数验证（w=(1,0,0) 时 obj 应等于 mk）确认生效。
 
 **未扩规模**：10×6、10×10 未跑（约 8 小时），6×6 已能说明问题。
+
+
+## §159 2026-11-08 20×6×3 主实验：实例池与本机启动
+
+**实例池**：`plcsp_v5/instance/generate_allsize_mofjsp_dataset.py` 的生成分支
+无条件写六数组（含 `lu_machine`、`lu_edge`），所以不需要查开关。
+命令：`--all_sizes 1 --sizes 20x6 --suffix _lu`。
+产物形状：
+- `Instance_J20M6E3_lu.pkl` (12800, 120, 6) / (12800, 6, 6) / (12800, 3, 2) / (12800, 6) / (12800, 3, 3)
+- `test_Instance_J20M6E3_lu.pkl` 同形状，100 个
+- 另有 eval 池（seed 1）。
+
+**口径**：论文正文写的是带上下料站的运输模型，故取
+`--lu_station 1 --agv_dst_actor 1 --top_credit local`，与 M2 基线队列一致。
+三个车间，按每车间 3 台取 `--n_agv 9`。其余与 10×6 主队列相同（200 ep、G=8、resample 8、LR 1e-3、eval_sample 100）。
+队列：`experiment-queue-20x6-main.json`，run_tag `plan20_J20M6E3_s{1,2,3}_local`。
+
+**环境故障**：本机 GPU 解释器 `py312` 没有 wandb，且 `plcsp_v5/wandb/` 目录
+（离线运行记录）会形成命名空间包遮蔽。第一条导致 `ModuleNotFoundError`，
+第二条导致 `AttributeError: module 'wandb' has no attribute 'init'`。
+处理：在 py312 里装 wandb 0.31.0；安装后常规包优先于无 `__init__` 的目录，遮蔽消失。
+
+**基线**：
+- PDR 已跑完（`results/pdr_m2_trailing_20x6.json`，100 实例 × 12 规则对 × 3 AGV 规则）。
+  最优规则对 mor / spt / earliest_arrival，均值 1977.13。
+- RGA 运行中（`results/rga_m2_trailing_20x6.json`）。
+- Wang 与 Li 基线队列已写好：`experiment-queue-20x6-baselines.json`，
+  等主模型训练后串行启动。
