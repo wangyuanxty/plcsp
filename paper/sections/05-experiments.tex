@@ -12,7 +12,7 @@ greedily. Each learned method is trained with three seeds and the reported value
 is the mean of the three seed-level test means. Rule-based and
 metaheuristic baselines are deterministic given their own seed.
 
-The controller, the ablations and the retrained baseline of Wang et al.~\cite{wang2025multitarget} use 200 training
+Our model, the ablations and the retrained baseline of Wang et al.~\cite{wang2025multitarget} use 200 training
 episodes; Li et al.\ uses the budget of its own paper, as noted below. The group
 size
 is 8, the instance batch is resampled every 8 episodes, and the learning rate
@@ -48,27 +48,24 @@ comparable with those reported there.
 
 \subsection{Baselines}
 
-The baselines are adaptations of published methods, not reproductions. Since two of the papers release no code, 
-the corresponding baselines were reproduced from the paper descriptions and are marked as adapted below. 
-Every baseline is evaluated on the same instances and the same objective as the controller. 
-The ablation study of Section~\ref{sec:ablations} uses the transport protocol of 
-Wang et al.~\cite{wang2025multitarget} -- no AGV fleet, machine-to-machine travel, 
-loaded travel only -- which is the protocol of their released code; 
+The baselines are adaptations of published methods, not reproductions. Since two of the papers release no code,
+the corresponding baselines were reproduced from the paper descriptions and are marked as adapted below.
+Every baseline is evaluated on the same instances and the same objective as our model. The ablation study of
+Section~\ref{sec:ablations} uses the transport protocol of Wang et al.~\cite{wang2025multitarget} --
+no AGV fleet, machine-to-machine travel, loaded travel only -- which is the protocol of their released code;
 Section~\ref{sec:published-values} explains why those values are not placed beside the published ones.
 
 \paragraph{Rule-based (PDR)} A priority dispatching rule combines six job rules (FIFO,
 MOR, and the most- and least-work-remaining forms on processing time and on
 processing energy) with two machine rules (shortest processing time and
 minimum processing energy), as in Wang et
-al.~\cite{wang2025multitarget}. AGVs follow one of the three AGV rules the
-controller selects from; the better one is reported.
+al.~\cite{wang2025multitarget}. AGVs follow one of the three AGV rules our model selects from; the better one is reported.
 
 \paragraph{RGA} A random-key genetic algorithm with population 50 and 100
 generations, i.e.\ 4850 schedule evaluations per instance, with the operators
 of Zhang et al.~\cite{zhang2011rga}. It optimises the operation sequence and
 the machine assignment; AGVs are dispatched by the earliest-arrival rule.
-Every candidate schedule is scored by the same simulator that scores the
-controller, so the search optimises exactly the objective of
+Every candidate schedule is scored by the same simulator that scores our model, so the search optimises exactly the objective of
 \eqref{eq:objective} and its cost includes the evaluation cost. One run takes
 437.8~s per instance at $6\times6$, 1426~s at $10\times6$ and 4161~s at
 $10\times10$.
@@ -158,7 +155,7 @@ Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 
 \caption{Objective of the twelve PDR pairs on the three instance families.
 Each cell is the mean over the 100 test instances, with the per-instance
 standard deviation in parentheses. Each pair is run under the three AGV
-dispatch rules of the controller. Rule keys: \texttt{mor}, most operations
+dispatch rules of our model. Rule keys: \texttt{mor}, most operations
 remaining; \texttt{mwkr} and \texttt{lwkr}, most and least work remaining, on
 processing time (\texttt{\_t}) or on processing energy (\texttt{\_pt});
 \texttt{spt}, shortest processing time; \texttt{seyc}, shortest processing
@@ -234,36 +231,35 @@ RGA & 437.8 & 1426 & 4161 \\
 \end{table}
 
 Three observations follow. First, RGA is stronger where the shop is small. At
-$6\times6$ it obtains 762.04, which is 105.71 below the controller, and at
+$6\times6$ it obtains 762.04, which is 105.71 below our model, and at
 $10\times6$ it is 11.97 below. It pays for that margin: one run evaluates 4850
-schedules per instance, against 0.95 and 1.99~s for one controller pass.
+schedules per instance, against 0.95 and 1.99~s for one pass of our model.
 Second, the ordering reverses as the instance grows. At
-$10\times10$ the controller obtains 1836.64, which is 20.1\% below RGA and
+$10\times10$ our model obtains 1836.64, which is 20.1\% below RGA and
 below every learned baseline. The reversal is consistent with the
 configuration of RGA: one population size and one generation count at every
 size, so its advantage over a fixed policy shrinks as the instance grows. That
 is a limit on its generalization, not on its search. Third, the learned baselines are behind
 at all three sizes. The retrained architecture of Wang et al.\ is 207.89, 257.57 and
-1317.17 above the controller, and Li et al.\ is 292.84, 389.42 and 902.27
+1317.17 above our model, and Li et al.\ is 292.84, 389.42 and 902.27
 above it.
 
 \paragraph{Significance} Table~\ref{tab:signif} reports a two-sided Wilcoxon
 signed-rank test on the paired per-instance objectives, with Holm's correction
 over the 12 comparisons; the learned methods enter as their seed mean on each
-instance. The controller is lower than
+instance. Our model is lower than
 PDR and the adapted baselines of Wang et al.\ and Li et al.\ at every size, at $p<10^{-16}$, on 97 to 100 of the
 100 instances. The disagreement is confined to RGA. At $6\times6$ RGA is lower, on
-84 instances; at $10\times10$ the controller is lower, on 97. At $10\times6$
-the test does not separate the two (median 6.92, controller lower
+84 instances; at $10\times10$ our model is lower, on 97. At $10\times6$
+the test does not separate the two (median 6.92, our model lower
 on 43), so the mean gap of 11.97 is not resolved by the paired comparison.
 
 \begin{table}[t]
 \centering
-\caption{Paired Wilcoxon signed-rank test of the controller against each
+\caption{Paired Wilcoxon signed-rank test of our model against each
 baseline over the 100 test instances, with Holm's correction over the 12
-comparisons. Median difference is the controller minus the baseline, so a
-negative value favours the controller; wins counts the instances on which the
-controller is lower.}
+comparisons. Median difference is our model minus the baseline, so a
+negative value favours our model; wins counts the instances on which our model is lower.}
 \label{tab:signif}
 \footnotesize
 \setlength{\tabcolsep}{3.0pt}
@@ -295,7 +291,7 @@ Table~\ref{tab:baselines}. The panel title $a\times b\times c$ gives $a$ jobs,
 $b$ machines and $c$ workshops. Each panel has its own vertical range, because
 the objective is not comparable across families. Bars are means over the 100
 test instances; the error bar is the seed standard deviation of the learned
-methods, which the deterministic baselines do not have. The controller is
+methods, which the deterministic baselines do not have. Our model is
 second at the two smaller sizes and first at the largest.}
 \label{fig:main}
 \end{figure*}
@@ -306,7 +302,7 @@ paired difference with and without the rule selector.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_distribution.pdf}
-\caption{Per-instance objective on $6\times6$. (a) The controller with and
+\caption{Per-instance objective on $6\times6$. (a) Our model with and
 without the rule selector (three seeds, 300 values each). The violin is
 thinned to a light point cloud, the thick bar is the interquartile range, the
 white dot the median and the filled diamond the mean. (b) The mean objective of
@@ -316,9 +312,9 @@ difference in points. Every seed is lower with the selector.}
 \end{figure*}
 
 \paragraph{Case study}
-Figure~\ref{fig:gantt} shows one $6\times6$ instance under two schedules: the
-learned controller (a) and the best PDR rule (b). The lower six rows are
-machines; the upper six rows are AGVs. The controller returns an objective of
+Figure~\ref{fig:gantt} shows one $6\times6$ instance under two schedules:
+our model (a) and the best PDR rule (b). The lower six rows are
+machines; the upper six rows are AGVs. Our model returns an objective of
 568.4 against 751.3 for the rule on this seed. It uses 29 AGV legs against 33
 for the rule. The
 figure shows that the assignment, the machine sequence, and the vehicle
@@ -328,7 +324,7 @@ intervals, and the vehicle busy intervals follow.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_gantt.pdf}
-\caption{One $6\times6$ instance. (a) Learned controller. (b) Best PDR rule.
+\caption{One $6\times6$ instance. (a) Our model. (b) Best PDR rule.
 The lower six rows are machines (bars are operations; colors are jobs). The
 upper six rows are AGVs (bar length is the busy interval, including empty
 travel).}
@@ -347,7 +343,7 @@ under the second. This paper uses the second reading, because a machine is
 idle until the job leaves the shop.
 
 Measured on their instances and their transport protocol under the first
-reading, our controller obtains $559.31 \pm 12.24$ at $6\times6$ and
+reading, our model obtains $559.31 \pm 12.24$ at $6\times6$ and
 $575.27 \pm 4.12$ at $10\times6$, and the all-GNN encoder of their
 architecture, retrained here under the same protocol, obtains
 $676.99 \pm 14.49$ and $678.88 \pm 91.75$. The values published for P-G are
@@ -475,11 +471,11 @@ Full & $6\times6$ & GRPO & 867.75 & 11.86 \\
 by the better fixed AGV rule changes the objective from 867.75 to 888.46 at
 $6\times6$ and from 808.67 to 867.99 at $10\times6$. The learned AGV agent is
 better in all three seeds at both sizes, by 0.4 to 3.6\% at $6\times6$ and by
-6.1 to 8.1\% at $10\times6$, relative to the controller. The no-AGV configuration in
+6.1 to 8.1\% at $10\times6$, relative to our model. The no-AGV configuration in
 Table~\ref{tab:encoder} is a different resource regime (an unbounded fleet),
 not an AGV-policy baseline.
 
-\paragraph{Rule selection} Table~\ref{tab:rule-selector} compares the controller with
+\paragraph{Rule selection} Table~\ref{tab:rule-selector} compares our model with
 and without the top-level rule selector. At $6\times6$ the selector obtains
 867.75 against 895.21 and is better in all three seeds, a mean difference of
 27.46, or 3.1\%. At $10\times6$ the gap is 10.66, or 1.3\%, and it is better in
@@ -487,7 +483,7 @@ two of the three seeds. A paired test over the 100 instances agrees: $p=0.0023$
 at $6\times6$ (Holm over the two sizes), where the selector is lower on 67 of
 them, and $p=0.167$ at $10\times6$, where it is lower on 54. So the selector is a small and consistent gain
 at the smaller size and a small and uneven one at the larger size. It is not
-the source of the margin over the rule baseline: without it the controller is
+the source of the margin over the rule baseline: without it our model is
 still 424.03 below the best PDR pair. The rule-usage analysis below shows what
 the selector changes.
 
@@ -526,15 +522,14 @@ selector is meant to produce.
 
 \paragraph{Amortization against per-instance search}
 RGA evaluates 4850 schedules per instance, each scored by the same simulator
-that scores the controller. The controller constructs one schedule in a single
+that scores our model. Our model constructs one schedule in a single
 pass and takes about 0.95~s. One RGA run takes 437.8~s at $6\times6$, 1426~s
 at $10\times6$ and 4161~s at $10\times10$, which is 461, 717 and 1000 times
-one pass. The controller amortizes the search over the training set; RGA
+one pass. Our model amortizes the search over the training set; RGA
 spends the search budget on each instance.
 
 \paragraph{Equal-budget comparison}
-We cut the RGA budget and record the objective at each point. At $6\times6$ the
-controller obtains 867.75 in one pass. RGA reaches the same objective at about
+We cut the RGA budget and record the objective at each point. At $6\times6$ our model obtains 867.75 in one pass. RGA reaches the same objective at about
 1{,}400 evaluations: it obtains 932.83 at 914, 868.20 at 1{,}394 and 803.85 at
 2{,}306. One environment evaluation costs 0.091~s, so 1{,}394 evaluations need
 about 127~s, which is 134 times one pass of 0.95~s. At its full budget of
@@ -546,7 +541,7 @@ Figure~\ref{fig:budget} shows the curve.
 \centering
 \includegraphics[width=\linewidth]{fig_budget.pdf}
 \caption{Equal-budget comparison at $6\times6$. The line is the RGA objective
-at five budgets; the dashed line is one controller pass, which has no budget
+at five budgets; the dashed line is one pass of our model, which has no budget
 axis. The upper axis converts evaluations into wall time in the environment
 (0.0903~s per evaluation). The two are equal at about 1{,}400 evaluations,
 which cost 126~s against 0.95~s.}
@@ -564,7 +559,7 @@ than take the last episode.
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{fig_training_curve.pdf}
-\caption{Validation objective of the three seeds of the controller, the mean
+\caption{Validation objective of the three seeds of our model, the mean
 over the 100 validation instances, recorded every 25 episodes. The line is the
 seed mean and the band the seed range. The best checkpoint falls at a
 different episode for each seed.}
@@ -573,9 +568,9 @@ different episode for each seed.}
 
 \paragraph{Spread across instances}
 A difference in the tail is hidden by the mean. The per-instance standard deviation
-of the seed-averaged controller values is 109.9, and across individual seeds it
+of the seed-averaged values of our model is 109.9, and across individual seeds it
 ranges from 127.0 to 140.0. RGA has 79.7 on the same basis, so the
-seed-averaged spread of the controller is 38\% wider.
+seed-averaged spread of our model is 38\% wider.
 The same pattern appears in the validation readings, and a single-pass policy
 has no mechanism to recover from a
 bad early assignment on a hard instance.
@@ -589,8 +584,7 @@ without), so
 the sign is stable while the size varies by a factor of 2.4. At $10\times6$
 the mean difference falls to 10.66 and the sign is no longer stable. The selector makes a
 few decisions per episode, so its update sees a few dozen transitions per
-group. The effect is real but small next to the 451.49 that separates the
-controller from the best PDR pair. We report the comparison as an analysis
+group. The effect is real but small next to the 451.49 that separates our model from the best PDR pair. We report the comparison as an analysis
 and do not use it as a headline claim.
 
 \paragraph{Why the encoder matters more than the algorithm}
@@ -622,15 +616,15 @@ $p=9.0\times10^{-16}$ at $6\times6$ and $p=1.4\times10^{-9}$ at $10\times6$,
 with GRPO lower on 90 and 77 of them. Both algorithms used one weight vector
 per group, so the gap is attributed to the estimator.
 
-\paragraph{What the controller is for}
-We do not claim the best objective at every size. The controller is better
+\paragraph{What our model is for}
+We do not claim the best objective at every size. Our model is better
 than the rule-based and the adapted DRL baselines at every size, but RGA is
 ahead of it at $6\times6$. RGA obtains 762.04 on that test set against 867.75
-for the controller, so it is 12.2\% ahead. The search pays for that quality in
+for our model, so it is 12.2\% ahead. The search pays for that quality in
 online time. Under the same budget of 4850 schedule evaluations per instance,
-and with every candidate scored by the same simulator the controller is scored
+and with every candidate scored by the same simulator our model is scored
 with, one RGA run takes 437.8~s per instance at $6\times6$ against 0.95~s for
-one pass of the controller. The cost of the search grows steeply with the
+one pass of our model. The cost of the search grows steeply with the
 instance. In the implementation of Wang et
 al.~\cite{wang2025multitarget} their RGA needs 638.8, 1994.0 and 5590.3~s per
 instance at the three sizes, against 0.529, 0.883 and 2.443~s for their learned
@@ -671,7 +665,7 @@ kind of disruption rather than the same machine.
 \begin{table}[t]
 \centering
 \caption{Objective with and without one repair, mean over the 100 test
-instances of each family. The controller row is the mean of the three seeds.
+instances of each family. The row of our model is the mean of the three seeds.
 Lower is better.}
 \label{tab:repair}
 \begin{tabular}{llrrr}
@@ -693,16 +687,14 @@ $10\times10$ & Ours & 1836.64 & 2269.87 & $+23.6\%$ \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:repair} reports the result on the three families. The
-controller loses 35.3, 30.0 and 23.6\%, PDR 46.2, 72.3 and 36.5\%, and RGA
-97.9, 163.5 and 78.8\%. With the repair the controller has the lowest absolute
+Table~\ref{tab:repair} reports the result on the three families. Our model loses 35.3, 30.0 and 23.6\%, PDR 46.2, 72.3 and 36.5\%, and RGA
+97.9, 163.5 and 78.8\%. With the repair our model has the lowest absolute
 objective of the three at every size: 1173.95 against 1484.57 for RGA at
 $6\times6$, 1050.96 against 2067.90 at $10\times6$, and 2269.87 against
 4245.15 at $10\times10$. RGA is the strongest method without a repair and the
 most fragile with one, because its plan leaves little slack and concentrates
 the work on few machines, so one repair is paid many times. The gap is widest
-at $10\times6$, where the controller gives up 30.0\% and RGA 163.5\%. What the
-controller loses is the price of a plan built without knowing that the repair
+at $10\times6$, where our model gives up 30.0\% and RGA 163.5\%. What our model loses is the price of a plan built without knowing that the repair
 would come.
 
 \subsection{Weight transfer}
@@ -716,8 +708,8 @@ compare with RGA at the same nine.
 \begin{table}[t]
 \centering
 \caption{Objective at nine weight points on $6\times6$, mean over the 100
-test instances. The controller is the mean of the three seeds and is not
-retrained for any point. The last column is the controller against RGA.}
+test instances. Our model is the mean of the three seeds and is not
+retrained for any point. The last column is our model against RGA.}
 \label{tab:weights}
 \footnotesize
 \setlength{\tabcolsep}{3.0pt}
@@ -740,9 +732,9 @@ $(w_1,w_2,w_3)$ & Ours & RGA & Gap \\
 
 Table~\ref{tab:weights} gives the result. Eight of the nine points fall between
 9.9 and 19.0\%, and the default weights of Table~\ref{tab:baselines} sit at
-12.2\%, so the relative position of the controller does not drift with the
-weights. The exception is transport alone, where the controller is 88.7\% above
-RGA; without the makespan and the energy terms the controller travels about
+12.2\%, so the relative position of our model does not drift with the
+weights. The exception is transport alone, where our model is 88.7\% above
+RGA; without the makespan and the energy terms our model travels about
 twice as far. What the nine points buy is not a smaller gap but a gap that does
 not need a new run: RGA is re-solved at each point, 437.8~s per instance against
 0.95~s for one pass.

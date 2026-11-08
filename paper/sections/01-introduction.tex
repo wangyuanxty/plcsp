@@ -85,15 +85,15 @@ separated from that of the others. Third, a top-level rule selector makes only
 four to thirteen decisions per episode. The sample is small, and a
 counterfactual baseline must generalize to actions that were not taken.
 
-This paper studies a controller that responds to the three difficulties with a
+This paper studies our model, which responds to the three difficulties with a
 shared architecture. Three actor networks make the operation, machine, and AGV
-decisions. The operation and machine agents use a dual Set Transformer, whose
-machine encoder groups its features into three views and applies attention
-within a machine before it applies attention across machines. We train the
+decisions. Each of the three shop agents encodes its own candidates with a
+Set Transformer. The machine encoder groups its features into three views and
+applies attention within a machine before it applies attention across machines. We train the
 agents with a shared group-relative advantage and no value critic, and a
 top-level policy selects a rule prior for each agent every eight low-level
 steps, where each rule head receives the change of its own agent's cost. We
-refer to the controller as H-ST-GRPO.
+refer to our model as H-ST-GRPO.
 
 Each design choice is driven by one of these difficulties. The Set Transformer’s permutation invariance 
 allows the same weights to be used regardless of the number of operations or machines. 
@@ -105,21 +105,24 @@ level with a signal unavailable from a shared return. Overall, this paper makes 
 
 
 \begin{enumerate}
-\item \emph{A multi-agent controller for joint production and logistics
+\item \emph{A multi-agent model for joint production and logistics
 scheduling across workshops.} The operation, machine, and vehicle decisions
 are produced by three actor networks in one step, so the transport decision is
 coupled to the machine decision that creates it. For a cross-workshop job, a single AGV agent selects 
 the source vehicle before the transfer and the target vehicle after the transfer between the stations.
 
-\item \emph{A dual Set Transformer encoder with machine-internal grouping.}
-The machine encoder projects the three feature groups separately, first compares them within each machine, 
-and then compares across machines. Since no position embedding is used, the encoder applies the same 
+\item \emph{Set Transformer encoders with machine-internal grouping.}
+The three shop agents each encode their own candidate set with a Set
+Transformer: two blocks for the operation actor, one for the AGV actor, and
+the grouped machine encoder for the machine actor.
+The machine encoder projects the three feature groups separately, first compares them within each machine,
+and then compares across machines. Since no position embedding is used, the encoder applies the same
 weights regardless of the number of operations, machines, and vehicles.
 
 \item \emph{A group-relative update for three heterogeneous agents.} The three
 shop actors are trained with one group-relative
 advantage~\cite{shao2024grpo}: The episodic team return is normalized within the group, 
-and the low level uses neither a value critic, a reference model, nor a KL penalty. With the same
+and the low level uses no value critic. With the same
 architecture and budget, this beats PPO by 72.98 at $6\times6$ under the
 protocol of Wang et al., by 98.38 under the full protocol, and by 56.02 at
 $10\times6$.
@@ -133,18 +136,17 @@ $10\times6$, and the rule it selects shifts within an episode as the partial
 schedule fills.
 \end{enumerate}
 
-We compare the controller with rule-based,
+We compare our model with rule-based,
 metaheuristic, and adapted DRL baselines on the same instances,
 against the same objective and under the same transport model. We report the
 objective and the run time of every method, the per-instance spread, and the
 scope of the transport model. One schedule takes about 0.95~s per instance.
 We also stop one machine for a repair in the middle of the schedule, to see
-what a controller that re-decides at every step does when a resource it has
+what a model that re-decides at every step does when a resource it has
 already used becomes unavailable. The weights are an input of the policy, so we
 also evaluate one policy at nine weight points without retraining it.
 
 The rest of the paper is organized as follows. Section~\ref{sec:related}
 reviews related work. Section~\ref{sec:problem} defines the problem,
-the transport model, and the objective. Section~\ref{sec:method} presents the
-controller. Section~\ref{sec:experiments} reports the experiments.
+the transport model, and the objective. Section~\ref{sec:method} presents our model. Section~\ref{sec:experiments} reports the experiments.
 Section~\ref{sec:conclusion} concludes.
