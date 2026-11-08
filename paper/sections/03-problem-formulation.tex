@@ -1,7 +1,7 @@
 \section{Problem Definition}
 \label{sec:problem}
 
-\subsection{Shop configuration}
+\subsection{Workshop configuration}
 
 We consider a job shop with $J$ jobs and $M$ machines. Each job $j$ consists
 of $O$ operations that must be processed in a fixed order. Operation $o$ of
@@ -17,7 +17,7 @@ The machines are partitioned into $W$ workshops. Workshop $w$ owns a fleet
 $\mathcal{A}_w$ of automated guided vehicles (AGVs). An AGV remains in its
 home workshop for the whole episode and carries one load at a time.
 
-Table~\ref{tab:notation} lists the notation used in the paper.
+Table~\ref{tab:notation} lists the notation used in this paper.
 
 \begin{table}[t]
 \centering
@@ -28,7 +28,7 @@ Table~\ref{tab:notation} lists the notation used in the paper.
 \toprule
 Symbol & Meaning \\
 \midrule
-$J$, $O$, $M$, $W$ & jobs, operations per job, machines, workshops \\
+$J$, $O$, $M$, $W$ & number of jobs, operations per job, machines, workshops \\
 $\mathcal{M}_{j,o}$ & eligible machines of operation $(j,o)$ \\
 $t_{j,o,m}$, $p_{j,o,m}$ & processing time and power \\
 $e_{j,o,m}$ & processing energy \\
@@ -149,7 +149,7 @@ number of machines.
 
 \subsection{Assumptions}
 
-We make the following assumptions.
+We make the following assumptions:
 \begin{itemize}
 \item[(A1)] AGVs are assigned to workshops and do not move between
 workshops.
@@ -158,8 +158,7 @@ shop at the station of the workshop that hosts its first operation, and
 a cross-workshop transport goes from the source machine to the source
 station, transfers between the two stations, and continues from the
 target station to the target machine.
-\item[(A3)] AGVs are single-load. Loading and unloading take zero time.
-There is no charging and no AGV failure.
+\item[(A3)] AGVs are assumed to be single-load, with negligible loading/unloading times and no charging events.
 \item[(A4)] The transport term of \eqref{eq:objective} counts loaded and
 empty AGV travel; empty travel is charged at $\rho_e=0.5$ of the loaded
 power. AGV waiting is not charged.
@@ -168,7 +167,7 @@ a source AGV that has stopped at its station.
 \end{itemize}
 
 Assumptions (A1)--(A2) define the transport model. Assumptions (A3)--(A5)
-are scope limits; Section~\ref{sec:experiments} states their effect on the
+are scope limits. Section~\ref{sec:experiments} states their effect on the
 reported numbers.
 
 \subsection{Decision process}

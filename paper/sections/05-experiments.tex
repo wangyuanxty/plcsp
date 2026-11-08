@@ -6,14 +6,13 @@
 
 We use three instance families: $6\times6\times2$ (six jobs, six machines,
 two workshops), $10\times6\times2$, and $10\times10\times2$. Each family has
-100 test instances. All
-methods are evaluated on the same instances, with the weights fixed to
+100 test instances. All methods are evaluated on the same instances, with the weights fixed to
 $(0.4,0.4,0.2)$ in \eqref{eq:objective}. The learned policies are evaluated
-greedily. Each learned method is trained with three seeds; the reported value
+greedily. Each learned method is trained with three seeds and the reported value
 is the mean of the three seed-level test means. Rule-based and
 metaheuristic baselines are deterministic given their own seed.
 
-The controller, the ablations and the retrained baseline of Wang et al. use 200 training
+The controller, the ablations and the retrained baseline of Wang et al.~\cite{wang2025multitarget} use 200 training
 episodes; Li et al.\ uses the budget of its own paper, as noted below. The group
 size
 is 8, the instance batch is resampled every 8 episodes, and the learning rate
@@ -49,7 +48,13 @@ comparable with those reported there.
 
 \subsection{Baselines}
 
-The baselines are adaptations of published methods, not reproductions. Two of the papers release no code; those baselines are written from the paper and are labelled as adapted below. Every baseline is evaluated on the same instances and the same objective as the controller. The ablation study of Section~\ref{sec:ablations} uses the transport protocol of Wang et al.~\cite{wang2025multitarget} -- no AGV fleet, machine-to-machine travel, loaded travel only -- which is the protocol of their released code; Section~\ref{sec:published-values} explains why those values are not placed beside the published ones.
+The baselines are adaptations of published methods, not reproductions. Since two of the papers release no code, 
+the corresponding baselines were reproduced from the paper descriptions and are marked as adapted below. 
+Every baseline is evaluated on the same instances and the same objective as the controller. 
+The ablation study of Section~\ref{sec:ablations} uses the transport protocol of 
+Wang et al.~\cite{wang2025multitarget} -- no AGV fleet, machine-to-machine travel, 
+loaded travel only -- which is the protocol of their released code; 
+Section~\ref{sec:published-values} explains why those values are not placed beside the published ones.
 
 \paragraph{Rule-based (PDR)} A priority dispatching rule combines six job rules (FIFO,
 MOR, and the most- and least-work-remaining forms on processing time and on
