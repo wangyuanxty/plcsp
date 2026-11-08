@@ -113,8 +113,13 @@ Since each machine is charged from time zero to the makespan and idle power is
 constant and normalized to one, this term counts every idle interval before,
 between, and after its operations, and \Eidle{} equals the total idle time.
 
-Let $\Ttrans$ be the loaded travel time plus $\rho_e$ times the empty travel
-time, summed over all transports. The
+Let
+\begin{equation}
+\Ttrans=\sum_{k}\left(\ell_k+\rho_e\,e_k\right),
+\label{eq:trans}
+\end{equation}
+where $\ell_k$ and $e_k$ are the loaded and empty travel times of transport
+$k$. The
 scalar objective is
 \begin{equation}
 F=w_{1}\Cmax+w_{2}\left(\Eproc+\Eidle\right)+w_{3}\Ttrans,
