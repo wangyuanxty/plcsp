@@ -4,13 +4,13 @@ and the transportation resource used. The three choices are coupled because a ma
 vehicle while a busy vehicle delays the next operation. The objective weighs
 makespan, energy, and transport time. The joint optimization of these three decisions is nontrivial, 
 since the candidate sets vary in size across steps and the three decisions share a common return. 
-To address this challenge, we build a controller that
+To address this challenge, we build a multi-agent model that
 makes the three decisions in one step with four agents: a rule selector and
 three shop actors. Each of the three actors encodes its own candidates with a
 Set Transformer. Training of the low-level agents relies on a shared group-relative advantage and 
-omits the critic and a higher-level policy periodically assigns a rule prior to each agent. The
+omits the critic, and a higher-level policy periodically assigns a rule prior to each agent. The
 weights are an input, so one policy covers the weight surface without
 retraining. It achieves objective values $19\%$ to $45\%$ lower than those of the rule-based dispatch and 
 the adapted DRL baselines across all problem sizes. 
-The controller outperforms the genetic algorithm on large instances, finding solutions in seconds rather than minutes. 
+Our model outperforms the genetic algorithm on large instances, finding solutions in seconds rather than minutes. 
 Ablation experiments demonstrate the effectiveness of both the Set Transformer machine encoder and the critic-free update.

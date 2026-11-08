@@ -3,11 +3,11 @@
 
 \subsection{Overview}
 
-The controller makes three decisions at every low-level step: which operation
+Our model makes three decisions at every low-level step: which operation
 to schedule next, on which machine, and with which AGV. Each decision is
 produced by its own agent. A top-level policy selects one rule for each
 agent every $\Delta T$ low-level steps. The selected rules bias the low-level
-agents; they do not replace them. We refer to the resulting controller as
+agents; they do not replace them. We refer to the resulting model as
 H-ST-GRPO. Figure~\ref{fig:method} summarizes the architecture and the
 training loop.
 
@@ -45,7 +45,7 @@ is complete, a machine is feasible when the operation can be processed on it,
 and an AGV is feasible when it belongs to the required workshop.
 
 \paragraph{Multi-agent formulation}
-The controller has four agents: one rule selector and three shop agents for the
+Our model has four agents: one rule selector and three shop agents for the
 operation, machine and AGV decisions. The three shop agents are separate
 actor networks, each with its own action space and its own candidate encoding;
 the selector is a policy over rule heads that biases their action space. All
@@ -259,7 +259,7 @@ overlap, the sum of the three does not equal $F$, and $W_{\mathrm{agv}}$ is
 not an objective term at all. They are signals that
 attribute a cost change to the agent whose action is most directly related to
 it. Section~\ref{sec:experiments} reports the effect of the selector against
-the same controller without it.
+the same model without it.
 
 \subsection{Training}
 
@@ -329,6 +329,6 @@ $O(n_j d + M d + A d)$ in memory, where $d$ is the embedding width. An
 episode contains $JO$ steps. A low-level update processes $G$ episodes for
 four epochs. The top level processes between four and thirteen decisions per
 episode, depending on the instance size.
-The controller therefore scales linearly in the number of episodes and
+Our model therefore scales linearly in the number of episodes and
 quadratically in the largest candidate set, not in the product of the three
 candidate sets.

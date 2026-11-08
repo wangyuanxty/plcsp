@@ -2,7 +2,7 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented a hierarchical multi-agent controller for joint production and
+We presented a hierarchical multi-agent model for joint production and
 logistics scheduling in a flexible job shop with several workshops. Four
 agents carry it: a rule selector sets a rule prior every few steps, and three
 shop agents make the operation, machine, and AGV decisions; a dual Set
@@ -12,15 +12,14 @@ group-relative
 advantage and no critic.
 
 Our experiments show that the encoder and the multi-actor update each improve
-over their respective baselines, and that our controller is fast enough for
+over their respective baselines, and that our model is fast enough for
 interactive use. Its objective is lower than that of the fixed dispatching
 rules and of the adapted DRL baselines at every size. Against RGA the outcome
 depends on the size. At $6\times6$ RGA returns a 12.2\%
-lower objective; at $10\times6$ the paired test does not separate the
-controller from RGA; at the largest size the controller is 20.1\% ahead. That
+lower objective; at $10\times6$ the paired test does not separate our model from RGA; at the largest size our model is 20.1\% ahead. That
 crossover, search time in the small shop against a single pass in the large
 one, is the operating point of the method. One repair in the middle of the
-schedule separates the two further: the controller loses less than the search
+schedule separates the two further: our model loses less than the search
 does, because it can take another machine, and it ends with the lowest
 objective of the three. The weights are an input, so one policy serves nine
 weight points without retraining; its gap to the search stays between 10 and
@@ -37,7 +36,7 @@ while the learned AGV head is still better than the best fixed rule by
 
 The transport model assigns AGVs to workshops and moves a cross-workshop
 job through the two load/unload stations. Charging, failures, and load and
-unload times are outside the model. The controller is trained and tested on
+unload times are outside the model. Our model is trained and tested on
 one shop layout, with two workshops and three AGVs per workshop, and on
 instances from $6\times6$ to $10\times10$. Next we want to test larger
 instances and to add charging and failures.
