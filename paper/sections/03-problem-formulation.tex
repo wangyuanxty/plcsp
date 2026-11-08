@@ -79,11 +79,12 @@ m \;\xrightarrow{\text{AGV of }w}\; u_{w}
 \end{equation}
 where $w$ and $w'$ are the workshops of $m$ and $m'$. The transfer between
 the two stations consumes no AGV. In the experiments the machine-to-machine
-time $d_{m,m'}$ is cut into three parts: a source leg and a target leg that
-share the remaining time in equal halves, and a fixed transfer delay of five
-time units between them that consumes no AGV. A
-source-workshop AGV performs the first leg and stays at $u_w$ afterwards; a
-target-workshop AGV performs the last leg.
+time $d_{m,m'}$ is cut into three parts: the travel from the pickup machine to
+the source station, a fixed transfer delay of five time units, and the travel
+from the target station to the destination machine. The first and the last
+part share the remaining time in equal halves, and the delay consumes no AGV. A
+source-workshop AGV performs the first part and stays at $u_w$ afterwards; a
+target-workshop AGV performs the last part.
 
 The transport term of the objective counts both the loaded and the empty
 AGV travel. The empty travel is charged at a fraction $\rho_e$ of the loaded
