@@ -166,8 +166,7 @@ where
 {\pi_{\theta_{\mathrm{old}}}(a_i\mid s_i)}
 \end{equation}
 is the ratio of the summed log-probabilities of the active agents. The update
-maximizes $L_i$ over the group. At the low level, no value critic, no
-reference model, and no KL penalty are used.
+maximizes $L_i$ over the group. At the low level, no value critic is used.
 
 The weights $w$ in \eqref{eq:objective} are sampled once per group and stay
 fixed inside the group, so all returns in \eqref{eq:grpo} are comparable. At

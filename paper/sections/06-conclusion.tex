@@ -5,9 +5,8 @@
 We presented a hierarchical multi-agent model for joint production and
 logistics scheduling in a flexible job shop with several workshops. Four
 agents carry it: a rule selector sets a rule prior every few steps, and three
-shop agents make the operation, machine, and AGV decisions; a dual Set
-Transformer
-encodes the candidates; the shop agents are trained with a shared
+shop agents make the operation, machine, and AGV decisions; each shop agent
+encodes its own candidates with a Set Transformer; the shop agents are trained with a shared
 group-relative
 advantage and no critic.
 
