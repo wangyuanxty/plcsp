@@ -3,11 +3,10 @@
 
 \subsection{Overview}
 
-Our model makes three decisions at every low-level step: which operation
-to schedule next, on which machine, and with which AGV. Each decision is
+At each low-level step, our model selects an operation, a machine, and an AGV. Each decision is
 produced by its own agent. A top-level policy selects one rule for each
 agent every $\Delta T$ low-level steps. The selected rules bias the low-level
-agents; they do not replace them. We refer to the resulting model as
+agents, but they do not replace them. We refer to the resulting model as
 H-ST-GRPO. Figure~\ref{fig:method} summarizes the architecture and the
 training loop.
 
@@ -47,8 +46,8 @@ and an AGV is feasible when it belongs to the required workshop.
 \paragraph{Multi-agent formulation}
 Our model has four agents: one rule selector and three shop agents for the
 operation, machine and AGV decisions. The three shop agents are separate
-actor networks, each with its own action space and its own candidate encoding;
-the selector is a policy over rule heads that biases their action space. All
+actor networks, each with its own action space and its own candidate encoding.
+The selector is a policy over rule heads that biases their action space. All
 three shop agents
 decide at the same step (the AGV agent when a transport is needed) and receive
 one team return, and training uses a centralized group-relative advantage. This
@@ -102,8 +101,10 @@ operation of the same job is complete on a different machine.
 \subsection{Set Transformer encoders}
 
 \paragraph{Attention block}
-All encoders use the same block. For a token matrix $H\in\mathbb{R}^{n\times d}$,
-multi-head self-attention is
+All encoders use the same block. For a token matrix $H\in\mathbb{R}^{n\times d}$, where $n$ is the number of
+tokens in the encoded set, $d$ is the per-token embedding width,
+$W_{Q},W_{K},W_{V}$ are learned query, key, and value projections, and
+$d_k=d/h$ is the per-head dimension for $h$ heads, multi-head self-attention is
 \begin{equation}
 \operatorname{Attn}(H)=\operatorname{softmax}\!\left(
 \frac{(HW_Q)(HW_K)^{\top}}{\sqrt{d_k}}\right)(HW_V),
@@ -154,18 +155,26 @@ under the weights of the group. The group advantage is
 {\operatorname{std}(R_{1:G})+\epsilon}.
 \label{eq:grpo}
 \end{equation}
-The same $\hat{A}_i$ is used by the job, machine, and AGV agents. Each agent
+where $\epsilon$ is a small positive constant that keeps the denominator
+non-zero when all group returns coincide. The same $\hat{A}_i$ is used by the
+job, machine, and AGV agents. Each agent
 maximizes the clipped objective
 \begin{equation}
 L_i=\min\left(\rho_i\hat{A}_i,\
 \operatorname{clip}(\rho_i,1-\epsilon_c,1+\epsilon_c)\hat{A}_i\right),
 \end{equation}
-where
+where $\operatorname{clip}(x,a,b)=\min(\max(x,a),b)$ is the clamp and
+$\epsilon_c\in(0,1)$ is the bandwidth that bounds $\rho_i$ to
+$[1-\epsilon_c,1+\epsilon_c]$ within one update, and where
 \begin{equation}
 \rho_i=\frac{\pi_\theta(a_i\mid s_i)}
 {\pi_{\theta_{\mathrm{old}}}(a_i\mid s_i)}
 \end{equation}
-is the ratio of the summed log-probabilities of the active agents. The update
+is the ratio of the joint action probabilities of the active agents under the
+current policy $\pi_\theta$ and the behavior policy
+$\pi_{\theta_{\mathrm{old}}}$, the parameter snapshot taken when the group was
+sampled; equivalently, it is the exponential of the difference of the summed
+log-probabilities of the active agents under the two policies. The update
 maximizes $L_i$ over the group. At the low level, no value critic is used.
 
 The weights $w$ in \eqref{eq:objective} are sampled once per group and stay
@@ -173,7 +182,7 @@ fixed inside the group, so all returns in \eqref{eq:grpo} are comparable. At
 evaluation the weights are fixed to $(0.4,0.4,0.2)$.
 
 Sharing one advantage across agents keeps the team objective. It does not
-distinguish the contribution of each agent; the next subsection adds a
+distinguish the contribution of each agent. The next subsection adds a
 per-agent cost signal at the top level.
 
 \subsection{Top-level rule selection}
@@ -223,15 +232,16 @@ low-level agent,
 \end{equation}
 where $\ell_i$ are the logits of agent $i$ and $\alpha=0.5$. The low-level
 agents keep the final decision, so the rule acts as a prior rather than a hard
-constraint. Every rule adds a non-zero bias; there is no ``no rule'' arm.
+constraint. Each rule is associated with a non-zero bias, so the action set does not contain a ``no rule'' arm.
 
 The top-level reward of segment $k$ is the negative change of the weighted
 cost,
 \begin{equation}
 r_k=-\left(F_{k+1}-F_k\right),
 \end{equation}
-and the top-level policy is updated with PPO and generalized advantage
-estimation. The top-level state includes the current weights, so the selector
+where $F_k$ is the objective \eqref{eq:objective} evaluated on the partial
+schedule at the end of segment $k$, and the top-level policy is updated with
+PPO and generalized advantage estimation. The top-level state includes the current weights, so the selector
 can condition the rule on the objective. This shared reward gives every agent
 the same signal; the next subsection replaces it with a cost per agent.
 
@@ -324,7 +334,9 @@ One low-level step evaluates the job encoder on $n_j$ operation tokens, the
 machine encoder on $3M$ machine-feature tokens plus the machine set, and the
 AGV encoder on the vehicles of one workshop. With attention, the cost of a
 step is $O(n_j^2 d + M^2 d + A^2 d)$ in time and
-$O(n_j d + M d + A d)$ in memory, where $d$ is the embedding width. An
+$O(n_j d + M d + A d)$ in memory, where $n_j$ is the number of unscheduled
+operations, $A$ is the number of AGVs of one workshop, and $d$ is the
+embedding width. An
 episode contains $JO$ steps. A low-level update processes $G$ episodes for
 four epochs. The top level processes between four and thirteen decisions per
 episode, depending on the instance size.

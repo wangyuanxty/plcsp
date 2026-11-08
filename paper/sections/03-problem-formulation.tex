@@ -42,6 +42,7 @@ $\Eproc$ & mean processing energy \\
 $\Eidle$ & idle energy (idle time at unit power) \\
 $\Ttrans$ & loaded transport time \\
 $w_1,w_2,w_3$ & objective weights \\
+$F$ & weighted objective \\
 $\pi_\theta$ & joint policy \\
 $\hat{A}_i$ & group-relative advantage of episode $i$ \\
 $z_k$, $u_k$ & top-level state and rule triple of segment $k$ \\
@@ -100,7 +101,8 @@ The mean processing energy is
 \begin{equation}
 \Eproc=\frac{1}{JO}\sum_{j=1}^{J}\sum_{o=1}^{O} e_{j,o,m(j,o)},
 \end{equation}
-where $m(j,o)$ is the machine assigned to operation $(j,o)$.
+where $JO=J\times O$ is the total number of operations and $m(j,o)$ is the
+machine assigned to operation $(j,o)$.
 
 Let $\mathcal{O}_m$ be the set of operations assigned to machine $m$. The
 idle energy is
