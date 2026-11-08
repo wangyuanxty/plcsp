@@ -86,9 +86,8 @@ part share the remaining time in equal halves, and the delay consumes no AGV. A
 source-workshop AGV performs the first part and stays at $u_w$ afterwards; a
 target-workshop AGV performs the last part.
 
-The transport term of the objective counts both the loaded and the empty
-AGV travel. The empty travel is charged at a fraction $\rho_e$ of the loaded
-power, $\rho_e=0.5$ in the experiments.
+The transport term in the objective function accounts for both loaded and empty AGV travel. 
+The empty travel is charged at a fraction $\rho_e$ of the loaded power, with $\rho_e=0.5$ set in our experiments.
 
 \subsection{Objectives}
 
@@ -110,10 +109,9 @@ idle energy is
 \Cmax-\sum_{(j,o)\in\mathcal{O}_m} t_{j,o,m}\right).
 \label{eq:idle}
 \end{equation}
-Every machine is charged from time zero to the makespan, so the term counts
-the gaps before and between its operations and the tail after the last one.
-Idle power is constant and normalized to one, so \Eidle{} equals the total
-idle time; the two terms are used interchangeably. The reading differs from
+Since each machine is charged from time zero to the makespan, this term accounts for all idle intervals before, 
+between, and after its operations. Idle power is constant and normalized to one, so \Eidle{} equals the total
+idle time. The two terms are used interchangeably. The reading differs from
 the sum of the gaps alone, which stops at the last operation on each machine;
 Section~\ref{sec:experiments} states which reading the baselines use.
 
