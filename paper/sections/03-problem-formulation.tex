@@ -109,10 +109,12 @@ idle energy is
 \Cmax-\sum_{(j,o)\in\mathcal{O}_m} t_{j,o,m}\right).
 \label{eq:idle}
 \end{equation}
-Since each machine is charged from time zero to the makespan, this term accounts for all idle intervals before, 
-between, and after its operations. Idle power is constant and normalized to one, so \Eidle{} equals the total
-idle time. The reading differs from the sum of the gaps alone, which stops at the last operation on each machine;
-Section~\ref{sec:experiments} states which reading the baselines use.
+Since each machine is charged from time zero to the makespan and idle power is
+constant and normalized to one, this term counts every idle interval before,
+between, and after its operations, and \Eidle{} equals the total idle time.
+This reading differs from the sum of the gaps alone, which stops at the last
+operation on each machine; Section~\ref{sec:experiments} states which
+reading the baselines use.
 
 Let $\Ttrans$ be the loaded travel time plus $\rho_e$ times the empty travel
 time, summed over all transports. The
