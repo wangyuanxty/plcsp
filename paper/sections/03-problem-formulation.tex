@@ -126,22 +126,21 @@ F=w_{1}\Cmax+w_{2}\left(\Eproc+\Eidle\right)+w_{3}\Ttrans,
 \label{eq:objective}
 \end{equation}
 with $w_{1}+w_{2}+w_{3}=1$. We evaluate with $(w_1,w_2,w_3)=(0.4,0.4,0.2)$.
-During training the weights are sampled at random and are fixed within a
+During training, the weights $(w_1,w_2,w_3)$ are sampled at random and are fixed within a
 group of rollouts (Section~\ref{sec:method}).
 
 The three terms have different scales. Makespan and transport time are in
-time units, and processing and idle energy are in energy units. The weights
+time units, processing and idle energy are in energy units. The weights $(w_1,w_2,w_3)$
 set the trade-off.
 
-The idle energy reduces to the makespan and the total processing time. With
-the reading of \eqref{eq:idle}, every machine is charged from time zero to the
-makespan, so
+The idle energy reduces to the makespan and the total processing time. According to \eqref{eq:idle}, 
+every machine is charged from time zero to the makespan, so
 \begin{equation}
-\Eidle=M\,\Cmax-\sum_{j,o} t_{j,o,m(j,o)}.
+\Eidle=M\,\Cmax-\sum_{j,o} t_{j,o,m(j,o)},
 \label{eq:idlelinear}
 \end{equation}
-It depends on the sequence through the makespan and on the assignment through
-the total processing time. It does not depend on how the gaps are distributed:
+which depends on the sequence through the makespan and the assignment through
+the total processing time. But it does not depend on how the gaps are distributed:
 two schedules with the same makespan and the same total processing time have
 the same idle energy. Substituting \eqref{eq:idlelinear} in
 \eqref{eq:objective}, the coefficient of the makespan is $w_1+w_2M$ and not
@@ -174,18 +173,17 @@ reported numbers.
 
 \subsection{Decision process}
 
-The schedule is constructed in $JO$ low-level steps. At step $t$, the state
+The schedule is constructed in $J \times O$ low-level steps. At step $t$, the state
 $s_t$ contains the partial disjunctive graph, the machine routes, the AGV
 states, and the current weights. The action is a triple
-$a_t=(a^{\mathrm{job}}_t,a^{\mathrm{mach}}_t,a^{\mathrm{agv}}_t)$. The
-operation is chosen from the unscheduled operations whose predecessor is
-complete, the machine from the eligible machines of that operation, and the
-AGV from the AGVs of the source workshop when a transport is needed, or from
-the target workshop when the transport crosses a workshop boundary.
+$a_t=(a^{\mathrm{job}}_t,a^{\mathrm{mach}}_t,a^{\mathrm{agv}}_t)$. 
+At each step, an operation is selected from unscheduled operations whose predecessors are complete, 
+a machine is chosen from the machines eligible for that operation, and, if transport is required, 
+an AGV is selected from the source workshop for intra-workshop moves or from the target workshop for cross-workshop moves.
 
 A transition applies the assignment, inserts the operation into the machine
 route, updates the AGV states, and returns the next state. One episode ends
-after $JO$ steps, and the return is the negative objective
+after $J \times O$ steps, and the return is the negative objective
 \eqref{eq:objective} under the weights of the episode.
 
 At step $t$ the number of joint actions is
