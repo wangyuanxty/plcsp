@@ -34,12 +34,27 @@ to earliest finish. At $10\times6$ the selector's mean effect falls to 1.3\%,
 while the learned AGV head is still better than the best fixed rule by
 7.3\%.
 
+Three questions frame the practice: how the decisions are split, how the
+policy is trained, and when the schedule is rebuilt. On the first, the three
+decisions are coupled, so a planner cannot treat vehicle dispatching as a
+separate subproblem; a schedule that improves machine utilization alone leaves
+either machines waiting for vehicles or vehicles running empty. On the second,
+the three shop agents share one team return from the plant objective, so no
+reward has to be defined for each agent and no value critic is needed; reward
+design appears only at the top level, where each rule head receives the change
+of its own local cost. Because the weights enter the state, one policy covers a
+range of priorities without retraining. On the third, the choice between search
+and a learned policy follows the scale of the shop and how often the schedule is
+rebuilt: search pays off in a small shop with a one-off plan, while the policy
+pays off in a large shop, or when disruptions and priority changes force
+frequent re-scheduling. The three answers support each other: the joint model
+gives the policy the full state, the shared return removes per-agent critics,
+and a low re-scheduling cost makes frequent updates practical.
+
 The transport model assigns AGVs to workshops and moves a cross-workshop
-job through the two load/unload stations. Charging, failures, and load and
-unload times are outside the model. Our model is trained and tested on
+job through the two load/unload stations. Our model is trained and tested on
 one shop layout, with two workshops and three AGVs per workshop, and on
-instances from $6\times6$ to $10\times10$. Next we want to test larger
-instances and to add charging and failures.
+instances from $6\times6$ to $10\times10$.
 
 \section*{Data availability}
 

@@ -7,11 +7,14 @@ The performance of a multi-workshop system depends not only on how machines are 
 on how AGVs are dispatched and coordinated across different workshops. Besides, 
 little attention has been paid to multi-workshop environments with AGVs, where jobs must be transferred 
 across different workshops. This creates a non-trivial decision problem: whether to send a job from the 
-current workshop immediately, or to wait for a job sended from the other workshop. 
+current workshop immediately, or to wait for a job sent from the other workshop. 
 Existing research on integrated production and transportation scheduling has mainly focused on 
 single-workshop settings, where the interaction between production resources and AGVs is relatively 
-straightforward. Nevertheless, real-world factory operations often involve multiple workshops, 
-in which jobs must be transferred across different departments or workshop zones.
+straightforward. Nevertheless, real-world factory operations often involve
+multiple workshops: automotive parts plants move jobs between machining and
+assembly shops, consumer electronics plants between fabrication and test shops,
+and semiconductor fabs between process bays. In all of them, jobs must be
+transferred across workshop boundaries.
 
 Consider a factory with two workshops and six machines, where a job is processed
 on a machine in the first workshop and then on a machine in the second. The
@@ -101,39 +104,36 @@ Machine-internal grouping keeps the token count linear in the number of machines
 to compare the three feature views of a machine before comparing across machines. 
 Group-relative advantage removes the critic, which offers the least target information here. 
 A rule prior gives low-level agents a coarse action space to explore, and per-agent costs provide the top 
-level with a signal unavailable from a shared return. Overall, this paper makes four contributions:
+level with a signal unavailable from a shared return. Overall, this paper makes three contributions:
 
 
 \begin{enumerate}
-\item \emph{A multi-agent model for joint production and logistics
-scheduling across workshops.} The operation, machine, and vehicle decisions
-are produced by three actor networks in one step, so the transport decision is
-coupled to the machine decision that creates it. For a cross-workshop job, a single AGV agent selects 
-the source vehicle before the transfer and the target vehicle after the transfer between the stations.
+\item \emph{Problem and model.} We formulate a joint production and logistics
+scheduling problem for a multi-workshop flexible job shop, in which each
+workshop operates its own vehicle fleet and jobs are transferred between
+workshops through load/unload stations. The operation, machine, and vehicle
+decisions are integrated into a sequential decision-making process.
+Specifically, the transport decision is generated at the same decision step as
+the machine decision that triggers it. For a cross-workshop job, the same AGV
+agent selects the source vehicle before the transfer and the target vehicle
+after it.
 
-\item \emph{Set Transformer encoders with machine-internal grouping.}
-The three shop agents each encode their own candidate set with a Set
-Transformer: two blocks for the operation actor, one for the AGV actor, and
-the grouped machine encoder for the machine actor.
-The machine encoder projects the three feature groups separately, first compares them within each machine,
-and then compares across machines. Since no position embedding is used, the encoder applies the same
-weights regardless of the number of operations, machines, and vehicles.
+\item \emph{Method.} We build a hierarchical multi-agent policy with four
+agents. A top-level rule-prior selector periodically chooses one rule for each
+shop agent and uses it as an action bias; each rule head receives the change of
+its own local cost. The three shop agents produce the operation, machine, and
+AGV decisions at the same step. Set Transformer encoders are used to handle
+variable-size candidate sets, with one encoder assigned to each agent. The
+machine encoder first compares features within a single machine and
+subsequently across different machines. The shop agents are trained without a
+critic and share a single group-relative advantage. Treating the weights as part
+of the state input enables one policy to cover the entire weight surface.
 
-\item \emph{A group-relative update for three heterogeneous agents.} The three
-shop actors are trained with one group-relative
-advantage~\cite{shao2024grpo}: The episodic team return is normalized within the group, 
-and the low level uses no value critic. With the same
-architecture and budget, this beats PPO by 72.98 at $6\times6$ under the
-protocol of Wang et al., by 98.38 under the full protocol, and by 56.02 at
-$10\times6$.
-
-\item \emph{A hierarchical rule selector with per-agent cost signals.} A
-top-level policy selects a rule prior for each agent every few steps. Each rule
-head receives the change of its own local cost as the reward, so the selector
-can attribute a cost change to the agent whose decision caused it. It lowers
-the objective by 3.1\% at $6\times6$ (paired $p=0.0023$) and by 1.3\% at
-$10\times6$, and the rule it selects shifts within an episode as the partial
-schedule fills.
+\item \emph{Empirical findings.} The paper evaluates joint production and
+logistics scheduling under a uniform protocol. The objective is lower than
+rule-based dispatch and adapted DRL baselines at every size. For
+decision-makers, genetic search offers greater advantages in smaller shops,
+while the policy wins in larger shops and it can return a schedule in seconds.
 \end{enumerate}
 
 We compare our model with rule-based,
