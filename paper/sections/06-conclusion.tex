@@ -2,13 +2,12 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented a hierarchical multi-agent model for joint production and
+This study proposes a hierarchical multi-agent model for joint production and
 logistics scheduling in a flexible job shop with several workshops. Four
 agents carry it: a rule selector sets a rule prior every few steps, and three
 shop agents make the operation, machine, and AGV decisions; each shop agent
 encodes its own candidates with a Set Transformer; the shop agents are trained with a shared
-group-relative
-advantage and no critic.
+group-relative advantage without critic.
 
 Our experiments show that the encoder and the multi-actor update each improve
 over their respective baselines, and that our model is fast enough for
@@ -20,7 +19,7 @@ crossover, search time in the small shop against a single pass in the large
 one, is the operating point of the method. One repair in the middle of the
 schedule separates the two further: our model loses less than the search
 does, because it can take another machine, and it ends with the lowest
-objective of the three. The weights are an input, so one policy serves nine
+objective of the three. The weights are inputs, so one policy serves nine
 weight points without retraining. At $6\times6$ its gap to the search stays
 between 10 and 19 per cent at eight of them and widens to 89 per cent when only
 transport counts; at $10\times10$ it is ahead of the search at all nine, by
@@ -51,10 +50,10 @@ frequent re-scheduling. The three answers support each other: the joint model
 gives the policy the full state, the shared return removes per-agent critics,
 and a low re-scheduling cost makes frequent updates practical.
 
-The transport model assigns AGVs to workshops and moves a cross-workshop
-job through the two load/unload stations. Our model is trained and tested on
-one shop layout, with two workshops and three AGVs per workshop, and on
-instances from $6\times6$ to $10\times10$.
+Meanwhile, the extension of the joint scheduling framework to cross-enterprise
+supply chain coordination and its integration with organizational
+decision-making processes will be explored to further enhance the managerial
+decision-making value of the proposed dynamic scheduling method.
 
 \section*{Data availability}
 
