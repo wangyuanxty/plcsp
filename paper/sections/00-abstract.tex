@@ -1,21 +1,16 @@
-Flexible job shop scheduling is a core problem in modern manufacturing,
-especially in automotive parts production, 3C electronics assembly, and
-semiconductor wafer fabrication. These plants typically consist of multiple
-workshops, and automated guided vehicles (AGVs) are widely used to move jobs
-between them, so transport becomes part of scheduling. In these settings,
-machine availability, energy consumption, and makespan all depend on how
-processing and transportation resources are coordinated. However, existing
-work rarely considers these aspects together. Making the three decisions
-jointly is difficult. Rule-based methods commit to one dispatching policy and
-cannot adapt to the shop state. Many learning-based methods separate the
-decisions into stages. At each step the candidate sets change size, and the
-three decisions share one return, which a per-agent critic cannot attribute.
+In modern manufacturing systems, especially in multi-workshop production environments, 
+automated guided vehicles (AGVs) play a critical role in transporting jobs between machines and workshops.
+Existing flexible job shop scheduling studies largely decouple processing and transportation decisions, 
+making it difficult to jointly optimize machine availability, energy consumption, 
+and makespan under dynamically varying candidate action sets and shared rewards. Consequently, 
+rule-based methods lack adaptability, while staged learning-based methods cannot accurately 
+attribute the contribution of each decision.
 To address these challenges, we build a multi-agent model that makes decisions
 in one step with four agents: a rule selector and three shop actors. Each of
 the three actors encodes its own candidates with a Set Transformer. Training
 of the low-level agents relies on a shared group-relative advantage and omits
 the critic, and a higher-level policy periodically assigns a rule prior to
-each agent. The weights are an input, so one policy covers the weight surface
+each agent. The weights are an input, so one     policy covers the weight surface
 without retraining. It achieves objective values $19\%$ to $45\%$ lower than
 those of the rule-based dispatch and the adapted DRL baselines across all
 problem sizes, and also outperforms the genetic algorithm on large instances,

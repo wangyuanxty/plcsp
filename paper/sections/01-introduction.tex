@@ -1,8 +1,18 @@
 \section{Introduction}
 \label{sec:intro}
 
-In modern manufacturing systems, especially in multi-workshop production environments, 
-automated guided vehicles (AGVs) play a critical role in transporting jobs between machines and workshops. 
+Flexible job shop scheduling is a core problem in modern manufacturing,
+especially in automotive parts production, 3C electronics assembly, and
+semiconductor wafer fabrication. These plants typically consist of multiple
+workshops, and automated guided vehicles (AGVs) are widely used to move jobs
+between them, so transport becomes part of scheduling. In these settings, 
+machine availability, energy consumption, and makespan all depend on how
+processing and transportation resources are coordinated. However, existing
+work rarely considers these aspects together. Making the three decisions
+jointly is difficult. Rule-based methods commit to one dispatching policy and
+cannot adapt to the shop state. Many learning-based methods separate the
+decisions into stages. At each step the candidate sets change size, and the
+three decisions share one return, which a per-agent critic cannot attribute.
 The performance of a multi-workshop system depends not only on how machines are scheduled but also 
 on how AGVs are dispatched and coordinated across different workshops. Besides, 
 little attention has been paid to multi-workshop environments with AGVs, where jobs must be transferred 
