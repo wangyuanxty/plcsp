@@ -12,7 +12,11 @@ work rarely considers these aspects together. Making the three decisions
 jointly is difficult. Rule-based methods commit to one dispatching policy and
 cannot adapt to the shop state. Many learning-based methods separate the
 decisions into stages. At each step the candidate sets change size, and the
-three decisions share one return, which a per-agent critic cannot attribute.
+three decisions share one return, which a per-agent critic cannot attribute. The performance of
+a multi-workshop system depends not only on how machines are scheduled 
+but also on how AGVs are dispatched and coordinated across different workshops. Besides, little attention has
+been paid to multi-workshop environments with AGVs, where
+jobs must be transferred across different workshops.
 This creates a non-trivial decision problem: whether to send a job from the
 current workshop immediately, or to wait for a job sent from the other
 workshop. Existing research on integrated production and transportation
