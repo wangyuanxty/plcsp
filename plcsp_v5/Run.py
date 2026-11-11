@@ -247,6 +247,44 @@ def experiment(
             f"credit={variant.get('top_credit', 'team')}",
             print_true=1)
 
+    # [v5] optional bfloat16 autocast for model forwards.  Activations are
+    # computed in bf16, and every floating output is cast back to fp32 so the
+    # log-probabilities, advantages and PPO ratios stay in full precision.
+    if bool(variant.get('use_bf16', 0)) and torch.cuda.is_available():
+        def _to_fp32(obj):
+            if torch.is_tensor(obj):
+                if obj.is_floating_point() and obj.dtype != torch.float32:
+                    return obj.float()
+                return obj
+            if isinstance(obj, tuple):
+                return tuple(_to_fp32(x) for x in obj)
+            if isinstance(obj, list):
+                return [_to_fp32(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: _to_fp32(v) for k, v in obj.items()}
+            return obj
+
+        def _wrap_bf16(module):
+            if module is None or getattr(module, '_bf16_wrapped', False):
+                return
+            _orig_forward = module.forward
+
+            def forward(*a, **kw):
+                with torch.autocast(device_type='cuda',
+                                    dtype=torch.bfloat16):
+                    out = _orig_forward(*a, **kw)
+                return _to_fp32(out)
+
+            module.forward = forward
+            module._bf16_wrapped = True
+
+        for _m in (ppo.job_actor, ppo.machine_actor_gcn, ppo.global_critic,
+                   getattr(ppo, 'agv_actor', None)):
+            _wrap_bf16(_m)
+        if top_ctl is not None:
+            _wrap_bf16(top_ctl.model)
+        Logger.log("Training/bf16", "bfloat16 autocast enabled", print_true=1)
+
     # [v5] resume from a full checkpoint (models + optimizers + schedulers)
     resume_episode = 0
     if variant.get('resume_ckpt'):

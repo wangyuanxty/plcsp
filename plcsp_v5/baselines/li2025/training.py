@@ -110,7 +110,8 @@ def resolve_train_instances(n_job: int, n_machine: int, n_edge: int,
 
 
 def train(policy: PolicyBundle, instances: list[Instance], cfg: PPOConfig,
-          episodes: int, seed: int, log_every: int = 10) -> dict:
+          episodes: int, seed: int, log_every: int = 10,
+          n_agv: int = 6) -> dict:
     """Train the four actors/critics for ``episodes`` episodes."""
     if not instances:
         raise ValueError("empty training pool")
@@ -133,7 +134,7 @@ def train(policy: PolicyBundle, instances: list[Instance], cfg: PPOConfig,
     for episode in range(int(episodes)):
         index = int(rng.integers(len(instances)))
         result = run_episode(instances[index], policy, cfg, rng,
-                             training=True)
+                             training=True, n_agv=n_agv)
         obj_history.append(float(result.cost["obj"]))
         for agent in AGENTS:
             buffers[agent].extend(result.transitions[agent])

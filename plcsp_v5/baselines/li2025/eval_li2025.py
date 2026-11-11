@@ -274,7 +274,8 @@ def main() -> None:
         if args.train_episodes > 0:
             training_info = train(policy, train_instances, cfg,
                                   args.train_episodes, args.seed,
-                                  log_every=args.log_every)
+                                  log_every=args.log_every,
+                                  n_agv=args.n_agv)
             training_info["train_source"] = train_source
             training_info["n_train_pool"] = n_train
             meta = {
