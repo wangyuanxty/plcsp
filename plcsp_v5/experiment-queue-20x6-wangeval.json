@@ -1,0 +1,97 @@
+{
+  "jobs": [
+    {
+      "id": "E_wang_s1",
+      "script": "eval_st_seed3.py",
+      "args": [
+        "--n_job",
+        "20",
+        "--n_machine",
+        "6",
+        "--n_edge",
+        "3",
+        "--encoder_type",
+        "e2e",
+        "--use_agv",
+        "1",
+        "--agv_rule",
+        "1",
+        "--n_agv",
+        "9",
+        "--lu_station",
+        "1",
+        "--agv_dst_actor",
+        "1",
+        "--run_tag",
+        "wang_J20M6E3_s1_local"
+      ],
+      "env": {
+        "EVAL_ENCODER": "e2e",
+        "EVAL_OUTPUT_SUFFIX": "_20x6"
+      },
+      "priority": 11
+    },
+    {
+      "id": "E_wang_s2",
+      "script": "eval_st_seed3.py",
+      "args": [
+        "--n_job",
+        "20",
+        "--n_machine",
+        "6",
+        "--n_edge",
+        "3",
+        "--encoder_type",
+        "e2e",
+        "--use_agv",
+        "1",
+        "--agv_rule",
+        "1",
+        "--n_agv",
+        "9",
+        "--lu_station",
+        "1",
+        "--agv_dst_actor",
+        "1",
+        "--run_tag",
+        "wang_J20M6E3_s2_local"
+      ],
+      "env": {
+        "EVAL_ENCODER": "e2e",
+        "EVAL_OUTPUT_SUFFIX": "_20x6"
+      },
+      "priority": 11
+    },
+    {
+      "id": "E_wang_s3",
+      "script": "eval_st_seed3.py",
+      "args": [
+        "--n_job",
+        "20",
+        "--n_machine",
+        "6",
+        "--n_edge",
+        "3",
+        "--encoder_type",
+        "e2e",
+        "--use_agv",
+        "1",
+        "--agv_rule",
+        "1",
+        "--n_agv",
+        "9",
+        "--lu_station",
+        "1",
+        "--agv_dst_actor",
+        "1",
+        "--run_tag",
+        "wang_J20M6E3_s3_local"
+      ],
+      "env": {
+        "EVAL_ENCODER": "e2e",
+        "EVAL_OUTPUT_SUFFIX": "_20x6"
+      },
+      "priority": 11
+    }
+  ]
+}
