@@ -18,26 +18,27 @@ from pubstyle import (PALETTE, FigureStyle, apply_publication_style,
 
 OUT = Path(__file__).resolve().parent
 
-SIZES = [r"$6\times6\times2$", r"$10\times6\times2$", r"$10\times10\times2$"]
+SIZES = [r"$6\times6\times2$", r"$10\times6\times2$", r"$10\times10\times2$",
+         r"$20\times6\times3$"]
 
 METHODS = [
-    ("Ours", PALETTE["blue_main"], [867.75, 808.67, 1836.64],
-     [11.86, 12.83, 43.45]),
-    ("RGA", PALETTE["teal"], [762.04, 796.70, 2298.63], [0, 0, 0]),
-    ("Wang et al.", PALETTE["red_strong"], [1075.64, 1066.24, 3153.81],
-     [73.82, 102.61, 530.01]),
-    ("Li et al.", PALETTE["violet"], [1160.59, 1198.09, 2738.91],
-     [42.40, 76.91, 82.76]),
-    ("PDR", PALETTE["neutral"], [1319.24, 1461.63, 3288.35], [0, 0, 0]),
+    ("Ours", PALETTE["blue_main"], [867.75, 808.67, 1836.64, 994.55],
+     [11.86, 12.83, 43.45, 7.51]),
+    ("RGA", PALETTE["teal"], [762.04, 796.70, 2298.63, 1181.77], [0, 0, 0, 0]),
+    ("Wang et al.", PALETTE["red_strong"], [1075.64, 1066.24, 3153.81, 1229.70],
+     [73.82, 102.61, 530.01, 60.15]),
+    ("Li et al.", PALETTE["violet"], [1160.59, 1198.09, 2738.91, 1309.81],
+     [42.40, 76.91, 82.76, 126.56]),
+    ("PDR", PALETTE["neutral"], [1319.24, 1461.63, 3288.35, 1977.13], [0, 0, 0, 0]),
 ]
 
 # One y-range per panel: the families are not comparable with each other.
-YLIM = [(0, 1520), (0, 1680), (0, 3720)]
+YLIM = [(0, 1520), (0, 1680), (0, 3720), (0, 2500)]
 SHORT = ["Ours", "RGA", "Wang", "Li", "PDR"]
 
 
 def main() -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.35))
+    fig, axes = plt.subplots(1, 4, figsize=(9.4, 2.35))
 
     width = 0.78
     x = np.arange(len(METHODS))
