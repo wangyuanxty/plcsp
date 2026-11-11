@@ -160,6 +160,7 @@ parser.add_argument('--load_pth', type=parse_dict, default=run_dict["load_pth"],
 parser.add_argument('--use_load_model', type=int, default=False, help='paload_pth_parametersth') # 定义是否加载模型
 parser.add_argument('--resume_ckpt', type=str, default='', help='[v5] full checkpoint .pt to resume training from')
 parser.add_argument('--use_bf16', type=int, default=0, help='[v5] 1 = wrap model forwards in bfloat16 autocast (outputs cast back to fp32)')
+parser.add_argument('--fast_features', type=int, default=0, help='[v5] 1 = vectorized task context features (same values, new path)')
 parser.add_argument('--load_model_type', type=int, default=0, help='paload_pth_parametersth') # 0=best/top1,1=final,2=error选episode,3=top2/3
 parser.add_argument('--trained_model_pth', type=str, default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trained_model') + os.sep, help='paload_pth_parametersth')
 

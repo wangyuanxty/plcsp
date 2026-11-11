@@ -8,6 +8,7 @@ from trainer.DGenv_func import (
     machine_context_features_full,
     split_edge_matrices,
     task_context_features,
+    task_context_features_fast,
 )
 try:
     from constraints import sample_repair, buffer_mask
@@ -46,6 +47,7 @@ class Parallel_env(object):
         self.weight_type = args.get('random_weight_type', '01')
 
         self.args = args  # 为了方便传递参数设置
+        self.fast_features = bool(args.get('fast_features', 0))
 
         self.ability_instance = []  # 记录并行的ability instance的所有信息
         # TODO 新增针对不同样本的reward——scaling
@@ -411,7 +413,8 @@ class Parallel_env(object):
             t_ins = self.ability_instance[i][0]
             p_ins = self.ability_instance[i][1]
             tt_ins = self.ability_instance[i][2]
-            out[i] = task_context_features(
+            out[i] = (task_context_features_fast if self.fast_features
+                      else task_context_features)(
                 env_i.G, env_i.machine_routes, t_ins, p_ins, tt_ins,
                 self.nmachines)
         return out

@@ -416,6 +416,96 @@ def task_context_features(G, machine_routes, t_ins, p_ins, tt, n_machine):
     return out
 
 
+def task_context_features_fast(G, machine_routes, t_ins, p_ins, tt, n_machine):
+    """Vectorized twin of ``task_context_features``; same (N, 13) output."""
+    n_task = t_ins.shape[0]
+    m = int(n_machine)
+
+    sched = np.zeros(n_task, dtype=bool)
+    fin = np.zeros(n_task, dtype=np.float32)
+    dur = np.zeros(n_task, dtype=np.float32)
+    mach = np.full(n_task, -1, dtype=np.int64)
+    for t in range(n_task):
+        data = G.nodes[t + 1]
+        if data.get('scheduled'):
+            sched[t] = True
+            fin[t] = float(data.get('finish_time') or 0.0)
+        dur[t] = float(data.get('duration', 0) or 0)
+        mach[t] = int(data.get('machine', -1))
+
+    makespan = 0.0
+    for _, data in G.nodes(data=True):
+        ft = data.get('finish_time')
+        if ft is not None:
+            makespan = max(makespan, float(ft))
+
+    dur_node = np.zeros(n_task + 2, dtype=np.float32)
+    dur_node[1:n_task + 1] = dur
+    busy = np.zeros(m, dtype=np.float32)
+    for mm, route in machine_routes.items():
+        if len(route):
+            busy[mm] = float(dur_node[np.asarray(route, dtype=np.int64)].sum())
+    avg_util = float(np.mean(busy / max(makespan, 1.0)))
+    sched_ratio = float(sched.mean())
+    makespan_norm = makespan / (1.0 + makespan)
+
+    pos_t = t_ins[t_ins > 0]
+    scale_t = max(1.0, float(pos_t.max())) if pos_t.size else 1.0
+    pos_p = p_ins[p_ins > 0]
+    scale_p = max(1.0, float(pos_p.max())) if pos_p.size else 1.0
+
+    idx = np.arange(n_task)
+    op = idx % m
+    job = idx // m
+    elig = t_ins > 0
+    cnt = elig.sum(axis=1)
+    has = cnt > 0
+    safe_cnt = np.maximum(cnt, 1)
+
+    t_min = np.where(elig, t_ins, np.inf).min(axis=1)
+    t_max = np.where(elig, t_ins, -np.inf).max(axis=1)
+    t_sum = np.where(elig, t_ins, 0.0).sum(axis=1)
+    p_min = np.where(elig, p_ins, np.inf).min(axis=1)
+    p_max = np.where(elig, p_ins, -np.inf).max(axis=1)
+    p_sum = np.where(elig, p_ins, 0.0).sum(axis=1)
+
+    earliest = np.zeros(n_task, dtype=np.float32)
+    prev_ok = (op > 0) & has
+    if prev_ok.any():
+        prev = idx - 1
+        prev_m = mach[prev]
+        ok = prev_ok & sched[prev] & (prev_m >= 0)
+        if ok.any():
+            tt_rows = tt[np.clip(prev_m, 0, m - 1)]
+            mn = np.where(elig, tt_rows, np.inf).min(axis=1)
+            earliest = np.where(ok, fin[prev] + mn, 0.0).astype(np.float32)
+
+    fin_s = np.where(sched, fin, -np.inf).reshape(-1, m)
+    jf = fin_s.max(axis=1)
+    jf = np.where(np.isfinite(jf), jf, 0.0).astype(np.float32)
+
+    tmin = np.where(has, t_min, 0.0)
+    rem_t = np.where(~sched & has, tmin, 0.0).reshape(-1, m).sum(axis=1)
+    planned = jf[job] + rem_t[job]
+
+    out = np.zeros((n_task, 13), dtype=np.float32)
+    out[:, 0] = op / max(1, m - 1)
+    out[:, 1] = cnt / max(1, m)
+    out[:, 2] = np.where(has, t_min / scale_t, 0.0)
+    out[:, 3] = np.where(has, (t_sum / safe_cnt) / scale_t, 0.0)
+    out[:, 4] = np.where(has, t_max / scale_t, 0.0)
+    out[:, 5] = np.where(has, p_min / scale_p, 0.0)
+    out[:, 6] = np.where(has, (p_sum / safe_cnt) / scale_p, 0.0)
+    out[:, 7] = np.where(has, p_max / scale_p, 0.0)
+    out[:, 9] = makespan_norm
+    out[:, 10] = sched_ratio
+    out[:, 11] = avg_util
+    planned_scale = max(1.0, float(planned.max())) if n_task else 1.0
+    out[:, 8] = earliest / planned_scale
+    out[:, 12] = planned / planned_scale
+    return out
+
+
 def machine_context_features_full(G, machine_routes, task_idx, dur_row, tt,
                                   n_machine, p2=None, t_ins=None):
     """ST-only machine context (M, 8): the 3 base features plus five more."""
