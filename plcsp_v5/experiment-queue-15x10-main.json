@@ -66,8 +66,10 @@
         "plan15_J15M10E2_s1_local",
         "--agv_top_rule",
         "1",
-        "--env_batch",
-        "8"
+        "--use_bf16",
+        "1",
+        "--fast_features",
+        "1"
       ],
       "priority": 0,
       "env": {
@@ -186,8 +188,10 @@
         "plan15_J15M10E2_s2_local",
         "--agv_top_rule",
         "1",
-        "--env_batch",
-        "8"
+        "--use_bf16",
+        "1",
+        "--fast_features",
+        "1"
       ],
       "priority": 0,
       "env": {
@@ -306,8 +310,10 @@
         "plan15_J15M10E2_s3_local",
         "--agv_top_rule",
         "1",
-        "--env_batch",
-        "8"
+        "--use_bf16",
+        "1",
+        "--fast_features",
+        "1"
       ],
       "priority": 0,
       "env": {
