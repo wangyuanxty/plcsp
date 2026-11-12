@@ -7,6 +7,7 @@ from trainer.DGenv_func import (
     machine_context_features,
     machine_context_features_full,
     split_edge_matrices,
+    static_task_features,
     task_context_features,
     task_context_features_fast,
 )
@@ -48,6 +49,7 @@ class Parallel_env(object):
 
         self.args = args  # 为了方便传递参数设置
         self.fast_features = bool(args.get('fast_features', 0))
+        self._static_task = None
 
         self.ability_instance = []  # 记录并行的ability instance的所有信息
         # TODO 新增针对不同样本的reward——scaling
@@ -115,6 +117,11 @@ class Parallel_env(object):
 
         if self.use_agv:
             self._init_agv_states()
+
+        self._static_task = None
+        if self.fast_features:
+            self._static_task = [static_task_features(inst[0], inst[1])
+                                 for inst in self.ability_instance]
 
         # [local fix] numpy>=2 refuses ragged np.array(); log the list shape instead.
         Logger.log("Training/Parallel_env/get_batch_info", f"self.ability_instance=({len(self.ability_instance)}, {len(self.ability_instance[0])}), t[0].shape={self.ability_instance[0][0].shape}, p[0].shape={self.ability_instance[0][1].shape}, transT[0].shape={self.ability_instance[0][2].shape}", print_true=1)   # bs=1的样本数据 TODO tensor张量用size，array数组用shape，list列表用len（看大小）
@@ -413,10 +420,16 @@ class Parallel_env(object):
             t_ins = self.ability_instance[i][0]
             p_ins = self.ability_instance[i][1]
             tt_ins = self.ability_instance[i][2]
-            out[i] = (task_context_features_fast if self.fast_features
-                      else task_context_features)(
-                env_i.G, env_i.machine_routes, t_ins, p_ins, tt_ins,
-                self.nmachines)
+            if self.fast_features:
+                st = (self._static_task[i]
+                      if self._static_task is not None else None)
+                out[i] = task_context_features_fast(
+                    env_i.G, env_i.machine_routes, t_ins, p_ins, tt_ins,
+                    self.nmachines, static=st)
+            else:
+                out[i] = task_context_features(
+                    env_i.G, env_i.machine_routes, t_ins, p_ins, tt_ins,
+                    self.nmachines)
         return out
 
     def edge_split_batch(self, adj_batch):

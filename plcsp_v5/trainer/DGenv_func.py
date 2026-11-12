@@ -416,10 +416,36 @@ def task_context_features(G, machine_routes, t_ins, p_ins, tt, n_machine):
     return out
 
 
-def task_context_features_fast(G, machine_routes, t_ins, p_ins, tt, n_machine):
+def static_task_features(t_ins, p_ins):
+    """Per-task quantities that depend only on the instance (no schedule)."""
+    elig = t_ins > 0
+    cnt = elig.sum(axis=1)
+    has = cnt > 0
+    pos_t = t_ins[t_ins > 0]
+    pos_p = p_ins[p_ins > 0]
+    return {
+        "elig": elig,
+        "cnt": cnt,
+        "has": has,
+        "safe_cnt": np.maximum(cnt, 1),
+        "t_min": np.where(elig, t_ins, np.inf).min(axis=1),
+        "t_max": np.where(elig, t_ins, -np.inf).max(axis=1),
+        "t_sum": np.where(elig, t_ins, 0.0).sum(axis=1),
+        "p_min": np.where(elig, p_ins, np.inf).min(axis=1),
+        "p_max": np.where(elig, p_ins, -np.inf).max(axis=1),
+        "p_sum": np.where(elig, p_ins, 0.0).sum(axis=1),
+        "scale_t": max(1.0, float(pos_t.max())) if pos_t.size else 1.0,
+        "scale_p": max(1.0, float(pos_p.max())) if pos_p.size else 1.0,
+    }
+
+
+def task_context_features_fast(G, machine_routes, t_ins, p_ins, tt, n_machine,
+                               static=None):
     """Vectorized twin of ``task_context_features``; same (N, 13) output."""
     n_task = t_ins.shape[0]
     m = int(n_machine)
+    if static is None:
+        static = static_task_features(t_ins, p_ins)
 
     sched = np.zeros(n_task, dtype=bool)
     fin = np.zeros(n_task, dtype=np.float32)
@@ -449,25 +475,21 @@ def task_context_features_fast(G, machine_routes, t_ins, p_ins, tt, n_machine):
     sched_ratio = float(sched.mean())
     makespan_norm = makespan / (1.0 + makespan)
 
-    pos_t = t_ins[t_ins > 0]
-    scale_t = max(1.0, float(pos_t.max())) if pos_t.size else 1.0
-    pos_p = p_ins[p_ins > 0]
-    scale_p = max(1.0, float(pos_p.max())) if pos_p.size else 1.0
-
+    scale_t = static["scale_t"]
+    scale_p = static["scale_p"]
     idx = np.arange(n_task)
     op = idx % m
     job = idx // m
-    elig = t_ins > 0
-    cnt = elig.sum(axis=1)
-    has = cnt > 0
-    safe_cnt = np.maximum(cnt, 1)
-
-    t_min = np.where(elig, t_ins, np.inf).min(axis=1)
-    t_max = np.where(elig, t_ins, -np.inf).max(axis=1)
-    t_sum = np.where(elig, t_ins, 0.0).sum(axis=1)
-    p_min = np.where(elig, p_ins, np.inf).min(axis=1)
-    p_max = np.where(elig, p_ins, -np.inf).max(axis=1)
-    p_sum = np.where(elig, p_ins, 0.0).sum(axis=1)
+    elig = static["elig"]
+    cnt = static["cnt"]
+    has = static["has"]
+    safe_cnt = static["safe_cnt"]
+    t_min = static["t_min"]
+    t_max = static["t_max"]
+    t_sum = static["t_sum"]
+    p_min = static["p_min"]
+    p_max = static["p_max"]
+    p_sum = static["p_sum"]
 
     earliest = np.zeros(n_task, dtype=np.float32)
     prev_ok = (op > 0) & has

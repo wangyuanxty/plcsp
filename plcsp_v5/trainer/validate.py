@@ -12,7 +12,9 @@ from trainer.DGenv_func import (
     machine_context_features,
     machine_context_features_full,
     split_edge_matrices,
+    static_task_features,
     task_context_features,
+    task_context_features_fast,
 )
 try:
     from hierarchy.rules import (N_AGV_RULES, agv_rule_bias, job_rule_bias,
@@ -442,9 +444,16 @@ def validate_cost_gcn_jointActor_GAT(ppo, gantt_flag, data, data_index, data_typ
             use_task = bool(args.get('st_task_features', 0))
             use_edge = bool(args.get('st_edge_features', 0))
             if use_task:
-                _va_task_ctx = task_context_features(
-                    va_env.G, va_env.machine_routes, va_ability_t,
-                    va_ability_p, va_ability_tt, n_machine)
+                if args.get('fast_features', 0):
+                    _va_task_ctx = task_context_features_fast(
+                        va_env.G, va_env.machine_routes, va_ability_t,
+                        va_ability_p, va_ability_tt, n_machine,
+                        static=static_task_features(va_ability_t,
+                                                    va_ability_p))
+                else:
+                    _va_task_ctx = task_context_features(
+                        va_env.G, va_env.machine_routes, va_ability_t,
+                        va_ability_p, va_ability_tt, n_machine)
                 va_task_ctx = torch.from_numpy(
                     _va_task_ctx).float().unsqueeze(0).to(device)
             else:
