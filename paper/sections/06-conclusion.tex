@@ -2,60 +2,40 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-This study proposes a hierarchical multi-agent model for joint production and
-logistics scheduling in a flexible job shop with several workshops. Four
-agents carry it: a rule selector sets a rule prior every few steps, and three
-shop agents make the operation, machine, and AGV decisions; each shop agent
-encodes its own candidates with a Set Transformer; the shop agents are trained with a shared
-group-relative advantage without critic.
+This paper focuses on manufacturing plants with multiple workshops, such as those for automotive components 
+or 3C electronics assembly. In such flexible job-shop multi-workshop scheduling problem, 
+each workshop contains multiple machines, and workpieces are transferred between workshops 
+by the respective AGV fleets through loading/unloading stations. After a batch of workpieces enters the system, 
+each workpiece consists of a fixed sequence of multiple operations, and each operation has different 
+candidate machines as well as different processing times and power consumption. 
+Scheduling tasks are advanced through a step-by-step decision-making process: operation, machine, vehicle. 
+At each step, one operation is selected from all schedulable operations whose previous operations have been completed, 
+and a feasible machine is assigned to it. If the operation is not in the same workshop or not on the same machine 
+as its previous operation, an AGV will be selected from the fleet of the relevant workshop to handle the transportation. 
+For transfers within the same workshop, the local AGV first travels empty to the pickup machine and then 
+delivers the loaded workpiece. For cross-workshop transfers, the transportation is completed in segments 
+through the pickup machine, the source workshop loading/unloading station, the destination workshop 
+loading/unloading station, and the destination machine. This process is repeated until a complete schedule is obtained. 
+The objective is to minimize the makespan while reducing the weighted sum of processing and idle energy consumption 
+and AGV loaded transportation time.
 
-Our experiments show that the encoder and the multi-actor update each improve
-over their respective baselines, and that our model is fast enough for
-interactive use. Its objective is lower than that of the fixed dispatching
-rules and of the adapted DRL baselines at every size. Against RGA the outcome
-depends on the size. At $6\times6$ RGA returns a 12.2\%
-lower objective; at $10\times6$ the paired test does not separate our model from RGA; at the largest size our model is 20.1\% ahead. That
-crossover, search time in the small shop against a single pass in the large
-one, is the operating point of the method. One repair in the middle of the
-schedule separates the two further: our model loses less than the search
-does, because it can take another machine, and it ends with the lowest
-objective of the three. The weights are inputs, so one policy serves nine
-weight points without retraining. At $6\times6$ its gap to the search stays
-between 10 and 19 per cent at eight of them and widens to 89 per cent when only
-transport counts; at $10\times10$ it is ahead of the search at all nine, by
-11.6 to 30.6 per cent. Rule
-selection has a small and uneven effect. Rule-usage analysis shows that the
-selector is
-not a fixed rule: as the partial schedule fills, the machine rule head moves
-from minimum processing time to minimum ready time, the AGV rule head from
-earliest arrival to nearest, and the job rule head from least work remaining
-to earliest finish. At $10\times6$ the selector's mean effect falls to 1.3\%,
-while the learned AGV head is still better than the best fixed rule by
-7.3\%.
-
-In conclusion, the proposed framework is structured around three questions: 
-how decisions are decomposed, how the policy is trained, and when the schedule is rebuilt. 
-On the first, the three decisions are coupled, so a planner cannot treat vehicle dispatching as a
-separate subproblem; a schedule that improves machine utilization alone leaves
-either machines waiting for vehicles or vehicles running empty. On the second,
-the three shop agents share one team return from the plant objective, so no
-reward has to be defined for each agent and no value critic is needed. Reward
-design appears only at the top level. Each rule head receives the change
-of its own local cost. On the third, the choice between search
-and a learned policy follows the scale of the shop and how often the schedule is
-rebuilt. The three answers support each other: the joint model
-gives the policy the full state, the shared return removes per-agent critics,
-and a low re-scheduling cost makes frequent updates practical.
+We propose a hierarchical multi-agent model for joint production and logistics scheduling in a flexible job shop 
+with several workshops. Four agents carry it: a rule selector sets a rule prior every few steps, 
+and three shop agents make the operation, machine, and AGV decisions. Each shop agent encodes its own candidates 
+with a Set Transformer. The shop agents are trained with a shared group-relative advantage without critic. 
+Consequently, in this scenario, it adapts better to changes in workshop conditions than fixed dispatching rules, 
+and provides more accurate attribution than staged learning methods. Furthermore, for large-scale instances, 
+it can—within seconds rather than minutes—achieve objective values that are $19\%$–$50\%$ lower than 
+those produced by rule-based methods or DRL baselines, and which also outperform the results obtained 
+via genetic algorithms.
 
 From the perspective of production logistics scheduling managers, the following management strategies are summarized: 
-search-based approaches are better suited to small-scale job shops with static, 
-one-off schedules, while policy-based approaches are better suited to large-scale job shops and to dynamic settings 
-where disruptions and changing priorities necessitate frequent rescheduling.
-These managerial implications for production logistics scheduling are applicable to high-end manufacturing sectors, 
-such as wafer fabrication, photovoltaic wafer manufacturing, and defense equipment manufacturing.
-Future work will focus on extending the proposed joint scheduling framework to 
-cross-enterprise supply chain coordination and integrating it with organizational decision-making processes, 
-so as to further enhance the managerial decision-making value of the dynamic scheduling method.
+search-based approaches are better suited to small-scale job shops with static, one-off schedules, 
+while policy-based approaches are better suited to large-scale job shops and to dynamic settings where 
+disruptions and changing priorities necessitate frequent rescheduling. Future work will focus on extending 
+the proposed joint scheduling framework to cross-enterprise supply chain coordination and integrating it 
+with organizational decision-making processes, so as to further enhance the managerial decision-making value of the 
+dynamic scheduling method.
 
 \section*{Data availability}
 
