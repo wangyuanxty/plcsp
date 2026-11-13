@@ -39,17 +39,20 @@ On the first, the three decisions are coupled, so a planner cannot treat vehicle
 separate subproblem; a schedule that improves machine utilization alone leaves
 either machines waiting for vehicles or vehicles running empty. On the second,
 the three shop agents share one team return from the plant objective, so no
-reward has to be defined for each agent and no value critic is needed; reward
-design appears only at the top level, where each rule head receives the change
-of its own local cost. Because the weights enter the state, one policy covers a
-range of priorities without retraining. On the third, the choice between search
+reward has to be defined for each agent and no value critic is needed. Reward
+design appears only at the top level. Each rule head receives the change
+of its own local cost. On the third, the choice between search
 and a learned policy follows the scale of the shop and how often the schedule is
-rebuilt: search pays off in a small shop with a one-off plan, while the policy
-pays off in a large shop, or when disruptions and priority changes force
-frequent re-scheduling. The three answers support each other: the joint model
+rebuilt. The three answers support each other: the joint model
 gives the policy the full state, the shared return removes per-agent critics,
 and a low re-scheduling cost makes frequent updates practical.
 
+From the perspective of production logistics scheduling managers, the following management strategies are summarized: 
+search-based approaches are better suited to small-scale job shops with static, 
+one-off schedules, while policy-based approaches are better suited to large-scale job shops and to dynamic settings 
+where disruptions and changing priorities necessitate frequent rescheduling.
+These managerial implications for production logistics scheduling are applicable to high-end manufacturing sectors, 
+such as wafer fabrication, photovoltaic wafer manufacturing, and defense equipment manufacturing.
 Future work will focus on extending the proposed joint scheduling framework to 
 cross-enterprise supply chain coordination and integrating it with organizational decision-making processes, 
 so as to further enhance the managerial decision-making value of the dynamic scheduling method.
