@@ -1,7 +1,7 @@
 {
   "jobs": [
     {
-      "id": "T_wang_s1",
+      "id": "T_wang15_s1",
       "script": "Run.py",
       "args": [
         "--n_job",
@@ -51,17 +51,16 @@
         "--run_tag",
         "wang_J15M10E2_s1_local",
         "--fast_features",
-        "1",
-        "--use_bf16",
         "1"
       ],
       "priority": 10,
       "env": {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
-      }
+      },
+      "after": []
     },
     {
-      "id": "E_wang_s1",
+      "id": "E_wang15_s1",
       "script": "eval_st_seed3.py",
       "args": [
         "--n_job",
@@ -87,15 +86,15 @@
       ],
       "env": {
         "EVAL_ENCODER": "e2e",
-        "EVAL_OUTPUT_SUFFIX": "_20x6"
+        "EVAL_OUTPUT_SUFFIX": "_15x10"
       },
       "after": [
-        "T_wang_s1"
+        "T_wang15_s1"
       ],
       "priority": 11
     },
     {
-      "id": "T_wang_s2",
+      "id": "T_wang15_s2",
       "script": "Run.py",
       "args": [
         "--n_job",
@@ -145,17 +144,16 @@
         "--run_tag",
         "wang_J15M10E2_s2_local",
         "--fast_features",
-        "1",
-        "--use_bf16",
         "1"
       ],
       "priority": 10,
       "env": {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
-      }
+      },
+      "after": []
     },
     {
-      "id": "E_wang_s2",
+      "id": "E_wang15_s2",
       "script": "eval_st_seed3.py",
       "args": [
         "--n_job",
@@ -181,15 +179,15 @@
       ],
       "env": {
         "EVAL_ENCODER": "e2e",
-        "EVAL_OUTPUT_SUFFIX": "_20x6"
+        "EVAL_OUTPUT_SUFFIX": "_15x10"
       },
       "after": [
-        "T_wang_s2"
+        "T_wang15_s2"
       ],
       "priority": 11
     },
     {
-      "id": "T_wang_s3",
+      "id": "T_wang15_s3",
       "script": "Run.py",
       "args": [
         "--n_job",
@@ -239,17 +237,16 @@
         "--run_tag",
         "wang_J15M10E2_s3_local",
         "--fast_features",
-        "1",
-        "--use_bf16",
         "1"
       ],
       "priority": 10,
       "env": {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
-      }
+      },
+      "after": []
     },
     {
-      "id": "E_wang_s3",
+      "id": "E_wang15_s3",
       "script": "eval_st_seed3.py",
       "args": [
         "--n_job",
@@ -275,10 +272,10 @@
       ],
       "env": {
         "EVAL_ENCODER": "e2e",
-        "EVAL_OUTPUT_SUFFIX": "_20x6"
+        "EVAL_OUTPUT_SUFFIX": "_15x10"
       },
       "after": [
-        "T_wang_s3"
+        "T_wang15_s3"
       ],
       "priority": 11
     }
