@@ -21,15 +21,24 @@ OUT = Path(__file__).resolve().parent
 SIZES = [r"$6\times6\times2$", r"$10\times6\times2$", r"$10\times10\times2$",
          r"$15\times10\times2$", r"$20\times6\times3$"]
 
+# Vivid bar colours: same hue as the shared palette, higher saturation.
+VIVID = {
+    "ours": "#0D6EFD",
+    "rga": "#00A896",
+    "wang": "#E63946",
+    "li": "#9B5DE5",
+    "pdr": "#FFB703",
+}
+
 METHODS = [
-    ("Ours", PALETTE["blue_main"], [867.75, 808.67, 1836.64, 1542.33, 994.55],
+    ("Ours", VIVID["ours"], [867.75, 808.67, 1836.64, 1542.33, 994.55],
      [11.86, 12.83, 43.45, 19.10, 7.51]),
-    ("RGA", PALETTE["teal"], [762.04, 796.70, 2298.63, 2693.74, 1181.77], [0, 0, 0, 0, 0]),
-    ("Wang et al.", PALETTE["red_strong"], [1075.64, 1066.24, 3153.81, 2826.01, 1229.70],
+    ("RGA", VIVID["rga"], [762.04, 796.70, 2298.63, 2693.74, 1181.77], [0, 0, 0, 0, 0]),
+    ("Wang et al.", VIVID["wang"], [1075.64, 1066.24, 3153.81, 2826.01, 1229.70],
      [73.82, 102.61, 530.01, 280.79, 60.15]),
-    ("Li et al.", PALETTE["violet"], [1160.59, 1198.09, 2738.91, 2458.69, 1309.81],
+    ("Li et al.", VIVID["li"], [1160.59, 1198.09, 2738.91, 2458.69, 1309.81],
      [42.40, 76.91, 82.76, 63.21, 126.56]),
-    ("PDR", PALETTE["neutral"], [1319.24, 1461.63, 3288.35, 3612.81, 1977.13], [0, 0, 0, 0, 0]),
+    ("PDR", VIVID["pdr"], [1319.24, 1461.63, 3288.35, 3612.81, 1977.13], [0, 0, 0, 0, 0]),
 ]
 
 # One y-range per panel: the families are not comparable with each other.
@@ -38,7 +47,7 @@ SHORT = ["Ours", "RGA", "Wang", "Li", "PDR"]
 
 
 def main() -> None:
-    fig, axes = plt.subplots(1, 5, figsize=(11.6, 2.35))
+    fig, axes = plt.subplots(1, 5, figsize=(9.8, 2.65))
 
     width = 0.78
     x = np.arange(len(METHODS))
@@ -49,19 +58,20 @@ def main() -> None:
                    edgecolor="white", linewidth=0.4, zorder=2)
             if errs[k]:
                 ax.errorbar(xi, vals[k], yerr=errs[k], fmt="none",
-                            ecolor="#333333", elinewidth=0.7, capsize=1.4,
-                            capthick=0.7, zorder=3)
-        ax.set_title(SIZES[k], fontsize=7, pad=2)
+                            ecolor="black", elinewidth=1.2, capsize=2.2,
+                            capthick=1.2, zorder=3)
+        ax.set_title(SIZES[k], fontsize=10.5, pad=2.5)
         ax.set_xlim(-0.6, len(METHODS) - 0.4)
         ax.set_ylim(*YLIM[k])
         ax.set_xticks(x)
-        ax.set_xticklabels(SHORT, rotation=90, ha="center", fontsize=5.4)
+        ax.set_xticklabels(SHORT, rotation=45, ha="right",
+                           rotation_mode="anchor", fontsize=9.5)
         ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(labelsize=6.2, length=2.2)
+        ax.tick_params(labelsize=9.5, length=2.8, width=1.0)
         ax.grid(axis="y", linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
         ax.set_axisbelow(True)
         if k == 0:
-            ax.set_ylabel("Objective", fontsize=7)
+            ax.set_ylabel("Objective", fontsize=10.5)
         else:
             ax.tick_params(labelleft=False)
 
@@ -72,5 +82,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    apply_publication_style(FigureStyle(font_size=7, axes_linewidth=0.9))
+    apply_publication_style(FigureStyle(font_size=10, axes_linewidth=1.0))
     main()

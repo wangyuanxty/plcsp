@@ -4,11 +4,10 @@
 
 \subsection{Protocol}
 
-We use five instance families: $6\times6\times2$ (six jobs, six machines,
-two workshops), $10\times6\times2$, $10\times10\times2$, $15\times10\times2$,
-and $20\times6\times3$ (twenty jobs, six machines, three workshops). Each
-family has
-100 test instances. All methods are evaluated on the same instances, with the weights fixed to
+We consider five instance families of the form $J \times M \times W$, where $J$, $M$, and $W$ denote 
+the numbers of jobs, machines, and workshops respectively: $6 \times 6 \times 2$, $10 \times 6 \times 2$, 
+$10 \times 10 \times 2$, $15 \times 10 \times 2$, and $20 \times 6 \times 3$.
+Each family has 100 test instances. All methods are evaluated on the same instances, with the weights fixed to
 $(0.4,0.4,0.2)$ in \eqref{eq:objective}. The learned policies are evaluated
 greedily. Each learned method is trained with three seeds and the reported value
 is the mean of the three seed-level test means. Rule-based and
@@ -16,15 +15,14 @@ metaheuristic baselines are deterministic given their own seed.
 
 Our model, the ablations and the retrained baseline of Wang et al.~\cite{wang2025multitarget} use 200 training
 episodes; Li et al.\ uses the budget of its own paper, as noted below. The group
-size
-is 8, the instance batch is resampled every 8 episodes, and the learning rate
+size is 8, the instance batch is resampled every 8 episodes, and the learning rate
 is $10^{-3}$ with Adam and no decay. These settings are identical across the
-ablations; only the factor under test changes.
+ablations, only the factor under test changes.
 
-Instances are the published pools of Wang et
-al.~\cite{wang2025multitarget}, used unchanged: their training pool
-(12{,}800 instances, seed 0), their validation pool (100, seed 1) and their
-test pool (100, seed 3). The processing times, the processing powers, the
+We adopt the public instance pools of Wang et
+al.~\cite{wang2025multitarget} without modification: a training pool of 12{,}800 instances (seed 0), 
+a validation pool of 100 instances (seed 1), and a test pool of 100 instances (seed 3). 
+The processing times, the processing powers, the
 travel times and the workshop assignment are element-wise identical to the
 released files, so every method in this paper is measured on the same
 instances as the baseline of that paper. We append two arrays to each
@@ -66,9 +64,9 @@ al.~\cite{wang2025multitarget}. AGVs follow one of the three AGV rules our model
 \paragraph{RGA} A random-key genetic algorithm with population 50 and 100
 generations, i.e.\ 4850 schedule evaluations per instance, with the operators
 of Zhang et al.~\cite{zhang2011rga}. It optimises the operation sequence and
-the machine assignment; AGVs are dispatched by the earliest-arrival rule.
+the machine assignment. AGVs are dispatched by the earliest-arrival rule.
 Every candidate schedule is scored by the same simulator that scores our model, so the search optimises exactly the objective of
-\eqref{eq:objective} and its cost includes the evaluation cost. One run takes
+\eqref{eq:objective} and its cost includes the evaluation cost. The computational time per instance is 
 437.8~s per instance at $6\times6$, 1426~s at $10\times6$ and 4161~s at
 $10\times10$.
 
@@ -106,9 +104,9 @@ component.
 
 \subsection{Quality and run time}
 
-Table~\ref{tab:baselines} reports the objective on the four instance
+Table~\ref{tab:baselines} reports the objective on the five instance
 families. Every method is evaluated on the same instances and scored with the
-same objective under the same transport model; the learned methods are averaged
+same objective under the same transport model. The learned methods are averaged
 over three seeds on the 100 test instances, and the rule-based rows are
 deterministic.
 
@@ -129,14 +127,12 @@ pair and size.
 
 \begin{table*}[t]
 \centering
-\caption{Objective on the four instance families. Every method is evaluated
+\caption{Objective on five instance families. Every method is evaluated
 on the same instances and scored with the same objective under the same
-transport model; each value is the mean over the
+transport model. Each value is the mean over the
 100 test instances. The learned methods are averaged over three seeds and show
-the seed standard deviation; PDR and RGA are deterministic per instance
-and have no seed spread. Li is
-an adapted baseline written from the paper, not a reproduction. Lower is
-better.}
+the seed standard deviation. As deterministic methods, PDR and RGA exhibit no variability attributable to seed selection. 
+Li is an adapted baseline written from the paper, not a reproduction. Lower is better.}
 \label{tab:baselines}
 \begin{tabular}{lccccc}
 \toprule
@@ -302,11 +298,10 @@ $20\times6\times3$ & RGA & $-186.86$ & 97 & $<10^{-16}$ \\
 \includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
 \caption{Objective of every method on the five instance families, from
 Table~\ref{tab:baselines}. The panel title $a\times b\times c$ gives $a$ jobs,
-$b$ machines and $c$ workshops. Each panel has its own vertical range, because
-the objective is not comparable across families. Bars are means over the 100
-test instances; the error bar is the seed standard deviation of the learned
-methods, which the deterministic baselines do not have. Our model is
-second at the two smaller sizes and first at the three larger.}
+$b$ machines and $c$ workshops. Each bar represents the average performance over the 100 test instances. 
+Black vertical lines denote the seed standard deviation of the learned methods. 
+The deterministic baselines lack these lines due to their deterministic nature.
+Our model is second at the two smaller sizes and first at the three larger.}
 \label{fig:main}
 \end{figure*}
 
