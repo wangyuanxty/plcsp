@@ -34,8 +34,18 @@ at the boundary and waits for the second fleet; or it waits for a
 vehicle of the second workshop instead, the first machine stays
 idle. The dispatching decision affects the makespan, the idle energy consumption of both workshops, 
 and the loaded travel time. A nearest-vehicle-first rule cannot capture this trade-off, 
-whereas an always-wait rule fails to account for the first machine. Figure 1 shows the
-shop and the two transport cases.
+whereas an always-wait rule fails to account for the first machine.
+Figure~\ref{fig:workshop} shows an AGV workshop of this kind, and
+Figure~\ref{fig:motivated} shows the shop and the two transport cases.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{agv_workshop.png}
+\caption{An AGV workshop in a flexible manufacturing plant. Vehicles
+carry jobs between processing areas; coordinating them with the machines
+is the scheduling problem studied in this paper. Photo courtesy of DMEGC.}
+\label{fig:workshop}
+\end{figure}
 
 This example is the setting of the paper. In a flexible job shop scheduling problem, 
 each operation must be assigned to one machine selected from a set of eligible machines, 

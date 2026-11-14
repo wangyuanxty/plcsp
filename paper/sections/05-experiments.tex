@@ -4,9 +4,10 @@
 
 \subsection{Protocol}
 
-We use four instance families: $6\times6\times2$ (six jobs, six machines,
-two workshops), $10\times6\times2$, $10\times10\times2$, and $20\times6\times3$
-(twenty jobs, six machines, three workshops). Each family has
+We use five instance families: $6\times6\times2$ (six jobs, six machines,
+two workshops), $10\times6\times2$, $10\times10\times2$, $15\times10\times2$,
+and $20\times6\times3$ (twenty jobs, six machines, three workshops). Each
+family has
 100 test instances. All methods are evaluated on the same instances, with the weights fixed to
 $(0.4,0.4,0.2)$ in \eqref{eq:objective}. The learned policies are evaluated
 greedily. Each learned method is trained with three seeds and the reported value
@@ -137,15 +138,15 @@ and have no seed spread. Li is
 an adapted baseline written from the paper, not a reproduction. Lower is
 better.}
 \label{tab:baselines}
-\begin{tabular}{lcccc}
+\begin{tabular}{lccccc}
 \toprule
-Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ & $20\times6\times3$ \\
+Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ & $15\times10\times2$ & $20\times6\times3$ \\
 \midrule
-Ours (H-ST-GRPO) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} & 994.55 {\scriptsize$\pm$7.51} \\
-RGA & 762.04 & 796.70 & 2298.63 & 1181.77 \\
-PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 & 1977.13 \\
-Wang et al.~(retrained) & 1075.64 {\scriptsize$\pm$73.82} & 1066.24 {\scriptsize$\pm$102.61} & 3153.81 {\scriptsize$\pm$530.01} & 1229.70 {\scriptsize$\pm$60.15} \\
-Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 2738.91 {\scriptsize$\pm$82.76} & 1309.81 {\scriptsize$\pm$126.56} \\
+Ours (H-ST-GRPO) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} & 1542.33 {\scriptsize$\pm$19.10} & 994.55 {\scriptsize$\pm$7.51} \\
+RGA & 762.04 & 796.70 & 2298.63 & 2693.74 & 1181.77 \\
+PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 & 3612.81 & 1977.13 \\
+Wang et al.~(retrained) & 1075.64 {\scriptsize$\pm$73.82} & 1066.24 {\scriptsize$\pm$102.61} & 3153.81 {\scriptsize$\pm$530.01} & 2826.01 {\scriptsize$\pm$280.79} & 1229.70 {\scriptsize$\pm$60.15} \\
+Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 2738.91 {\scriptsize$\pm$82.76} & 2458.69 {\scriptsize$\pm$63.21} & 1309.81 {\scriptsize$\pm$126.56} \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -153,7 +154,7 @@ Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 
 
 \begin{table*}[t]
 \centering
-\caption{Objective of the twelve PDR pairs on the four instance families.
+\caption{Objective of the twelve PDR pairs on the five instance families.
 Each cell is the mean over the 100 test instances, with the per-instance
 standard deviation in parentheses. Each pair is run under the three AGV
 dispatch rules of our model. Rule keys: \texttt{mor}, most operations
@@ -164,46 +165,46 @@ energy. Lower is better.}
 \label{tab:pdr}
 \footnotesize
 \renewcommand{\arraystretch}{0.92}
-\begin{tabular}{lllcccc}
+\begin{tabular}{lllccccc}
 \toprule
-Job rule & Machine rule & AGV rule & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$  & $20\times6\times3$ \\
+Job rule & Machine rule & AGV rule & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$  & $15\times10\times2$ & $20\times6\times3$ \\
 \midrule
-mor & spt & nearest & 1402.44 (221.90) & 1593.57 (232.91) & 3785.40 (336.33) & 2232.42 (335.06) \\
-mor & spt & earliest\_arrival & 1319.24 (240.09) & 1481.60 (229.38) & 3288.35 (286.43) & 1977.13 (317.16) \\
-mor & spt & least\_utilized & 1421.66 (220.38) & 1585.02 (232.49) & 3752.25 (321.58) & 2103.10 (305.82) \\
-mor & seyc & nearest & 1419.06 (198.73) & 1600.00 (230.06) & 3910.08 (419.43) & 2253.25 (317.72) \\
-mor & seyc & earliest\_arrival & 1331.18 (193.51) & 1461.63 (221.82) & 3428.21 (385.53) & 2021.66 (295.90) \\
-mor & seyc & least\_utilized & 1444.67 (180.97) & 1604.82 (243.43) & 3889.13 (396.44) & 2157.57 (297.76) \\
-mwkr\_t & spt & nearest & 1465.36 (219.07) & 1802.05 (271.75) & 4166.26 (455.83) & 2840.45 (378.50) \\
-mwkr\_t & spt & earliest\_arrival & 1352.22 (217.31) & 1562.92 (242.15) & 3514.56 (354.63) & 2313.62 (296.33) \\
-mwkr\_t & spt & least\_utilized & 1534.72 (223.64) & 1810.96 (266.97) & 4297.29 (454.37) & 2720.57 (359.93) \\
-mwkr\_t & seyc & nearest & 1501.31 (231.09) & 1792.75 (292.54) & 4333.64 (553.17) & 2936.83 (418.31) \\
-mwkr\_t & seyc & earliest\_arrival & 1372.43 (210.54) & 1588.15 (259.31) & 3627.62 (437.59) & 2374.09 (331.31) \\
-mwkr\_t & seyc & least\_utilized & 1570.93 (241.12) & 1846.24 (316.21) & 4442.69 (502.53) & 2790.72 (370.77) \\
-mwkr\_pt & spt & nearest & 1737.52 (273.14) & 2144.95 (315.85) & 5251.33 (583.76) & 3633.00 (468.36) \\
-mwkr\_pt & spt & earliest\_arrival & 1504.25 (218.80) & 1771.95 (285.35) & 4146.93 (424.33) & 2825.05 (338.63) \\
-mwkr\_pt & spt & least\_utilized & 1846.53 (277.62) & 2219.12 (371.96) & 5653.35 (625.00) & 3504.04 (421.09) \\
-mwkr\_pt & seyc & nearest & 1772.77 (278.89) & 2242.80 (370.33) & 5383.22 (714.36) & 3682.10 (471.32) \\
-mwkr\_pt & seyc & earliest\_arrival & 1523.15 (237.85) & 1834.80 (271.45) & 4209.05 (426.48) & 2884.29 (380.77) \\
-mwkr\_pt & seyc & least\_utilized & 1879.33 (270.64) & 2359.34 (417.38) & 5688.99 (685.05) & 3583.02 (467.37) \\
-fifo & spt & nearest & 3806.24 (559.75) & 6163.02 (808.58) & 19572.60 (1732.98) & 14269.54 (1200.60) \\
-fifo & spt & earliest\_arrival & 2192.01 (354.53) & 3128.64 (439.39) & 8629.11 (777.12) & 7811.87 (660.16) \\
-fifo & spt & least\_utilized & 3975.83 (545.58) & 6390.65 (800.66) & 20999.70 (1560.64) & 14095.99 (1192.94) \\
-lwkr\_pt & spt & nearest & 3852.09 (540.96) & 6222.28 (907.93) & 19492.06 (1645.89) & 14522.45 (1318.23) \\
-lwkr\_pt & spt & earliest\_arrival & 2198.88 (340.99) & 3160.94 (470.55) & 9047.59 (897.43) & 8024.44 (857.86) \\
-lwkr\_pt & spt & least\_utilized & 4096.92 (605.47) & 6322.54 (762.13) & 20961.73 (1423.31) & 14116.04 (1326.62) \\
-fifo & seyc & nearest & 3884.62 (598.04) & 6431.68 (867.79) & 20031.40 (1760.46) & 14544.63 (1270.67) \\
-fifo & seyc & earliest\_arrival & 2212.77 (351.11) & 3203.29 (485.89) & 8998.48 (855.13) & 7954.73 (819.93) \\
-fifo & seyc & least\_utilized & 4156.49 (542.33) & 6441.24 (850.87) & 21531.99 (1661.48) & 14370.17 (1258.13) \\
-lwkr\_pt & seyc & nearest & 3864.34 (555.05) & 6369.61 (941.44) & 19983.41 (1735.39) & 14672.64 (1443.49) \\
-lwkr\_pt & seyc & earliest\_arrival & 2218.27 (373.95) & 3254.81 (427.01) & 9165.84 (894.16) & 8011.01 (849.65) \\
-lwkr\_pt & seyc & least\_utilized & 4132.73 (559.92) & 6463.02 (858.29) & 21497.46 (1763.25) & 14318.06 (1283.73) \\
-lwkr\_t & spt & nearest & 3778.10 (614.78) & 6293.32 (734.62) & 19619.90 (1617.69) & 14416.68 (1286.79) \\
-lwkr\_t & spt & earliest\_arrival & 2221.92 (315.59) & 3174.42 (428.54) & 8968.42 (813.97) & 7907.84 (854.87) \\
-lwkr\_t & spt & least\_utilized & 4046.91 (556.81) & 6289.01 (696.54) & 21005.65 (1567.43) & 14133.11 (1235.01) \\
-lwkr\_t & seyc & nearest & 3865.25 (641.54) & 6376.85 (880.20) & 20019.30 (1790.08) & 14726.00 (1377.72) \\
-lwkr\_t & seyc & earliest\_arrival & 2303.36 (406.64) & 3282.16 (430.95) & 9285.69 (923.48) & 7909.11 (843.56) \\
-lwkr\_t & seyc & least\_utilized & 4205.55 (570.32) & 6491.78 (852.05) & 21437.79 (1685.86) & 14395.65 (1353.14) \\
+mor & spt & nearest & 1402.44 (221.90) & 1593.57 (232.91) & 3785.40 (336.33) & 4330.50 (525.57) & 2232.42 (335.06) \\
+mor & spt & earliest\_arrival & 1319.24 (240.09) & 1481.60 (229.38) & 3288.35 (286.43) & 3695.99 (471.82) & 1977.13 (317.16) \\
+mor & spt & least\_utilized & 1421.66 (220.38) & 1585.02 (232.49) & 3752.25 (321.58) & 4200.13 (467.26) & 2103.10 (305.82) \\
+mor & seyc & nearest & 1419.06 (198.73) & 1600.00 (230.06) & 3910.08 (419.43) & 4292.07 (493.24) & 2253.25 (317.72) \\
+mor & seyc & earliest\_arrival & 1331.18 (193.51) & 1461.63 (221.82) & 3428.21 (385.53) & 3612.81 (412.54) & 2021.66 (295.90) \\
+mor & seyc & least\_utilized & 1444.67 (180.97) & 1604.82 (243.43) & 3889.13 (396.44) & 4197.38 (495.10) & 2157.57 (297.76) \\
+mwkr\_t & spt & nearest & 1465.36 (219.07) & 1802.05 (271.75) & 4166.26 (455.83) & 5165.29 (639.81) & 2840.45 (378.50) \\
+mwkr\_t & spt & earliest\_arrival & 1352.22 (217.31) & 1562.92 (242.15) & 3514.56 (354.63) & 4096.38 (446.96) & 2313.62 (296.33) \\
+mwkr\_t & spt & least\_utilized & 1534.72 (223.64) & 1810.96 (266.97) & 4297.29 (454.37) & 5171.86 (604.83) & 2720.57 (359.93) \\
+mwkr\_t & seyc & nearest & 1501.31 (231.09) & 1792.75 (292.54) & 4333.64 (553.17) & 5137.92 (574.34) & 2936.83 (418.31) \\
+mwkr\_t & seyc & earliest\_arrival & 1372.43 (210.54) & 1588.15 (259.31) & 3627.62 (437.59) & 4097.91 (437.71) & 2374.09 (331.31) \\
+mwkr\_t & seyc & least\_utilized & 1570.93 (241.12) & 1846.24 (316.21) & 4442.69 (502.53) & 5160.02 (595.64) & 2790.72 (370.77) \\
+mwkr\_pt & spt & nearest & 1737.52 (273.14) & 2144.95 (315.85) & 5251.33 (583.76) & 6560.98 (611.73) & 3633.00 (468.36) \\
+mwkr\_pt & spt & earliest\_arrival & 1504.25 (218.80) & 1771.95 (285.35) & 4146.93 (424.33) & 4880.67 (522.22) & 2825.05 (338.63) \\
+mwkr\_pt & spt & least\_utilized & 1846.53 (277.62) & 2219.12 (371.96) & 5653.35 (625.00) & 6652.06 (705.17) & 3504.04 (421.09) \\
+mwkr\_pt & seyc & nearest & 1772.77 (278.89) & 2242.80 (370.33) & 5383.22 (714.36) & 6661.80 (738.44) & 3682.10 (471.32) \\
+mwkr\_pt & seyc & earliest\_arrival & 1523.15 (237.85) & 1834.80 (271.45) & 4209.05 (426.48) & 4908.13 (472.39) & 2884.29 (380.77) \\
+mwkr\_pt & seyc & least\_utilized & 1879.33 (270.64) & 2359.34 (417.38) & 5688.99 (685.05) & 6777.67 (710.92) & 3583.02 (467.37) \\
+fifo & spt & nearest & 3806.24 (559.75) & 6163.02 (808.58) & 19572.60 (1732.98) & 29856.10 (2128.51) & 14269.54 (1200.60) \\
+fifo & spt & earliest\_arrival & 2192.01 (354.53) & 3128.64 (439.39) & 8629.11 (777.12) & 12562.95 (1061.86) & 7811.87 (660.16) \\
+fifo & spt & least\_utilized & 3975.83 (545.58) & 6390.65 (800.66) & 20999.70 (1560.64) & 31349.47 (2034.49) & 14095.99 (1192.94) \\
+lwkr\_pt & spt & nearest & 3852.09 (540.96) & 6222.28 (907.93) & 19492.06 (1645.89) & 30016.88 (1921.36) & 14522.45 (1318.23) \\
+lwkr\_pt & spt & earliest\_arrival & 2198.88 (340.99) & 3160.94 (470.55) & 9047.59 (897.43) & 12765.66 (1057.93) & 8024.44 (857.86) \\
+lwkr\_pt & spt & least\_utilized & 4096.92 (605.47) & 6322.54 (762.13) & 20961.73 (1423.31) & 31355.82 (1990.99) & 14116.04 (1326.62) \\
+fifo & seyc & nearest & 3884.62 (598.04) & 6431.68 (867.79) & 20031.40 (1760.46) & 30290.39 (2077.68) & 14544.63 (1270.67) \\
+fifo & seyc & earliest\_arrival & 2212.77 (351.11) & 3203.29 (485.89) & 8998.48 (855.13) & 12877.75 (1069.65) & 7954.73 (819.93) \\
+fifo & seyc & least\_utilized & 4156.49 (542.33) & 6441.24 (850.87) & 21531.99 (1661.48) & 31789.92 (2022.25) & 14370.17 (1258.13) \\
+lwkr\_pt & seyc & nearest & 3864.34 (555.05) & 6369.61 (941.44) & 19983.41 (1735.39) & 30480.32 (2234.37) & 14672.64 (1443.49) \\
+lwkr\_pt & seyc & earliest\_arrival & 2218.27 (373.95) & 3254.81 (427.01) & 9165.84 (894.16) & 13007.48 (1102.51) & 8011.01 (849.65) \\
+lwkr\_pt & seyc & least\_utilized & 4132.73 (559.92) & 6463.02 (858.29) & 21497.46 (1763.25) & 31935.15 (2326.91) & 14318.06 (1283.73) \\
+lwkr\_t & spt & nearest & 3778.10 (614.78) & 6293.32 (734.62) & 19619.90 (1617.69) & 29994.24 (2102.63) & 14416.68 (1286.79) \\
+lwkr\_t & spt & earliest\_arrival & 2221.92 (315.59) & 3174.42 (428.54) & 8968.42 (813.97) & 12913.65 (1180.20) & 7907.84 (854.87) \\
+lwkr\_t & spt & least\_utilized & 4046.91 (556.81) & 6289.01 (696.54) & 21005.65 (1567.43) & 31281.59 (1924.55) & 14133.11 (1235.01) \\
+lwkr\_t & seyc & nearest & 3865.25 (641.54) & 6376.85 (880.20) & 20019.30 (1790.08) & 30370.61 (2233.48) & 14726.00 (1377.72) \\
+lwkr\_t & seyc & earliest\_arrival & 2303.36 (406.64) & 3282.16 (430.95) & 9285.69 (923.48) & 13163.11 (984.06) & 7909.11 (843.56) \\
+lwkr\_t & seyc & least\_utilized & 4205.55 (570.32) & 6491.78 (852.05) & 21437.79 (1685.86) & 31921.07 (2110.10) & 14395.65 (1353.14) \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -236,23 +237,25 @@ $6\times6$ it obtains 762.04, which is 105.71 below our model, and at
 $10\times6$ it is 11.97 below. It pays for that margin: one run evaluates 4850
 schedules per instance, against 0.95 and 1.99~s for one pass of our model.
 Second, the ordering reverses as the instance grows. At
-$10\times10$ our model obtains 1836.64, which is 20.1\% below RGA, and at
+$10\times10$ our model obtains 1836.64, which is 20.1\% below RGA, at
+$15\times10$ it obtains 1542.33, which is 42.7\% below RGA, and at
 $20\times6$ it obtains 994.55, which is 15.8\% below RGA; it is also
-below every learned baseline at both sizes. The reversal is consistent with the
+below every learned baseline at these sizes. The reversal is consistent with the
 configuration of RGA: one population size and one generation count at every
 size, so its advantage over a fixed policy shrinks as the instance grows. That
 is a limit on its generalization, not on its search. Third, the learned baselines are behind
-at all four sizes. The retrained architecture of Wang et al.\ is 207.89, 257.57,
-1317.17 and 235.15 above our model, and Li et al.\ is 292.84, 389.42, 902.27
-and 315.26 above it.
+at all five sizes. The retrained architecture of Wang et al.\ is 207.89, 257.57,
+1317.17, 1283.68 and 235.15 above our model, and Li et al.\ is 292.84, 389.42, 902.27,
+916.36 and 315.26 above it.
 
 \paragraph{Significance} Table~\ref{tab:signif} reports a two-sided Wilcoxon
 signed-rank test on the paired per-instance objectives, with Holm's correction
-over the 16 comparisons; the learned methods enter as their seed mean on each
+over the 20 comparisons; the learned methods enter as their seed mean on each
 instance. Our model is lower than
 PDR and the adapted baselines of Wang et al.\ and Li et al.\ at every size, at $p<10^{-16}$, on 97 to 100 of the
 100 instances. The disagreement is confined to RGA. At $6\times6$ RGA is lower, on
-84 instances; at $10\times10$ our model is lower, on 97; at $20\times6$ our
+84 instances; at $10\times10$ our model is lower, on 97; at $15\times10$ our
+model is lower, on 100; at $20\times6$ our
 model is lower, on 97. At $10\times6$
 the test does not separate the two (median 6.92, our model lower
 on 43), so the mean gap of 11.97 is not resolved by the paired comparison.
@@ -282,6 +285,10 @@ $10\times10\times2$ & RGA & $-476.77$ & 97 & $<10^{-16}$ \\
  & PDR & $-1471.84$ & 100 & $<10^{-16}$ \\
  & Wang et al. & $-1251.67$ & 100 & $<10^{-16}$ \\
  & Li et al. & $-899.10$ & 100 & $<10^{-16}$ \\
+$15\times10\times2$ & RGA & $-1159.77$ & 100 & $<10^{-16}$ \\
+ & PDR & $-2020.91$ & 100 & $<10^{-16}$ \\
+ & Wang et al. & $-1246.99$ & 100 & $<10^{-16}$ \\
+ & Li et al. & $-899.56$ & 100 & $<10^{-16}$ \\
 $20\times6\times3$ & RGA & $-186.86$ & 97 & $<10^{-16}$ \\
  & PDR & $-942.19$ & 100 & $<10^{-16}$ \\
  & Wang et al. & $-221.55$ & 99 & $<10^{-16}$ \\
@@ -293,13 +300,13 @@ $20\times6\times3$ & RGA & $-186.86$ & 97 & $<10^{-16}$ \\
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
-\caption{Objective of every method on the four instance families, from
+\caption{Objective of every method on the five instance families, from
 Table~\ref{tab:baselines}. The panel title $a\times b\times c$ gives $a$ jobs,
 $b$ machines and $c$ workshops. Each panel has its own vertical range, because
 the objective is not comparable across families. Bars are means over the 100
 test instances; the error bar is the seed standard deviation of the learned
 methods, which the deterministic baselines do not have. Our model is
-second at the two smaller sizes and first at the two largest.}
+second at the two smaller sizes and first at the three larger.}
 \label{fig:main}
 \end{figure*}
 
