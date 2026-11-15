@@ -102,6 +102,7 @@ because this spread does not support a fair comparison.
 same architecture. The variant without the rule selector removes the top-level
 component.
 
+\needspace{8\baselineskip}
 \subsection{Quality and run time}
 
 Table~\ref{tab:baselines} reports the objective on the five instance
@@ -120,10 +121,11 @@ appears in the reference paper: Wang et al. report 732.5 at $6\times6\times2$
 and 674.5 at $10\times6\times2$ under the same objective structure. So we
 compare absolute values within a column only, never across columns.
 
-Table~\ref{tab:pdr} lists the twelve rule pairs under the three AGV rules.
-The best pair is mor/spt at $6\times6$ and $10\times10$ and mor/seyc at
-$10\times6$, and the earliest-arrival rule is the best of the three at every
-pair and size.
+Table~\ref{tab:pdr} lists the twelve job--machine rule pairs, each run under
+the three AGV rules, so it has 36 rows per family. The best pair is mor/spt at
+$6\times6\times2$, $10\times10\times2$ and $20\times6\times3$, and mor/seyc at
+$10\times6\times2$ and $15\times10\times2$. The earliest-arrival AGV rule is
+the best of the three for every pair and every family.
 
 \begin{table*}[t]
 \centering
@@ -242,7 +244,8 @@ size, so its advantage over a fixed policy shrinks as the instance grows. That
 is a limit on its generalization, not on its search. Third, the learned baselines are behind
 at all five sizes. The retrained architecture of Wang et al.\ is 207.89, 257.57,
 1317.17, 1283.68 and 235.15 above our model, and Li et al.\ is 292.84, 389.42, 902.27,
-916.36 and 315.26 above it.
+916.36 and 315.26 above it. Table~\ref{tab:time} reports the wall-clock time to
+build one schedule for every method and family.
 
 \paragraph{Significance} Table~\ref{tab:signif} reports a two-sided Wilcoxon
 signed-rank test on the paired per-instance objectives, with Holm's correction
@@ -311,12 +314,15 @@ paired difference with and without the rule selector.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_distribution.pdf}
-\caption{Per-instance objective on $6\times6$. (a) Our model with and
-without the rule selector (three seeds, 300 values each). The violin is
-thinned to a light point cloud, the thick bar is the interquartile range, the
-white dot the median and the filled diamond the mean. (b) The mean objective of
-each seed, without the selector above and with it below; the label gives the
-difference in points. Every seed is lower with the selector.}
+\caption{Per-instance objective with and without the rule selector, on two
+families. (a), (c) Per-instance objective at $6\times6\times2$ and
+$10\times6\times2$ (three seeds, 300 values each). The violin is thinned to a
+light point cloud, the thick bar is the interquartile range, the white dot the
+median and the filled diamond the mean. (b), (d) Mean objective of each seed at
+the same family, without the selector above and with it below; the label gives
+the difference in points. Every seed is lower with the selector at both
+families. The selector was ablated at these two families only; the other three
+are reported in Table~\ref{tab:baselines}.}
 \label{fig:distribution}
 \end{figure*}
 
