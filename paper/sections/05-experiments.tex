@@ -306,18 +306,33 @@ Our model is second at the two smaller sizes and first at the three larger.}
 \label{fig:main}
 \end{figure*}
 
-Figure~\ref{fig:distribution} shows the per-instance distribution and the
-paired difference with and without the rule selector. Most of the seeds are lower with the selector at both
-families.
+Figure~\ref{fig:distribution} compares the objective in two scenarios: with and without a selector. 
+The left column pools the 300 values of each
+configuration (100 instances, three seeds). At $6\times6\times2$ the mean falls
+from 895.21 to 867.75, and at $10\times6\times2$ from 819.33 to 808.67. In both
+panels the interquartile bar, the median and the mean move down together, while
+the violins retain their shape and overlap over almost the entire range. 
+
+The right column pairs the seed means, which separates this mean effect from
+seed-to-seed variation. At $6\times6\times2$ the three seeds gain 29.8, 15.6
+and 37.0 points, and the worst selector seed (880.92) is still lower than the
+best seed without it (887.75). At $10\times6\times2$ the differences are 31.7,
+$+13.4$ and 13.6; seed 2 reverses, and the effect is smaller than the
+seed-to-seed standard deviation ($12.83$ with the selector, $9.87$ without).
+The sign of the difference therefore depends on the training run at the larger
+size. The selector is a small, distribution-wide gain that is reliable at
+$6\times6\times2$.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_distribution.pdf}
 \caption{Per-instance objective with and without the rule selector, on two
 families. (a), (c) Per-instance objective at $6\times6\times2$ and
-$10\times6\times2$ (three seeds, 300 values each). (b), (d) Mean objective of each seed at
-the same family, without the selector above and with it below; the label gives
-the difference in points.}
+$10\times6\times2$, pooling 100 instances and three seeds (300 values per
+configuration). (b), (d) Mean objective of each seed at the same family; the red dot
+is without selector and the blue dot with selector, joined for the same seed.
+The label gives the blue value minus the red one, so a negative value favours
+the selector.}
 \label{fig:distribution}
 \end{figure*}
 
