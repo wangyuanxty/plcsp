@@ -645,8 +645,8 @@ class TopLevelController:
     def state_dict(self):
         return self.model.state_dict()
 
-    def load_state_dict(self, state_dict) -> None:
-        self.model.load_state_dict(state_dict)
+    def load_state_dict(self, state_dict, strict: bool = True) -> None:
+        self.model.load_state_dict(state_dict, strict=strict)
 
     def optimizer_state_dict(self):
         return self.optimizer.state_dict()

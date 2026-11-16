@@ -54,7 +54,8 @@ def main() -> int:
         modules.append(("agv_actor", ppo.agv_actor))
     for name, module in modules:
         path = os.path.join(model_dir, f"PPO_{name}_{id_name}_top1.pth")
-        module.load_state_dict(torch.load(path, map_location=device))
+        module.load_state_dict(torch.load(path, map_location=device),
+                               strict=not bool(getattr(args, 'allow_partial_ckpt', 0)))
         print(f"loaded {path}", flush=True)
 
     top_ctl = None
@@ -69,7 +70,8 @@ def main() -> int:
             input_dim=18, head_sizes=tuple(head_sizes),
             credit=getattr(args, "top_credit", "team"), device=device)
         path = os.path.join(model_dir, f"PPO_hier_top_{id_name}_top1.pth")
-        top_ctl.load_state_dict(torch.load(path, map_location=device))
+        top_ctl.load_state_dict(torch.load(path, map_location=device),
+                                strict=not bool(getattr(args, 'allow_partial_ckpt', 0)))
         print(f"loaded {path}", flush=True)
 
     test_instance = Instance_Dataset(
