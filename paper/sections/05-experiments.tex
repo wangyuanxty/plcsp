@@ -451,7 +451,7 @@ al.~\cite{wang2025multitarget}; intra0 removes the machine-internal attention.}
 \toprule
 Job enc. & Machine enc. & Objective & Std \\
 \midrule
-ST & ST (intra1) & 798.06 & 5.83 \\
+ST & ST & 798.06 & 5.83 \\
 GNN & ST & 797.11 & 12.00 \\
 ST & GAT & 883.86 & 24.60 \\
 GNN & GAT & 925.21 & 26.56 \\
@@ -478,13 +478,14 @@ machine encoder is the component that matters.
 \caption{Encoder ablation at $6\times6\times2$ under the full protocol of this paper:
 AGV agent, rule selector and station transport model enabled. All rows use
 GRPO. Values are three-seed means over the 100 test instances, with the seed
-standard deviation.}
+standard deviation. The rows above the midrule keep the machine-internal
+attention; the last row removes it (intra0).}
 \label{tab:encoderfull}
 \begin{tabular}{llrr}
 \toprule
 Job enc. & Machine enc. & Objective & Std \\
 \midrule
-ST & ST (intra1) & 867.75 & 11.86 \\
+ST & ST & 867.75 & 11.86 \\
 GNN & ST & 865.01 & 18.50 \\
 ST & GAT & 962.85 & 3.95 \\
 GNN & GAT & 964.22 & 20.12 \\
