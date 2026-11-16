@@ -24,11 +24,11 @@ EXP = Path("D:/research/remote-export-2026-11-14")
 
 AXES = ["Cmax", "PEC", "TEC", "Idle", "Obj.", "Std"]
 COLOURS = {
-    "Ours": PALETTE["blue_main"],
-    "RGA": PALETTE["teal"],
-    "Wang et al.": PALETTE["red_strong"],
-    "Li et al.": PALETTE["violet"],
-    "PDR": PALETTE["neutral"],
+    "Ours": "#0D6EFD",
+    "RGA": "#00B3B3",
+    "Wang et al.": "#E63946",
+    "Li et al.": "#9B5DE5",
+    "PDR": "#6C757D",
 }
 ORDER = ["Ours", "RGA", "Wang et al.", "Li et al.", "PDR"]
 
@@ -148,23 +148,23 @@ def main() -> None:
                 v = row[name][a]
                 r.append(1.0 if hi <= lo else (hi - v) / (hi - lo))
             r += r[:1]
-            ax.plot(angles, r, color=COLOURS[name], linewidth=1.2, label=name)
-            ax.fill(angles, r, color=COLOURS[name], alpha=0.05)
+            ax.plot(angles, r, color=COLOURS[name], linewidth=1.6, label=name)
+            ax.fill(angles, r, color=COLOURS[name], alpha=0.10)
         ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(AXES, fontsize=7)
-        ax.set_ylim(0, 1.05)
+        ax.set_xticklabels(AXES, fontsize=9.5)
+        ax.set_ylim(0, 1.12)
         ax.set_yticks([0.25, 0.5, 0.75, 1.0])
-        ax.set_yticklabels(["0.25", "0.5", "0.75", "1"], fontsize=9.5)
+        ax.set_yticklabels(["0.25", "0.5", "0.75", "1"], fontsize=10.5)
         for lab in ax.get_yticklabels():
             lab.set_bbox({"facecolor": "white", "edgecolor": "none",
                           "alpha": 0.75, "pad": 0.3})
         ax.tick_params(pad=1)
-        ax.set_title(TITLES[size], fontsize=9, pad=10)
+        ax.set_title(TITLES[size], fontsize=11, pad=10)
         ax.grid(linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
         ax.spines["polar"].set_linewidth(0.5)
     axes[-1].axis("off")
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=5, fontsize=8.5,
+    fig.legend(handles, labels, loc="lower center", ncol=5, fontsize=10,
                frameon=False, handlelength=1.6, columnspacing=1.8)
     fig.tight_layout(rect=(0, 0.06, 1, 1), pad=0.4, w_pad=1.2, h_pad=1.2)
     finalize_figure(fig, OUT / "fig_radar", formats=["pdf"])

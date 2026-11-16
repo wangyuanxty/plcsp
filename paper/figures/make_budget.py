@@ -35,17 +35,17 @@ def main() -> None:
     ax.plot(EVALS, OBJ, color=PALETTE["teal"], marker="o", markersize=3.2,
             linewidth=1.1, zorder=3, label="RGA")
     ax.axhline(CONTROLLER_OBJ, color=PALETTE["blue_main"], linestyle="--",
-               linewidth=1.2, zorder=2, label="Controller, one pass")
+               linewidth=1.2, zorder=2, label="Our model, one pass")
 
     ax.plot([CROSS_EVALS], [CONTROLLER_OBJ], marker="o", markersize=4.2,
             markerfacecolor="white", markeredgecolor=PALETTE["teal"],
             markeredgewidth=1.1, zorder=4)
     ax.annotate("1,394 evaluations, 126 s",
-                xy=(CROSS_EVALS, CONTROLLER_OBJ), xytext=(1620, 782),
+                xy=(CROSS_EVALS, CONTROLLER_OBJ), xytext=(2200, 975),
                 fontsize=5.8, color=PALETTE["blue_main"], ha="left", va="bottom",
                 arrowprops=dict(arrowstyle="-", color=PALETTE["blue_main"],
                                 linewidth=0.6, shrinkA=1, shrinkB=2))
-    ax.text(240, CONTROLLER_OBJ + 10, "one pass: 0.95 s", fontsize=5.8,
+    ax.text(3550, CONTROLLER_OBJ + 12, "one pass: 0.95 s", fontsize=5.8,
             color=PALETTE["blue_main"], ha="left", va="bottom",
             bbox=dict(facecolor="white", edgecolor="none", pad=0.8))
 
