@@ -106,15 +106,15 @@ def _radar(ax, no_terms, rs_terms, title):
     ax.plot(angles, ratio, color=BLUE, linewidth=1.2, zorder=3)
     ax.fill(angles, ratio, color=BLUE, alpha=0.10, zorder=1)
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(RADAR_AXES, fontsize=8.5)
+    ax.set_xticklabels(RADAR_AXES, fontsize=7.5)
     ax.set_ylim(0.94, 1.08)
     ax.set_yticks([0.95, 1.0, 1.05])
-    ax.set_yticklabels(["0.95", "1", "1.05"], fontsize=8.5)
+    ax.set_yticklabels(["0.95", "1", "1.05"], fontsize=7.5)
     for lab in ax.get_yticklabels():
         lab.set_bbox({"facecolor": "white", "edgecolor": "none",
                       "alpha": 0.75, "pad": 0.3})
     ax.set_rlabel_position(270)
-    ax.set_title(title, fontsize=10.5, pad=10)
+    ax.set_title(title, fontsize=9, pad=10)
     ax.grid(linewidth=0.3, color="#CFCECE", alpha=0.6)
     ax.spines["polar"].set_linewidth(0.5)
 
@@ -150,16 +150,16 @@ def main() -> None:
         _violin(ax, groups, colours, pos, rng)
         ax.set_xticks(pos)
         ax.set_xticklabels(["without selector", "with selector"],
-                           fontsize=9.5)
+                           fontsize=8)
         ax.set_xlim(0.45, 2.55)
         lo = min(g.min() for g in groups)
         hi = max(g.max() for g in groups)
         ax.set_ylim(lo - 0.08 * (hi - lo), hi + 0.08 * (hi - lo))
-        ax.set_ylabel("Objective (%s)" % label, fontsize=10)
+        ax.set_ylabel("Objective (%s)" % label, fontsize=8.5)
         ax.set_title(tags[2 * row_i] + " per-instance objective",
-                     fontsize=10.5, pad=3)
+                     fontsize=9, pad=3)
         ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(labelsize=9.5, length=2.8, width=1.0)
+        ax.tick_params(labelsize=8, length=2.8, width=1.0)
         ax.grid(axis="y", linewidth=0.3, color="#CFCECE", alpha=0.6)
         ax.set_axisbelow(True)
 
@@ -168,7 +168,7 @@ def main() -> None:
         box = axr.get_position()
         fig.text(box.x0 + 0.5 * box.width, box.y1 + 0.062,
                  tags[2 * row_i + 1] + " objective terms",
-                 ha="center", va="bottom", fontsize=10.5)
+                 ha="center", va="bottom", fontsize=9)
 
     handles = [
         plt.Line2D([], [], color=RED, linewidth=1.0,
@@ -176,12 +176,12 @@ def main() -> None:
         plt.Line2D([], [], color=BLUE, linewidth=1.2),
     ]
     fig.legend(handles, ["without selector (baseline)", "with selector"],
-               loc="upper left", ncol=2, fontsize=9, frameon=False,
+               loc="upper left", ncol=2, fontsize=8, frameon=False,
                bbox_to_anchor=(0.01, 0.995), handlelength=1.6,
                columnspacing=2.0)
     finalize_figure(fig, OUT / "fig_distribution", formats=["pdf"])
 
 
 if __name__ == "__main__":
-    apply_publication_style(FigureStyle(font_size=10, axes_linewidth=1.0))
+    apply_publication_style(FigureStyle(font_size=9, axes_linewidth=1.0))
     main()

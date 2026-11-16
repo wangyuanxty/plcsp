@@ -246,24 +246,36 @@ Therefore, the cost reported for RGA corresponds to the entire run. Figure~\ref{
 summarises the same means on six axes; each axis is min-max normalised inside
 its panel, and the outward direction is the better value.
 
-\paragraph{Significance} Table~\ref{tab:signif} reports a two-sided Wilcoxon
-signed-rank test on the paired per-instance objectives, with Holm's correction
-over the 20 comparisons. The learned methods enter as their seed mean on each
-instance. Our model is lower than
-PDR and the adapted baselines of Wang et al.\ and Li et al.\ at every size, at $p<10^{-16}$, on 97 to 100 of the
-100 instances. The disagreement is confined to RGA. At $6\times6$ RGA is lower, on
-84 instances; at $10\times10$ our model is lower, on 97; at $15\times10$ our
-model is lower, on 100; at $20\times6$ our
-model is lower, on 97. At $10\times6$
-the test does not separate the two (median 6.92, our model lower
-on 43), so the mean gap of 11.97 is not resolved by the paired comparison.
+\paragraph{Significance} Table~\ref{tab:baselines} compares methods by the
+mean objective over the 100 test instances, and a gap between two means may
+simply reflect which instances were drawn. Table~\ref{tab:signif} therefore
+tests every pair of methods instance by instance. For each instance we subtract
+the baseline's objective from ours, and apply a two-sided Wilcoxon signed-rank
+test to the resulting 100 differences, which asks whether they are
+systematically different from zero. The learned methods enter as the mean of
+their three training seeds on each instance, so that each method contributes
+one value per instance. The 20 tests, five sizes against four baselines, are
+corrected together with Holm's procedure at $\alpha=0.05$.
+
+The result is the same against three of the four baselines: our model has a
+lower objective than PDR and than the adapted baselines of Wang et al.\ and
+Li et al.\ at every size, with $p<10^{-16}$ after correction, and it is lower
+on 97 to 100 of the 100 instances. RGA is the only baseline whose
+result changes with size. At $6\times6$ RGA is lower on 84 of the 100
+instances, with $p=2.2\times10^{-13}$, so RGA is the better of the two there.
+At $10\times10$, $15\times10$ and $20\times6$ our model is lower on 97, 100
+and 97 instances, all with $p<10^{-16}$. At $10\times6$ the test finds no
+significant difference: our model is lower on 43 of the 100 instances, the
+median difference is 6.92 in RGA's favour, and $p=0.312$, so RGA's mean
+advantage of 11.97 in Table~\ref{tab:baselines} is not significant at this
+size.
 
 \begin{table}[t]
 \centering
 \caption{Paired Wilcoxon signed-rank test of our model against each
 baseline over the 100 test instances, with Holm's correction over the 20
-comparisons. Median difference is our model minus the baseline, so a
-negative value favours our model; wins counts the instances on which our model is lower.}
+comparisons. Median difference is negative when our model performs better; 
+wins count the instances where our model yields a lower value than the baseline.}
 \label{tab:signif}
 \footnotesize
 \setlength{\tabcolsep}{3.0pt}
