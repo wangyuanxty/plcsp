@@ -121,7 +121,6 @@ appears in the reference paper: Wang et al. report 732.5 at $6\times6\times2$
 and 674.5 at $10\times6\times2$ under the same objective structure. So we
 compare absolute values within a column only, never across columns.
 
-
 \begin{table*}[t]
 \centering
 \caption{Objective on five instance families. Every method is evaluated
@@ -243,7 +242,9 @@ the best of the three for every pair and every family. Table~\ref{tab:time} repo
 build one schedule for every method and family. Every row is timed through the same simulator, one process at a time. 
 The learned methods run on the GPU, the others on one CPU core. 
 PDR applies a single pair of rules, whereas RGA performs a full run of 4850 schedule evaluations. 
-Therefore, the cost reported for RGA corresponds to the entire run. 
+Therefore, the cost reported for RGA corresponds to the entire run. Figure~\ref{fig:radar}
+summarises the same means on six axes; each axis is min-max normalised inside
+its panel, and the outward direction is the better value.
 
 \paragraph{Significance} Table~\ref{tab:signif} reports a two-sided Wilcoxon
 signed-rank test on the paired per-instance objectives, with Holm's correction
@@ -260,7 +261,7 @@ on 43), so the mean gap of 11.97 is not resolved by the paired comparison.
 \begin{table}[t]
 \centering
 \caption{Paired Wilcoxon signed-rank test of our model against each
-baseline over the 100 test instances, with Holm's correction over the 16
+baseline over the 100 test instances, with Holm's correction over the 20
 comparisons. Median difference is our model minus the baseline, so a
 negative value favours our model; wins counts the instances on which our model is lower.}
 \label{tab:signif}
@@ -294,16 +295,31 @@ $20\times6\times3$ & RGA & $-186.86$ & 97 & $<10^{-16}$ \\
 \end{tabular}
 \end{table}
 
+
+
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
 \caption{Objective of every method on the five instance families, from
 Table~\ref{tab:baselines}. The panel title $a\times b\times c$ gives $a$ jobs,
-$b$ machines and $c$ workshops. Each bar represents the average performance over the 100 test instances. 
-Black vertical lines denote the seed standard deviation of the learned methods. 
+$b$ machines and $c$ workshops. Each bar represents the average performance over the 100 test instances.
+Black vertical lines denote the seed standard deviation of the learned methods.
 The deterministic baselines lack these lines due to their deterministic nature.
 Our model is second at the two smaller sizes and first at the three larger.}
 \label{fig:main}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_radar.pdf}
+\caption{Objective, its four terms and the per-instance spread, by method and
+family. Each axis is min-max normalised inside its panel, with the smallest
+value at the outer radius, so a larger polygon is better on every axis. The
+axes are makespan, processing energy, transport time, idle energy, the
+objective and the per-instance standard deviation. The figure is a descriptive
+summary; the means in Table~\ref{tab:baselines} and the paired tests in
+Table~\ref{tab:signif} carry the claims.}
+\label{fig:radar}
 \end{figure*}
 
 Figure~\ref{fig:distribution} compares the objective in two scenarios: with and without a selector. 
@@ -313,14 +329,18 @@ from 895.21 to 867.75, and at $10\times6\times2$ from 819.33 to 808.67. In both
 panels the interquartile bar, the median and the mean move down together, while
 the violins retain their shape and overlap over almost the entire range. 
 
-The right column pairs the seed means, which separates this mean effect from
-seed-to-seed variation. At $6\times6\times2$ the three seeds gain 29.8, 15.6
-and 37.0 points, and the worst selector seed (880.92) is still lower than the
-best seed without it (887.75). At $10\times6\times2$ the differences are 31.7,
-$+13.4$ and 13.6; seed 2 reverses, and the effect is smaller than the
-seed-to-seed standard deviation ($12.83$ with the selector, $9.87$ without).
-The sign of the difference therefore depends on the training run at the larger
-size. The selector is a small, distribution-wide gain that is reliable at
+The right column splits the objective into its terms. Each axis is divided by
+its value without the selector, so the dashed pentagon is the baseline and the
+outside is better. At $6\times6\times2$ the selector lowers every term: Cmax by
+2.4\%, processing energy by 1.8\%, transport time by 6.1\%, idle energy by
+3.7\% and the objective by 3.1\%. At $10\times6\times2$ Cmax, idle energy and
+the objective fall by 1.0\%, 4.3\% and 1.3\%, but transport time rises by
+4.6\% and processing energy by 0.2\%, so the gain is a trade-off rather than a
+uniform improvement. The seed means behind the objective separate the two: at
+$6\times6\times2$ the three seeds gain 29.8, 15.6 and 37.0 points, and even the
+worst selector seed (880.92) is lower than the best seed without it (887.75);
+at $10\times6\times2$ the differences are 31.7, $+13.4$ and 13.6, where seed 2
+reverses. The selector is a small, distribution-wide gain that is reliable at
 $6\times6\times2$.
 
 \begin{figure*}[t]
@@ -329,10 +349,10 @@ $6\times6\times2$.
 \caption{Per-instance objective with and without the rule selector, on two
 families. (a), (c) Per-instance objective at $6\times6\times2$ and
 $10\times6\times2$, pooling 100 instances and three seeds (300 values per
-configuration). (b), (d) Mean objective of each seed at the same family; the red dot
-is without selector and the blue dot with selector, joined for the same seed.
-The label gives the blue value minus the red one, so a negative value favours
-the selector.}
+configuration). (b), (d) The five objective terms at the same family, each
+divided by its value without the selector. The dashed pentagon is the baseline,
+so the outside is better, and the rings mark steps of 5 percent. The blue
+pentagon is the model with the selector.}
 \label{fig:distribution}
 \end{figure*}
 
@@ -492,13 +512,32 @@ Full & $6\times6\times2$ & GRPO & 867.75 & 11.86 \\
 \end{tabular}
 \end{table}
 
-\paragraph{AGV agent} Under the same checkpoint, replacing the learned AGV agent
+\paragraph{AGV agent} Figure~\ref{fig:agv-ablation} shows the distribution of the
+per-instance change across the five families. Under the same checkpoint,
+replacing the learned AGV agent
 by the better fixed AGV rule changes the objective from 867.75 to 888.46 at
-$6\times6$ and from 808.67 to 867.99 at $10\times6$. The learned AGV agent is
-better in all three seeds at both sizes, by 0.4 to 3.6\% at $6\times6$ and by
-6.1 to 8.1\% at $10\times6$, relative to our model. The no-AGV configuration in
+$6\times6\times2$, from 808.67 to 867.99 at $10\times6\times2$, from 1836.64 to
+1916.16 at $10\times10\times2$, from 1542.33 to 1685.68 at $15\times10\times2$,
+and from 994.55 to 1019.26 at $20\times6\times3$. The learned AGV agent is
+better in all three seeds at every size, by 0.4 to 3.6\% at $6\times6\times2$,
+6.1 to 8.1\% at $10\times6\times2$, 1.7 to 7.5\% at $10\times10\times2$, 7.6 to
+10.7\% at $15\times10\times2$ and 1.5 to 3.8\% at $20\times6\times3$, relative to
+our model. The no-AGV configuration in
 Table~\ref{tab:encoder} is a different resource regime (an unbounded fleet),
 not an AGV-policy baseline.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_agv_ablation.pdf}
+\caption{Distribution of the per-instance objective change when the learned AGV
+agent is replaced by the earliest-arrival rule, on five families. Each
+distribution pools 100 instances and three seeds, and the two conditions are
+paired on the same instance. The box spans the interquartile range, the line is
+the median, the diamond the mean, and the whiskers 1.5 times the interquartile
+range. Positive values mean that the fixed rule is worse; the dashed line marks
+no change.}
+\label{fig:agv-ablation}
+\end{figure}
 
 \paragraph{Rule selection} Table~\ref{tab:rule-selector} compares our model with
 and without the top-level rule selector. At $6\times6$ the selector obtains
