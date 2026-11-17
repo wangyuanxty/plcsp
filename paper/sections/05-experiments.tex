@@ -334,37 +334,43 @@ Table~\ref{tab:signif} carry the claims.}
 \label{fig:radar}
 \end{figure*}
 
-Figure~\ref{fig:distribution} compares the objective in two scenarios: with and without a selector. 
-The left column pools the 300 values of each
-configuration (100 instances, three seeds). At $6\times6\times2$ the mean falls
-from 895.21 to 867.75, and at $10\times6\times2$ from 819.33 to 808.67. In both
-panels the interquartile bar, the median and the mean move down together, while
-the violins retain their shape and overlap over almost the entire range. 
+Figure~\ref{fig:distribution} compares the objective in two scenarios: with and without a selector.
+The top row pools the 300 values of each configuration (100 instances, three
+seeds). At $6\times6\times2$ the mean falls from 895.21 to 867.75, at
+$10\times6\times2$ from 819.33 to 808.67, and at $10\times10\times2$ from
+1880.40 to 1836.64. In all three panels the interquartile bar, the median and
+the mean move down together, while the violins retain their shape and overlap
+over almost the entire range.
 
-The right column splits the objective into its terms. Each axis is divided by
+The bottom row splits the objective into its terms. Each axis is divided by
 its value without the selector, so the dashed pentagon is the baseline and the
 outside is better. At $6\times6\times2$ the selector lowers every term: Cmax by
 2.4\%, processing energy by 1.8\%, transport time by 6.1\%, idle energy by
 3.7\% and the objective by 3.1\%. At $10\times6\times2$ Cmax, idle energy and
 the objective fall by 1.0\%, 4.3\% and 1.3\%, but transport time rises by
-4.6\% and processing energy by 0.2\%, so the gain is a trade-off rather than a
-uniform improvement. The seed means behind the objective separate the two: at
-$6\times6\times2$ the three seeds gain 29.8, 15.6 and 37.0 points, and even the
-worst selector seed (880.92) is lower than the best seed without it (887.75);
-at $10\times6\times2$ the differences are 31.7, $+13.4$ and 13.6, where seed 2
-reverses. The selector is a small, distribution-wide gain that is reliable at
-$6\times6\times2$.
+4.6\% and processing energy by 0.2\%. At $10\times10\times2$ Cmax, idle energy
+and the objective fall by 1.4\%, 3.2\% and 2.3\%, while transport time rises by
+0.6\% and processing energy by 0.2\%, so the gain is a trade-off rather than a
+uniform improvement at the two larger families. The seed means behind the
+objective separate the two: at $6\times6\times2$ the three seeds gain 29.8,
+15.6 and 37.0 points, and even the worst selector seed (880.92) is lower than
+the best seed without it (887.75); at $10\times6\times2$ the differences are
+31.7, $+13.4$ and 13.6, where seed 2 reverses; at $10\times10\times2$ they are
+44.0, 82.8 and 4.4, all in favour of the selector. The selector is a small,
+distribution-wide gain that is reliable at $6\times6\times2$ and at
+$10\times10\times2$.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_distribution.pdf}
-\caption{Per-instance objective with and without the rule selector, on two
-families. (a), (c) Per-instance objective at $6\times6\times2$ and
-$10\times6\times2$, pooling 100 instances and three seeds (300 values per
-configuration). (b), (d) The five objective terms at the same family, each
-divided by its value without the selector. The dashed pentagon is the baseline,
-so the outside is better, and the rings mark steps of 5 percent. The blue
-pentagon is the model with the selector.}
+\caption{Per-instance objective with and without the rule selector, on three
+families. (a) Per-instance objective at $6\times6\times2$, $10\times6\times2$
+and $10\times10\times2$, pooling 100 instances and three seeds (300 values per
+configuration); the violin is thinned to a light point cloud, the thick bar is
+the interquartile range, the white dot the median and the diamond the mean.
+(b) The five objective terms at each family, each divided by its value without
+the selector. The dashed pentagon is the baseline, so the outside is better,
+and the rings mark steps of 5 percent.}
 \label{fig:distribution}
 \end{figure*}
 
@@ -556,30 +562,34 @@ no change.}
 and without the top-level rule selector. At $6\times6$ the selector obtains
 867.75 against 895.21 and is better in all three seeds, a mean difference of
 27.46, or 3.1\%. At $10\times6$ the gap is 10.66, or 1.3\%, and it is better in
-two of the three seeds. A paired test over the 100 instances agrees: $p=0.0023$
-at $6\times6$ (Holm over the two sizes), where the selector is lower on 67 of
-them, and $p=0.167$ at $10\times6$, where it is lower on 54. So the selector is a small and consistent gain
-at the smaller size and a small and uneven one at the larger size. It is not
-the source of the margin over the rule baseline: without it our model is
-still 424.03 below the best PDR pair. The rule-usage analysis below shows what
-the selector changes.
+two of the three seeds. At $10\times10$ the gap is 43.76, or 2.3\%, and it is
+better in all three seeds. A paired test over the 100 instances agrees: after
+Holm correction over the three sizes, $p=0.0034$ at $6\times6$, where the
+selector is lower on 67 of them; $p=0.167$ at $10\times6$, where it is lower on
+54; and $p=0.0146$ at $10\times10$, where it is lower on 64. So the selector is
+a small and consistent gain at two sizes and a small and uneven one at the
+third. It is not the source of the margin over the rule baseline: without it
+our model is still 424.03 below the best PDR pair. The rule-usage analysis
+below shows what the selector changes.
 
 \begin{table}[t]
 \centering
 \caption{Rule-selection ablation. Same encoder, algorithm, and AGV agent;
-only the top-level selector is removed. Values are three-seed means over the
-100 test instances.}
+only the top-level selector is removed; with and without refer to it. Values
+are three-seed means over the 100 test instances.}
 \label{tab:rule-selector}
 \small
-\setlength{\tabcolsep}{3pt}
+\setlength{\tabcolsep}{2.5pt}
 \begin{tabular}{llrrrrr}
 \toprule
 Size & Config. & s1 & s2 & s3 & Mean & Std \\
 \midrule
-$6\times6\times2$ & with selector & 857.93 & 880.92 & 864.39 & 867.75 & 11.86 \\
+$6\times6\times2$ & with & 857.93 & 880.92 & 864.39 & 867.75 & 11.86 \\
  & without & 887.75 & 896.53 & 901.36 & 895.21 & 6.90 \\
-$10\times6\times2$ & with selector & 796.81 & 822.29 & 806.91 & 808.67 & 12.83 \\
+$10\times6\times2$ & with & 796.81 & 822.29 & 806.91 & 808.67 & 12.83 \\
  & without & 828.55 & 808.92 & 820.51 & 819.33 & 9.87 \\
+$10\times10\times2$ & with & 1793.13 & 1836.74 & 1880.04 & 1836.64 & 43.46 \\
+ & without & 1837.13 & 1919.58 & 1884.48 & 1880.40 & 41.38 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -658,7 +668,10 @@ better in all three seeds there.
 Per-seed
 differences are $-29.82$, $-15.61$, and $-36.97$ (with selector minus
 without), so
-the sign is stable while the size varies by a factor of 2.4. At $10\times6$
+the sign is stable while the size varies by a factor of 2.4. At $10\times10$
+the mean difference is 43.76, or 2.3\%, and all three seeds favour the
+selector, with per-seed differences of $-44.00$, $-82.84$ and $-4.44$; the
+sign is again stable, but the size varies by a factor of 19. At $10\times6$
 the mean difference falls to 10.66 and the sign is no longer stable. The selector makes a
 few decisions per episode, so its update sees a few dozen transitions per
 group. The effect is real but small next to the 451.49 that separates our model from the best PDR pair. We report the comparison as an analysis
