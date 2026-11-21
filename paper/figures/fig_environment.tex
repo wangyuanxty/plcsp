@@ -1,19 +1,32 @@
 \documentclass[tikz,border=1pt]{standalone}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,shapes.geometric}
-\definecolor{ink}{HTML}{222831}
-\definecolor{steel}{HTML}{6B7C8C}
-\definecolor{teal}{HTML}{6E8C8A}
-\definecolor{gold}{HTML}{B08D57}
-\definecolor{pale}{HTML}{EEF1F4}
-\definecolor{field}{HTML}{E9EFF6}
-\definecolor{iconbg}{HTML}{D8E0E4}
+\definecolor{ink}{HTML}{1A2433}
+\definecolor{steel}{HTML}{21506F}
+\definecolor{machinetop}{HTML}{B3D9F2}
+\definecolor{machineleft}{HTML}{66A9D6}
+\definecolor{machineright}{HTML}{2E77AE}
+\definecolor{agvbody}{HTML}{FFD54F}
+\definecolor{stationbody}{HTML}{4F6D7A}
+\definecolor{loadedblue}{HTML}{0072B2}
+\definecolor{emptyorange}{HTML}{E69F00}
+\definecolor{transfergreen}{HTML}{009E73}
+\definecolor{jobmagenta}{HTML}{D81B60}
+\definecolor{selectamber}{HTML}{FFC107}
+\definecolor{pale}{HTML}{F2F6FA}
+\definecolor{fieldA}{HTML}{EAF4FB}
+\definecolor{fieldB}{HTML}{F3EAF9}
+\definecolor{headerA}{HTML}{1565C0}
+\definecolor{headerB}{HTML}{7B1FA2}
 \begin{document}
 \begin{tikzpicture}[y=-1cm,x=1cm,font=\sffamily\fontsize{7.5}{9.2}\selectfont,
   every node/.style={inner sep=0.6pt},
   ar/.style={-{Latex[length=1.4mm,width=1.0mm]},line width=0.55pt,draw=ink},
-  route/.style={gold,line width=1.05pt,rounded corners=4pt},
+  route/.style={loadedblue,line width=1.15pt,rounded corners=4pt},
   routea/.style={route,-{Latex[length=1.5mm,width=1.1mm]}},
+  routeempty/.style={emptyorange,dashed,line width=1.15pt,rounded corners=4pt},
+  routeemptya/.style={routeempty,-{Latex[length=1.5mm,width=1.1mm]}},
+  transferline/.style={transfergreen,line width=1.1pt},
   panel/.style={draw=black!55,line width=0.5pt,fill=white},
   lab/.style={text=ink},
   title/.style={lab,anchor=west,font=\bfseries\fontsize{8.4}{10}\selectfont},
@@ -21,15 +34,15 @@
 
 \tikzset{
   pics/machine/.style={code={\begin{scope}[yscale=-1]
-    \fill[iconbg,draw=ink,line width=0.72pt]
+    \fill[machinetop,draw=ink,line width=0.72pt]
       (0,0.55) -- (0.60,0.28) -- (0,0.01) -- (-0.60,0.28) -- cycle;
-    \fill[steel!32!white,draw=ink,line width=0.72pt]
+    \fill[machineleft,draw=ink,line width=0.72pt]
       (-0.60,0.28) -- (0,0.01) -- (0,-0.41) -- (-0.60,-0.14) -- cycle;
-    \fill[steel!52!white,draw=ink,line width=0.72pt]
+    \fill[machineright,draw=ink,line width=0.72pt]
       (0,0.01) -- (0.60,0.28) -- (0.60,-0.14) -- (0,-0.41) -- cycle;
   \end{scope}}},
   pics/agv/.style={code={\begin{scope}[yscale=-1]
-    \fill[fill=iconbg,draw=ink,line width=0.72pt,rounded corners=3.2pt]
+    \fill[fill=agvbody,draw=ink,line width=0.72pt,rounded corners=3.2pt]
       (-0.78,-0.12) rectangle (0.78,0.20);
     \draw[ink,line width=0.6pt] (-0.62,0.30) -- (0.62,0.30);
     \fill[ink] (-0.34,-0.22) circle (0.10);
@@ -38,13 +51,13 @@
     \fill[white] (0.34,-0.22) circle (0.042);
   \end{scope}}},
   pics/station/.style={code={\begin{scope}[yscale=-1]
-    \fill[steel,draw=ink,line width=0.55pt] (-0.55,-0.06) rectangle (0.55,0.06);
-    \fill[steel,draw=ink,line width=0.50pt] (-0.50,-0.06) rectangle (-0.40,-0.34);
-    \fill[steel,draw=ink,line width=0.50pt] (0.40,-0.06) rectangle (0.50,-0.34);
-    \fill[gold,draw=ink,line width=0.45pt] (-0.14,0.06) rectangle (0.14,0.30);
+    \fill[stationbody,draw=ink,line width=0.55pt] (-0.55,-0.06) rectangle (0.55,0.06);
+    \fill[stationbody,draw=ink,line width=0.50pt] (-0.50,-0.06) rectangle (-0.40,-0.34);
+    \fill[stationbody,draw=ink,line width=0.50pt] (0.40,-0.06) rectangle (0.50,-0.34);
+    \fill[transfergreen,draw=ink,line width=0.45pt] (-0.14,0.06) rectangle (0.14,0.30);
   \end{scope}}},
   pics/job/.style={code={\begin{scope}[yscale=-1]
-    \fill[gold,draw=ink,line width=0.45pt] (-0.15,-0.15) rectangle (0.15,0.15);
+    \fill[jobmagenta,draw=ink,line width=0.45pt] (-0.15,-0.15) rectangle (0.15,0.15);
   \end{scope}}},
   pics/switch/.style={code={\begin{scope}[yscale=-1]
     \fill[white,draw=ink,line width=0.6pt,rounded corners=1.6pt]
@@ -54,7 +67,7 @@
     \fill[ink] (-0.38,0.22) circle (0.055);
     \fill[ink] (0.00,0.26) circle (0.055);
     \fill[ink] (0.38,0.22) circle (0.055);
-    \draw[gold,line width=1.2pt] (0,-0.16) -- (-0.36,0.19);
+    \draw[selectamber,line width=1.2pt] (0,-0.16) -- (-0.36,0.19);
   \end{scope}}},
   pics/switch4/.style={code={\begin{scope}[yscale=-1]
     \fill[white,draw=ink,line width=0.6pt,rounded corners=1.6pt]
@@ -65,11 +78,11 @@
     \fill[ink] (-0.15,0.26) circle (0.055);
     \fill[ink] (0.15,0.26) circle (0.055);
     \fill[ink] (0.45,0.20) circle (0.055);
-    \draw[gold,line width=1.2pt] (0,-0.16) -- (-0.43,0.17);
+    \draw[selectamber,line width=1.2pt] (0,-0.16) -- (-0.43,0.17);
   \end{scope}}},
   pics/operation/.style={code={\begin{scope}[yscale=-1]
     \fill[pale,draw=ink,line width=0.55pt] (-0.46,-0.30) rectangle (0.46,0.30);
-    \fill[gold,draw=ink,line width=0.35pt] (-0.10,-0.10) rectangle (0.10,0.10);
+    \fill[jobmagenta,draw=ink,line width=0.35pt] (-0.10,-0.10) rectangle (0.10,0.10);
   \end{scope}}},
   pics/clock/.style={code={\begin{scope}[yscale=-1]
     \draw[ink,line width=0.55pt] (0,0) circle (0.26);
@@ -105,38 +118,38 @@
 % ================= (a) =================
 \node[title] at (0.35,0.47) {(a) Shop overview};
 
-\draw[black!35,line width=0.45pt,fill=field,rounded corners=6pt]
+\draw[black!35,line width=0.45pt,fill=fieldA,rounded corners=6pt]
   (0.55,0.62) rectangle (8.65,8.15);
-\draw[black!35,line width=0.45pt,fill=field,rounded corners=6pt]
+\draw[black!35,line width=0.45pt,fill=fieldB,rounded corners=6pt]
   (9.35,0.62) rectangle (17.45,8.15);
 \begin{scope}
   \clip (8.66,0.62) rectangle (9.34,8.15);
   \foreach \k in {-1.0,-0.89,...,9.4} {
-    \draw[black!35,line width=0.3pt] (8.40,\k) -- (9.60,\k-1.20);
+    \draw[steel!40,line width=0.3pt] (8.40,\k) -- (9.60,\k-1.20);
   }
 \end{scope}
-\draw[black!30,line width=0.35pt,fill=white,rounded corners=2pt]
+\draw[steel!40,line width=0.35pt,fill=white,rounded corners=2pt]
   (8.38,0.70) rectangle (9.62,1.12);
 \node[lab] at (9.00,0.91) {boundary};
 
-\draw[black!30,line width=0.35pt,fill=steel,rounded corners=4pt]
+\draw[black!30,line width=0.35pt,fill=headerA,rounded corners=4pt]
   (2.45,0.78) rectangle (7.45,1.18);
 \node[white] at (4.60,0.98)
   {\bfseries\fontsize{7.8}{9.4}\selectfont Workshop 1};
-\draw[black!30,line width=0.35pt,fill=steel,rounded corners=4pt]
+\draw[black!30,line width=0.35pt,fill=headerB,rounded corners=4pt]
   (11.25,0.78) rectangle (16.25,1.18);
 \node[white] at (13.40,0.98)
   {\bfseries\fontsize{7.8}{9.4}\selectfont Workshop 2};
 
 % route first
-\draw[routea,dashed] (3.90,2.35) -- (3.60,2.75) -- (3.60,3.65) --
-  (3.60,5.95) -- (4.4,6.30);
-\draw[routea] (4.62,6.20) -- (5.30,5.80) -- (6.90,5.80) -- (7.50,4.50);
-\draw[gold,line width=0.95pt] (8.37,4.15) -- (9.56,4.15);
-\draw[gold,line width=0.95pt] (8.37,4.25) -- (9.56,4.25);
-\fill[gold] (9.56,4.12) -- (9.56,4.28) -- (9.68,4.20) -- cycle;
-\draw[routea,dashed] (9.72,4.46) -- (9.72,5.60) -- (13.15,5.60) -- (13.15,6.30);
-\draw[routea] (13.4,6.35) -- (13.4,4.73);
+\draw[routeemptya] (4.4,6.30) -- (3.60,5.95) -- (3.60,3.65) --
+  (3.60,2.75) -- (3.90,2.35);
+\draw[routea] (3.90,2.35) -- (3.90,3.30) -- (7.10,3.30) -- (7.45,4.10);
+\draw[transferline] (8.37,4.15) -- (9.56,4.15);
+\draw[transferline] (8.37,4.25) -- (9.56,4.25);
+\fill[transfergreen] (9.56,4.12) -- (9.56,4.28) -- (9.68,4.20) -- cycle;
+\draw[routeemptya] (13.15,6.30) -- (13.15,5.60) -- (9.72,5.60) -- (9.72,4.46);
+\draw[routea] (10.10,3.85) -- (10.10,3.40) -- (13.40,3.40) -- (13.40,3.75);
 
 % machines
 \foreach \xx in {2.2,4.4,6.6} {
@@ -163,7 +176,7 @@
 }
 
 % jobs
-\pic at (4.4,6.32) {job};
+\pic at (5.10,3.30) {job};
 \pic at (9.00,4.20) {job};
 
 % step numbers
@@ -182,12 +195,12 @@
   (0.68,7.42) rectangle (6.40,7.94);
 \draw[route] (0.85,7.68) -- (1.35,7.68);
 \node[lab,anchor=west] at (1.42,7.68) {loaded};
-\draw[route,dashed] (2.30,7.68) -- (2.80,7.68);
+\draw[routeempty] (2.30,7.68) -- (2.80,7.68);
 \node[lab,anchor=west] at (2.87,7.68) {empty};
-\draw[gold,line width=0.7pt] (3.85,7.65) -- (4.35,7.65);
-\draw[gold,line width=0.7pt] (3.85,7.71) -- (4.35,7.71);
+\draw[transferline] (3.85,7.65) -- (4.35,7.65);
+\draw[transferline] (3.85,7.71) -- (4.35,7.71);
 \node[lab,anchor=west] at (4.42,7.68) {transfer};
-\fill[gold,draw=ink,line width=0.4pt] (5.48,7.53) rectangle (5.76,7.81);
+\fill[jobmagenta,draw=ink,line width=0.4pt] (5.48,7.53) rectangle (5.76,7.81);
 \node[lab,anchor=west] at (5.84,7.68) {job};
 
 % ================= (b) =================
@@ -209,17 +222,17 @@
 \node[lab,anchor=west] at (0.45,12.13) {target AGV};
 \node[lab,anchor=west] at (0.45,12.90) {AGV};
 
-\draw[ink,line width=0.35pt,dashed,fill=gold!12!white] (3.20,10.38) rectangle (4.16,10.72);
-\fill[gold!55!white,draw=ink,line width=0.35pt] (4.16,10.38) rectangle (5.60,10.72);
+\draw[emptyorange,line width=0.4pt,dashed,fill=emptyorange!12!white] (3.20,10.38) rectangle (4.16,10.72);
+\fill[loadedblue!45!white,draw=loadedblue,line width=0.4pt] (4.16,10.38) rectangle (5.60,10.72);
 
-\fill[gold!85!white,draw=ink,line width=0.35pt] (5.60,11.22) rectangle (6.40,11.56);
+\fill[transfergreen!65!white,draw=transfergreen,line width=0.4pt] (5.60,11.22) rectangle (6.40,11.56);
 
 \fill[pale,draw=ink,line width=0.35pt] (6.40,11.96) rectangle (7.04,12.30);
 \pic[scale=0.34] at (6.62,12.13) {clock};
-\fill[gold!55!white,draw=ink,line width=0.35pt] (7.04,11.96) rectangle (8.00,12.30);
+\fill[loadedblue!45!white,draw=loadedblue,line width=0.4pt] (7.04,11.96) rectangle (8.00,12.30);
 
-\draw[ink,line width=0.35pt,dashed,fill=gold!12!white] (3.20,12.74) rectangle (4.00,13.08);
-\fill[gold!55!white,draw=ink,line width=0.35pt] (4.00,12.74) rectangle (5.44,13.08);
+\draw[emptyorange,line width=0.4pt,dashed,fill=emptyorange!12!white] (3.20,12.74) rectangle (4.00,13.08);
+\fill[loadedblue!45!white,draw=loadedblue,line width=0.4pt] (4.00,12.74) rectangle (5.44,13.08);
 
 \foreach \x/\y/\n in {3.68/10.55/1,4.88/10.55/2,6.00/11.39/3,7.52/12.13/4,3.60/12.91/1,4.72/12.91/2} {
   \fill[white,draw=ink,line width=0.35pt] (\x,\y) circle (0.105);
@@ -244,7 +257,7 @@
   12.08/SPT/0,12.91/LPE/0,13.74/STT/1,14.58/MRT/0,
   15.50/NEAR/1,16.35/EARLY/0,17.20/LEAST/0} {
   \ifnum\sel=1
-    \fill[gold!60!white,draw=ink,line width=0.5pt] (\x-0.40,9.49) rectangle (\x+0.40,9.75);
+    \fill[selectamber!70!white,draw=ink,line width=0.5pt] (\x-0.40,9.49) rectangle (\x+0.40,9.75);
   \else
     \fill[white,draw=ink,line width=0.4pt] (\x-0.40,9.49) rectangle (\x+0.40,9.75);
   \fi
@@ -262,7 +275,7 @@
 \draw[ar] (13.30,9.85) -- (13.30,10.22);
 \draw[ar] (16.35,9.85) -- (16.35,10.37);
 
-\draw[black!45,line width=0.5pt,fill=steel!35!white,rounded corners=6pt]
+\draw[black!45,line width=0.5pt,fill=steel!30!white,rounded corners=6pt]
   (9.80,11.46) rectangle (16.80,11.86);
 \node[lab] at (13.30,11.66) {joint action};
 
@@ -271,18 +284,18 @@
 \draw[black!45,line width=0.4pt] (9.80,11.98) rectangle (16.80,12.60);
 \node[lab,anchor=west] at (9.92,12.12) {S$_1$};
 \node[lab,anchor=west] at (9.92,12.42) {S$_2$};
-\fill[steel!35!white,draw=ink,line width=0.2pt] (10.45,12.06) rectangle (11.80,12.18);
-\fill[gold!55!white,draw=ink,line width=0.2pt] (12.00,12.06) rectangle (13.35,12.18);
-\fill[steel!35!white,draw=ink,line width=0.2pt] (13.55,12.06) rectangle (14.90,12.18);
-\fill[gold!55!white,draw=ink,line width=0.2pt] (15.10,12.06) rectangle (16.45,12.18);
-\fill[gold!55!white,draw=ink,line width=0.2pt] (10.45,12.36) rectangle (11.90,12.48);
-\fill[steel!35!white,draw=ink,line width=0.2pt] (12.10,12.36) rectangle (13.55,12.48);
-\fill[gold!55!white,draw=ink,line width=0.2pt] (13.75,12.36) rectangle (15.20,12.48);
-\fill[steel!35!white,draw=ink,line width=0.2pt] (15.40,12.36) rectangle (16.45,12.48);
+\fill[steel!25!white,draw=ink,line width=0.2pt] (10.45,12.06) rectangle (11.80,12.18);
+\fill[selectamber!50!white,draw=ink,line width=0.2pt] (12.00,12.06) rectangle (13.35,12.18);
+\fill[steel!25!white,draw=ink,line width=0.2pt] (13.55,12.06) rectangle (14.90,12.18);
+\fill[selectamber!50!white,draw=ink,line width=0.2pt] (15.10,12.06) rectangle (16.45,12.18);
+\fill[selectamber!50!white,draw=ink,line width=0.2pt] (10.45,12.36) rectangle (11.90,12.48);
+\fill[steel!25!white,draw=ink,line width=0.2pt] (12.10,12.36) rectangle (13.55,12.48);
+\fill[selectamber!50!white,draw=ink,line width=0.2pt] (13.75,12.36) rectangle (15.20,12.48);
+\fill[steel!25!white,draw=ink,line width=0.2pt] (15.40,12.36) rectangle (16.45,12.48);
 
 \foreach \x in {11.05,12.55,14.05,15.55} {
   \draw[black!35,line width=0.45pt] (\x-0.30,12.66) -- (\x+0.30,12.66);
-  \fill[gold] (\x,12.66) circle (0.05);
+  \fill[selectamber] (\x,12.66) circle (0.05);
 }
 \pic[scale=0.60] at (11.05,12.84) {clock};
 \node[lab] at (11.05,13.14) {C$_{\max}$};
