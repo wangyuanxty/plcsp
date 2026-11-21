@@ -1,215 +1,282 @@
-\documentclass[tikz,border=1pt]{standalone}
+\documentclass[tikz,border=4pt]{standalone}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning}
-\definecolor{ink}{HTML}{1A2433}
-\definecolor{steel}{HTML}{21506F}
-\definecolor{loadedblue}{HTML}{0072B2}
-\definecolor{emptyorange}{HTML}{E69F00}
-\definecolor{transfergreen}{HTML}{009E73}
-\definecolor{selectamber}{HTML}{FFC107}
-\definecolor{pale}{HTML}{F2F6FA}
-\definecolor{paleblue}{HTML}{E7F2FB}
+\usetikzlibrary{arrows.meta}
+
+% Neutral structure and saturated semantic accents
+\definecolor{ink}{HTML}{142539}
+\definecolor{muted}{HTML}{485A70}
+\definecolor{steel}{HTML}{38556F}
+\definecolor{edge}{HTML}{AABCCB}
+\definecolor{paper}{HTML}{F4F8FC}
+
+\definecolor{opBlue}{HTML}{0079D1}
+\definecolor{machOrange}{HTML}{E96B0B}
+\definecolor{agvTeal}{HTML}{00A38D}
+\definecolor{ruleGold}{HTML}{BC8500}
+\definecolor{creditGreen}{HTML}{149153}
+\definecolor{trainViolet}{HTML}{7951C6}
+
+\tikzset{
+  every node/.style={text=ink,align=center,inner sep=1pt},
+  body/.style={font=\sffamily\fontsize{9}{10.8}\selectfont},
+  small/.style={font=\sffamily\fontsize{7.8}{9.2}\selectfont},
+  heading/.style={font=\sffamily\bfseries\fontsize{9}{10.8}\selectfont},
+  panel title/.style={
+    anchor=west,font=\sffamily\bfseries\fontsize{11}{13}\selectfont
+  },
+  card/.style={
+    draw=edge,fill=paper,line width=.5pt,rounded corners=3pt
+  },
+  agent frame/.style={
+    draw=edge,line width=.45pt,rounded corners=4pt
+  },
+  module/.style={
+    draw=steel!65,fill=white,line width=.5pt,rounded corners=2.5pt
+  },
+  emphasis/.style={module,draw=steel,fill=steel!7!white},
+  agent lane/.style={
+    draw=#1!72!white,fill=#1!20!white,
+    line width=.6pt,rounded corners=3pt
+  },
+  agent box/.style={
+    module,draw=#1!82!white,fill=#1!15!white
+  },
+  rule chip/.style={
+    draw=#1!76!white,fill=#1!27!white,
+    line width=.55pt,rounded corners=5pt
+  },
+  tip/.style={-{Latex[length=1.4mm,width=1.0mm]}},
+  flow/.style={tip,draw=steel,line width=.55pt},
+  prior/.style={
+    tip,draw=ruleGold!88!black,line width=.65pt,
+    dash pattern=on 2.4pt off 1.55pt
+  },
+  cost/.style={
+    tip,draw=ruleGold!88!black,line width=.75pt,densely dotted
+  },
+  credit/.style={tip,draw=creditGreen,line width=.7pt},
+  creditback/.style={credit,dashed},
+  train loop/.style={tip,draw=trainViolet,line width=.6pt,dashed}
+}
+
+% Arguments: row centre, agent name, accent colour.
+\newcommand{\CandidateCard}[3]{%
+  \draw[agent box=#3] (.49,#1-.48) rectangle (3.03,#1+.48);
+  \node[small,anchor=west,text=#3!68!black,inner sep=0pt]
+    at (.63,#1-.17) {\textbf{#2 tokens}};
+  \foreach \k in {0,1,2,3,4}{%
+    \draw[fill=#3!36!white,draw=#3,line width=.35pt]
+      (.65+.25*\k,#1+.10) rectangle (.80+.25*\k,#1+.25);
+  }
+  \node[small,anchor=west,text=muted] at (1.92,#1+.17) {\ldots};
+}
+
+% Arguments: row centre, accent colour, caption offset.
+\newcommand{\Scores}[3]{%
+  \foreach \barx/\barheight in {
+    10.16/.15,10.40/.20,10.64/.38,10.88/.20,11.12/.15
+  }{%
+    \draw[fill=#2!36!white,draw=#2,line width=.35pt]
+      (\barx-.065,#1+.19) rectangle
+      (\barx+.065,#1+.19-\barheight);
+  }
+  \fill[#2] (10.575,#1+.19) rectangle (10.705,#1-.19);
+  \node[small,text=muted,inner sep=0pt]
+    at (10.64,#1+#3) {masked softmax};
+}
+
+\newcommand{\ActionBox}[3]{%
+  \draw[agent box=#3,fill=#3!32!white]
+    (11.57,#1-.29) rectangle (13.98,#1+.29);
+  \node[small,text=#3!65!black,inner sep=0pt]
+    at (12.775,#1) {\textbf{#2 action}};
+}
+
+% Arguments: row centre, repetition count, accent colour.
+\newcommand{\SingleEncoder}[3]{%
+  \draw[module,draw=#3!72!white]
+    (5.97,#1-.37) rectangle (8.39,#1+.37);
+  \node[small] at (7.18,#1) {Set Transformer\\$\times #2$};
+  \draw[flow] (8.39,#1) -- (10.01,#1);
+}
+
+\colorlet{opBlue }{opBlue}
+\colorlet{machOrange }{machOrange}
+\colorlet{agvTeal }{agvTeal}
+\colorlet{ruleGold }{ruleGold}
+\colorlet{creditGreen }{creditGreen}
+\colorlet{trainViolet }{trainViolet}
 \begin{document}
-\begin{tikzpicture}[y=-1cm,x=1cm,font=\sffamily\fontsize{7.2}{8.6}\selectfont,
-  every node/.style={inner sep=0.6pt},
-  card/.style={draw=steel!90,line width=0.5pt,fill=pale,rounded corners=2.5pt},
-  tokbox/.style={draw=steel!70,line width=0.4pt,fill=white,rounded corners=2.5pt},
-  lane/.style={draw=steel!90,line width=0.55pt,fill=paleblue,rounded corners=2.5pt},
-  mod/.style={draw=ink,line width=0.45pt,fill=white,rounded corners=1.5pt},
-  pill/.style={draw=ink!50,line width=0.4pt,fill=selectamber!28!white,rounded corners=6pt},
-  flow/.style={-{Latex[length=1.3mm,width=1.0mm]},line width=0.5pt,draw=steel},
-  selectdash/.style={-{Latex[length=1.2mm,width=1.0mm]},line width=0.5pt,draw=selectamber,dashed},
-  selectdot/.style={-{Latex[length=1.2mm,width=1.0mm]},line width=0.5pt,draw=selectamber,dotted},
-  greenflow/.style={-{Latex[length=1.3mm,width=1.0mm]},line width=0.55pt,draw=transfergreen},
-  greendash/.style={-{Latex[length=1.2mm,width=1.0mm]},line width=0.5pt,draw=transfergreen,dashed},
-  loop/.style={-{Latex[length=1.2mm,width=1.0mm]},line width=0.45pt,draw=steel,dashed},
-  title/.style={anchor=west,font=\bfseries\fontsize{8.6}{10.2}\selectfont},
-  lab/.style={text=ink},
-  small/.style={font=\fontsize{5.8}{6.8}\selectfont,text=ink},
-]
+\begin{tikzpicture}[x=1cm,y=-1cm,body]
 
-% ================= (a) =================
-\node[title] at (0.30,0.48) {(a) Four agents and credit flow};
+% ================= (a) Four agents and credit flow =================
+\node[panel title] at (.30,.34) {(a) Four agents and credit flow};
 
-% selector card
-\draw[card] (3.30,0.95) rectangle (10.30,2.40);
-\node[font=\bfseries\fontsize{7.6}{9.0}\selectfont] at (6.80,1.28) {rule selector agent};
-\draw[pill] (3.95,1.70) rectangle (5.65,2.13);
-\node at (4.80,1.915) {3 job rules};
-\draw[pill] (5.85,1.70) rectangle (7.75,2.13);
-\node at (6.80,1.915) {4 machine rules};
-\draw[pill] (7.95,1.70) rectangle (9.65,2.13);
-\node at (8.80,1.915) {3 AGV rules};
+% State and candidates
+\draw[card] (.30,.91) rectangle (3.22,8.99);
+\node[heading] at (1.76,2.18) {State and\\candidates};
 
-% per-agent costs card
-\draw[card] (13.40,0.95) rectangle (17.60,2.55);
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (15.50,1.26) {per-agent costs};
-\node[anchor=west] at (13.60,1.70) {operation: makespan + idle};
-\node[anchor=west] at (13.60,2.02) {machine: PEC + transport};
-\node[anchor=west] at (13.60,2.34) {AGV: transport + delay};
+% Rule selector
+\draw[card,draw=ruleGold!60!white,fill=ruleGold!13!white]
+  (3.46,.91) rectangle (14.20,2.42);
+\node[heading] at (8.83,1.26) {Rule selector agent};
 
-% state card
-\draw[card] (0.20,0.95) rectangle (2.60,9.95);
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (1.40,1.32) {state and};
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (1.40,1.60) {candidates};
-\draw[tokbox] (0.30,3.80) rectangle (2.50,4.72);
-\draw[tokbox] (0.30,5.08) rectangle (2.50,6.00);
-\draw[tokbox] (0.30,6.36) rectangle (2.50,7.28);
-\node[anchor=west] at (0.35,4.02) {operation};
-\node[anchor=west] at (0.35,4.26) {tokens};
-\foreach \k in {0,1,2,3,4} {
-  \fill[loadedblue!15!white,draw=loadedblue,line width=0.35pt] (0.35+0.25*\k,4.46) rectangle (0.50+0.25*\k,4.61);
+\foreach \x/\ruletext/\accent in {
+  5.78/{3 job rules}/opBlue,
+  8.83/{4 machine rules}/machOrange,
+  11.88/{3 AGV rules}/agvTeal
+}{%
+  \draw[rule chip=\accent]
+    (\x-1.24,1.64) rectangle (\x+1.24,2.16);
+  \node[small,text=\accent!68!black]
+    at (\x,1.90) {\textbf{\ruletext}};
 }
-\node[anchor=west] at (1.60,4.54) {\ldots};
-\node[anchor=west] at (0.35,5.30) {machine};
-\node[anchor=west] at (0.35,5.54) {tokens};
-\foreach \k in {0,1,2,3,4} {
-  \fill[emptyorange!18!white,draw=emptyorange,line width=0.35pt] (0.35+0.25*\k,5.74) rectangle (0.50+0.25*\k,5.89);
+
+% Per-agent costs: three separate boxes with more vertical space
+\draw[card] (14.77,.91) rectangle (19.05,3.86);
+\node[heading] at (16.91,1.26) {Per-agent costs};
+
+\foreach \y/\agent/\terms/\accent in {
+  1.96/Operation/{makespan + idle}/opBlue,
+  2.68/Machine/{PEC + transport}/machOrange,
+  3.40/AGV/{transport + delay}/agvTeal
+}{%
+  \draw[agent box=\accent]
+    (14.94,\y-.23) rectangle (18.88,\y+.23);
+  \node[small,anchor=west,inner sep=0pt] at (15.09,\y)
+    {\textcolor{\accent!68!black}{\textbf{\agent:}}\enspace\terms};
 }
-\node[anchor=west] at (1.60,5.82) {\ldots};
-\node[anchor=west] at (0.35,6.58) {AGV};
-\node[anchor=west] at (0.35,6.82) {tokens};
-\foreach \k in {0,1,2,3,4} {
-  \fill[transfergreen!15!white,draw=transfergreen,line width=0.35pt] (0.35+0.25*\k,7.02) rectangle (0.50+0.25*\k,7.17);
+\draw[cost] (14.77,1.90) -- (14.20,1.90);
+
+% Shared rule prior and dispatch lanes
+\draw[agent frame] (3.46,2.95) rectangle (14.20,8.99);
+\draw[prior] (8.83,2.42) -- (8.83,2.95);
+\node[small,anchor=west,text=ruleGold!68!black] at (8.99,2.68)
+  {Rule priors to dispatch agents};
+
+\foreach \y/\agent/\accent in {
+  3.88/Operation/opBlue,
+  5.88/Machine/machOrange,
+  7.96/AGV/agvTeal
+}{%
+  \draw[agent lane=\accent]
+    (3.62,\y-.80) rectangle (14.04,\y+.86);
+  \node[heading,anchor=west,align=left,
+        text=\accent!68!black,inner sep=0pt]
+    at (3.72,\y) {\agent\\agent};
+  \draw[flow] (3.03,\y) -- (3.62,\y);
+  \draw[flow] (11.26,\y) -- (11.57,\y);
 }
-\node[anchor=west] at (1.60,7.10) {\ldots};
-\node[anchor=west,font=\fontsize{5.0}{6.0}\selectfont] at (0.35,9.28) {one token per candidate;};
-\node[anchor=west,font=\fontsize{5.0}{6.0}\selectfont] at (0.35,9.52) {the set size varies};
 
-% lanes
-\draw[lane] (2.90,3.10) rectangle (12.35,4.60);
-\draw[lane] (2.90,4.90) rectangle (12.35,6.70);
-\draw[lane] (2.90,6.95) rectangle (12.35,8.45);
+\CandidateCard{3.88}{Operation}{opBlue}
+\CandidateCard{5.88}{Machine}{machOrange}
+\CandidateCard{7.96}{AGV}{agvTeal}
 
-% operation lane
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (3.62,3.72) {operation};
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (3.62,3.98) {agent};
-\draw[mod] (4.45,3.28) rectangle (6.45,3.88);
-\node[font=\fontsize{6.2}{7.4}\selectfont] at (5.45,3.58) {Set Transformer};
-\draw[mod] (6.35,3.20) rectangle (6.75,3.40);
-\node[font=\fontsize{5.6}{6.4}\selectfont] at (6.55,3.30) {$\times2$};
-\draw[flow] (6.50,3.58) -- (7.40,3.58);
-\foreach \x/\h in {7.45/0.16,7.72/0.18,7.99/0.40,8.26/0.18,8.53/0.16} {
-  \fill[loadedblue!25!white,draw=loadedblue!80,line width=0.3pt] (\x-0.08,3.86) rectangle (\x+0.08,3.86-\h);
+% Operation agent
+\SingleEncoder{3.88}{2}{opBlue}
+\Scores{3.88}{opBlue}{.48}
+\ActionBox{3.88}{Operation}{opBlue}
+
+% Machine agent
+\draw[module,draw=machOrange!72!white]
+  (5.12,5.51) rectangle (7.17,6.25);
+\node[small,inner sep=0pt] at (6.145,5.88)
+  {Set Transformer\\$\times 1$};
+\node[small,text=muted,inner sep=0pt] at (6.145,6.49)
+  {Within machine};
+\draw[flow] (7.17,5.88) -- (7.41,5.88);
+
+\draw[module,draw=machOrange!72!white]
+  (7.41,5.51) rectangle (9.46,6.25);
+\node[small,inner sep=0pt] at (8.435,5.88)
+  {Set Transformer\\$\times 1$};
+\node[small,text=muted,inner sep=0pt] at (8.435,6.49)
+  {Across machines};
+\draw[flow] (9.46,5.88) -- (10.02,5.88);
+
+\Scores{5.88}{machOrange}{.36}
+\ActionBox{5.88}{Machine}{machOrange}
+
+% AGV agent
+\SingleEncoder{7.96}{1}{agvTeal}
+\Scores{7.96}{agvTeal}{.48}
+\ActionBox{7.96}{AGV}{agvTeal}
+
+% Joint action and shop update
+\draw[emphasis] (14.69,5.29) rectangle (16.27,6.47);
+\node[heading] at (15.48,5.88) {Joint\\action};
+
+\draw[flow] (13.98,3.88) -- (14.43,3.88)
+  -- (14.43,5.57) -- (14.69,5.57);
+\draw[flow] (13.98,5.88) -- (14.69,5.88);
+\draw[flow] (13.98,7.96) -- (14.43,7.96)
+  -- (14.43,6.19) -- (14.69,6.19);
+
+\draw[emphasis] (16.72,5.29) rectangle (19.05,6.47);
+\node[heading] at (17.885,5.88) {Shop update};
+\draw[flow] (16.27,5.88) -- (16.72,5.88);
+\draw[flow] (17.885,5.29) -- (17.885,3.86);
+
+% Team return and group-relative advantage
+\draw[module,draw=creditGreen!75!white,fill=creditGreen!14!white]
+  (16.72,7.40) rectangle (19.05,8.52);
+\node[small,text=creditGreen!72!black] at (17.885,7.96)
+  {\textbf{Team return}\\(scalar)};
+\draw[flow] (17.885,6.47) -- (17.885,7.40);
+
+\draw[card,draw=creditGreen!78!white,fill=creditGreen!23!white]
+  (3.46,9.52) rectangle (14.20,10.20);
+\node[heading,text=creditGreen!70!black] at (8.83,9.86)
+  {Group-relative advantage};
+
+\draw[credit] (16.72,7.96) -- (14.65,7.96)
+  -- (14.65,9.86) -- (14.20,9.86);
+\draw[creditback] (8.83,9.52) -- (8.83,8.99);
+\node[small,anchor=west,text=creditGreen!72!black] at (8.99,9.255)
+  {Advantage to dispatch agents};
+
+% ================= (b) Training pipeline =================
+\node[panel title] at (.30,10.79) {(b) Training pipeline};
+
+\foreach \x/\steptext/\tint in {
+  .30/{Group sampling}/14,
+  4.12/{Rollout (8 episodes)}/14,
+  7.94/{Segment close}/14,
+  11.76/{GRPO update}/30,
+  15.58/{PPO update}/30
+}{%
+  \draw[module,draw=trainViolet!72!white,fill=trainViolet!\tint!white]
+    (\x,11.26) rectangle (\x+3.47,12.20);
+  \node[text=trainViolet!72!black]
+    at (\x+1.735,11.73) {\steptext};
 }
-\fill[loadedblue!80!ink,draw=ink,line width=0.3pt] (7.91,3.86) rectangle (8.07,3.46);
-\node[small] at (8.00,4.10) {masked softmax};
-\draw[flow] (8.60,3.58) -- (10.30,3.58);
-\draw[mod] (10.30,3.30) rectangle (12.05,3.86);
-\node at (11.17,3.58) {operation action};
 
-% machine lane
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (3.62,5.58) {machine};
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (3.62,5.84) {agent};
-\draw[mod] (4.30,5.10) rectangle (6.00,5.66);
-\node[font=\fontsize{5.0}{6.0}\selectfont] at (5.15,5.38) {Set Transformer};
-\draw[mod] (5.80,5.02) rectangle (6.12,5.22);
-\node[font=\fontsize{5.0}{5.8}\selectfont] at (5.96,5.12) {$\times1$};
-\node[font=\fontsize{4.8}{5.8}\selectfont,text=ink] at (5.15,5.86) {within a machine};
-\draw[flow] (6.03,5.38) -- (6.43,5.38);
-\draw[mod] (6.47,5.10) rectangle (8.17,5.66);
-\node[font=\fontsize{5.0}{6.0}\selectfont] at (7.32,5.38) {Set Transformer};
-\draw[mod] (7.97,5.02) rectangle (8.29,5.22);
-\node[font=\fontsize{5.0}{5.8}\selectfont] at (8.13,5.12) {$\times1$};
-\node[font=\fontsize{4.8}{5.8}\selectfont,text=ink] at (7.32,5.86) {across machines};
-\draw[flow] (8.20,5.38) -- (8.55,5.38);
-\foreach \x/\h in {8.65/0.16,8.92/0.18,9.19/0.40,9.46/0.18,9.73/0.16} {
-  \fill[emptyorange!25!white,draw=emptyorange!80,line width=0.3pt] (\x-0.08,5.66) rectangle (\x+0.08,5.66-\h);
+\foreach \x in {3.77,7.59,11.41,15.23}{%
+  \draw[flow] (\x,11.73) -- (\x+.35,11.73);
 }
-\fill[emptyorange!80!ink,draw=ink,line width=0.3pt] (9.11,5.66) rectangle (9.27,5.26);
-\node[small] at (9.19,5.90) {masked softmax};
-\draw[flow] (9.78,5.38) -- (10.30,5.38);
-\draw[mod] (10.30,5.10) rectangle (12.05,5.66);
-\node at (11.17,5.38) {machine action};
+\draw[train loop] (17.315,12.20) -- (17.315,12.82)
+  -- (2.035,12.82) -- (2.035,12.20);
+\node[small,text=trainViolet!72!black] at (9.675,12.60) {Next group};
 
-% AGV lane
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (3.62,7.56) {AGV};
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (3.62,7.82) {agent};
-\draw[mod] (4.45,7.12) rectangle (6.45,7.72);
-\node[font=\fontsize{6.2}{7.4}\selectfont] at (5.45,7.42) {Set Transformer};
-\draw[mod] (6.35,7.04) rectangle (6.75,7.24);
-\node[font=\fontsize{5.6}{6.4}\selectfont] at (6.55,7.14) {$\times1$};
-\draw[flow] (6.50,7.42) -- (7.40,7.42);
-\foreach \x/\h in {7.45/0.16,7.72/0.18,7.99/0.40,8.26/0.18,8.53/0.16} {
-  \fill[transfergreen!25!white,draw=transfergreen!80,line width=0.3pt] (\x-0.08,7.70) rectangle (\x+0.08,7.70-\h);
-}
-\fill[transfergreen!80!ink,draw=ink,line width=0.3pt] (7.91,7.70) rectangle (8.07,7.30);
-\node[small] at (8.00,7.94) {masked softmax};
-\draw[flow] (8.60,7.42) -- (10.30,7.42);
-\draw[mod] (10.30,7.14) rectangle (12.05,7.70);
-\node at (11.17,7.42) {AGV action};
+% ================= Shared legend =================
+\draw[card] (.30,13.20) rectangle (19.05,13.96);
 
-% state to lanes
-\draw[flow] (2.50,4.26) -- (2.90,3.85);
-\draw[flow] (2.50,5.54) -- (2.90,5.80);
-\draw[flow] (2.50,6.82) -- (2.90,7.70);
+\draw[flow] (.58,13.58) -- (1.22,13.58);
+\node[small,anchor=west] at (1.34,13.58)
+  {State and action flow};
 
-% rule prior trunk (left)
-\foreach \x in {4.60,7.00,9.40} { \draw[selectdash] (\x,2.42) -- (\x,3.08); }
-\foreach \x in {5.00,7.40,9.80} { \draw[selectdot] (\x,3.08) -- (\x,2.42); }
-\node[small] at (4.52,2.74) [anchor=east] {rule prior};
-\node[small] at (5.08,2.74) [anchor=west] {per-agent cost};
+\draw[prior] (4.75,13.58) -- (5.39,13.58);
+\node[small,anchor=west] at (5.51,13.58)
+  {Selector rule prior};
 
-% per-agent costs: shop -> card, card -> selector
-\draw[selectdot] (13.40,1.72) -- (10.32,1.72);
-\node[small] at (11.80,1.52) {per-agent cost};
-\draw[flow] (15.30,4.85) -- (15.30,2.57);
+\draw[cost] (8.95,13.58) -- (9.59,13.58);
+\node[small,anchor=west] at (9.71,13.58)
+  {Per-agent cost feedback};
 
-% joint action
-\draw[mod] (12.80,4.95) rectangle (14.10,6.05);
-\node at (13.45,5.32) {joint};
-\node at (13.45,5.60) {action};
-\draw[flow] (12.05,3.58) -- (12.50,3.58) -- (12.50,5.15) -- (12.80,5.15);
-\draw[flow] (12.05,5.38) -- (12.80,5.38);
-\draw[flow] (12.05,7.42) -- (12.50,7.42) -- (12.50,5.85) -- (12.80,5.85);
-
-% shop update, team return, advantage
-\draw[mod] (14.50,4.85) rectangle (16.40,5.95);
-\node at (15.45,5.22) {shop};
-\node at (15.45,5.50) {update};
-\draw[flow] (14.10,5.50) -- (14.50,5.50);
-\draw[mod] (14.50,7.25) rectangle (16.40,8.35);
-\node at (15.45,7.62) {team return};
-\node at (15.45,7.90) {(scalar)};
-\draw[flow] (15.45,5.95) -- (15.45,7.25);
-\draw[card,fill=transfergreen!18!white] (2.90,9.10) rectangle (12.35,9.85);
-\node[font=\bfseries\fontsize{7.4}{8.8}\selectfont] at (7.62,9.47) {group-relative advantage};
-\draw[greenflow] (14.50,7.80) -- (13.10,7.80) -- (13.10,9.47) -- (12.35,9.47);
-\draw[greendash] (4.00,9.10) -- (4.00,8.45);
-\draw[greendash] (7.60,9.10) -- (7.60,8.45);
-\draw[greendash] (11.00,9.10) -- (11.00,8.45);
-
-% ================= (b) =================
-\node[title] at (0.30,10.55) {(b) Training pipeline};
-\draw[mod] (0.40,10.95) rectangle (3.00,12.00);
-\node at (1.70,11.35) {group};
-\node at (1.70,11.62) {sampling};
-\draw[mod] (3.40,10.95) rectangle (6.00,12.00);
-\node at (4.70,11.48) {rollout, 8 episodes};
-\draw[mod] (6.40,10.95) rectangle (9.00,12.00);
-\node at (7.70,11.35) {segment};
-\node at (7.70,11.62) {close};
-\draw[mod] (9.40,10.95) rectangle (12.00,12.00);
-\node at (10.70,11.48) {GRPO update};
-\draw[mod] (12.40,10.95) rectangle (15.00,12.00);
-\node at (13.70,11.48) {PPO update};
-\draw[flow] (3.00,11.48) -- (3.40,11.48);
-\draw[flow] (6.00,11.48) -- (6.40,11.48);
-\draw[flow] (9.00,11.48) -- (9.40,11.48);
-\draw[flow] (12.00,11.48) -- (12.40,11.48);
-\draw[loop] (13.70,12.00) -- (13.70,12.55) -- (1.70,12.55) -- (1.70,12.00);
-\node[small] at (7.70,12.42) {next group};
-
-% ================= legend =================
-\draw[card] (0.30,12.85) rectangle (17.70,13.40);
-\draw[flow] (0.55,13.12) -- (1.25,13.12);
-\node[anchor=west,font=\fontsize{6.0}{7.0}\selectfont] at (1.35,13.12) {state and action flow};
-\draw[selectdash] (4.35,13.12) -- (5.05,13.12);
-\node[anchor=west,font=\fontsize{6.0}{7.0}\selectfont] at (5.15,13.12) {rule prior, selector to agent};
-\draw[selectdot] (8.95,13.12) -- (9.65,13.12);
-\node[anchor=west,font=\fontsize{6.0}{7.0}\selectfont] at (9.75,13.12) {per-agent cost, agent to selector};
-\draw[greendash] (13.95,13.12) -- (14.65,13.12);
-\node[anchor=west,font=\fontsize{6.0}{7.0}\selectfont] at (14.75,13.12) {team return to advantage};
+\draw[credit] (13.75,13.48) -- (14.39,13.48);
+\draw[creditback] (13.75,13.68) -- (14.39,13.68);
+\node[small,anchor=west] at (14.51,13.58)
+  {Team return / advantage feedback};
 
 \end{tikzpicture}
 \end{document}
