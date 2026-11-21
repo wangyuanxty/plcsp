@@ -2,6 +2,25 @@
 
 \label{sec:experiments}
 
+\begin{table*}[t]
+\centering
+\caption{Objective on five instance families.  As deterministic methods, 
+PDR and RGA exhibit no variability attributable to seed selection.
+Li is an adapted baseline written from the paper, not a reproduction.}
+\label{tab:baselines}
+\begin{tabular}{lccccc}
+\toprule
+Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ & $15\times10\times2$ & $20\times6\times3$ \\
+\midrule
+Ours (H-ST-GRPO) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} & 1542.33 {\scriptsize$\pm$19.10} & 994.55 {\scriptsize$\pm$7.51} \\
+RGA & 762.04 & 796.70 & 2298.63 & 2693.74 & 1181.77 \\
+PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 & 3612.81 & 1977.13 \\
+Wang et al.~(retrained) & 1075.64 {\scriptsize$\pm$73.82} & 1066.24 {\scriptsize$\pm$102.61} & 3153.81 {\scriptsize$\pm$530.01} & 2826.01 {\scriptsize$\pm$280.79} & 1229.70 {\scriptsize$\pm$60.15} \\
+Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 2738.91 {\scriptsize$\pm$82.76} & 2458.69 {\scriptsize$\pm$63.21} & 1309.81 {\scriptsize$\pm$126.56} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
 \subsection{Protocol}
 
 We consider five instance families of the form $J \times M \times W$, where $J$, $M$, and $W$ denote 
@@ -102,6 +121,20 @@ because this spread does not support a fair comparison.
 same architecture. The variant without the rule selector removes the top-level
 component.
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
+\caption{Objective of every method on the five instance families. The bars show the means of Table~\ref{tab:baselines}.}
+\label{fig:main}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_radar.pdf}
+\caption{The objective, its four terms, and the per-instance spread, by method and family.}
+\label{fig:radar}
+\end{figure*}
+
 \needspace{8\baselineskip}
 \subsection{Quality and run time}
 
@@ -123,37 +156,11 @@ compare absolute values within a column only, never across columns.
 
 \begin{table*}[t]
 \centering
-\caption{Objective on five instance families. Every method is evaluated
-on the same instances and scored with the same objective under the same
-transport model. Each value is the mean over the
-100 test instances. The learned methods are averaged over three seeds and show
-the seed standard deviation. As deterministic methods, PDR and RGA exhibit no variability attributable to seed selection. 
-Li is an adapted baseline written from the paper, not a reproduction. Lower is better.}
-\label{tab:baselines}
-\begin{tabular}{lccccc}
-\toprule
-Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ & $15\times10\times2$ & $20\times6\times3$ \\
-\midrule
-Ours (H-ST-GRPO) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} & 1542.33 {\scriptsize$\pm$19.10} & 994.55 {\scriptsize$\pm$7.51} \\
-RGA & 762.04 & 796.70 & 2298.63 & 2693.74 & 1181.77 \\
-PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 & 3612.81 & 1977.13 \\
-Wang et al.~(retrained) & 1075.64 {\scriptsize$\pm$73.82} & 1066.24 {\scriptsize$\pm$102.61} & 3153.81 {\scriptsize$\pm$530.01} & 2826.01 {\scriptsize$\pm$280.79} & 1229.70 {\scriptsize$\pm$60.15} \\
-Li et al. & 1160.59 {\scriptsize$\pm$42.40} & 1198.09 {\scriptsize$\pm$76.91} & 2738.91 {\scriptsize$\pm$82.76} & 2458.69 {\scriptsize$\pm$63.21} & 1309.81 {\scriptsize$\pm$126.56} \\
-\bottomrule
-\end{tabular}
-\end{table*}
-
-
-\begin{table*}[t]
-\centering
 \caption{Objective of the twelve PDR pairs on the five instance families.
-Each cell is the mean over the 100 test instances, with the per-instance
-standard deviation in parentheses. Each pair is run under the three AGV
-dispatch rules of our model. Rule keys: \texttt{mor}, most operations
+Rule keys: \texttt{mor}, most operations
 remaining; \texttt{mwkr} and \texttt{lwkr}, most and least work remaining, on
 processing time (\texttt{\_t}) or on processing energy (\texttt{\_pt});
-\texttt{spt}, shortest processing time; \texttt{seyc}, shortest processing
-energy. Lower is better.}
+\texttt{spt}, shortest processing time; \texttt{seyc}, shortest processing energy.}
 \label{tab:pdr}
 \footnotesize
 \renewcommand{\arraystretch}{0.92}
@@ -162,10 +169,10 @@ energy. Lower is better.}
 Job rule & Machine rule & AGV rule & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$  & $15\times10\times2$ & $20\times6\times3$ \\
 \midrule
 mor & spt & nearest & 1402.44 (221.90) & 1593.57 (232.91) & 3785.40 (336.33) & 4330.50 (525.57) & 2232.42 (335.06) \\
-mor & spt & earliest\_arrival & 1319.24 (240.09) & 1481.60 (229.38) & 3288.35 (286.43) & 3695.99 (471.82) & 1977.13 (317.16) \\
+mor & spt & earliest\_arrival & \textbf{1319.24} (240.09) & 1481.60 (229.38) & \textbf{3288.35} (286.43) & 3695.99 (471.82) & \textbf{1977.13} (317.16) \\
 mor & spt & least\_utilized & 1421.66 (220.38) & 1585.02 (232.49) & 3752.25 (321.58) & 4200.13 (467.26) & 2103.10 (305.82) \\
 mor & seyc & nearest & 1419.06 (198.73) & 1600.00 (230.06) & 3910.08 (419.43) & 4292.07 (493.24) & 2253.25 (317.72) \\
-mor & seyc & earliest\_arrival & 1331.18 (193.51) & 1461.63 (221.82) & 3428.21 (385.53) & 3612.81 (412.54) & 2021.66 (295.90) \\
+mor & seyc & earliest\_arrival & 1331.18 (193.51) & \textbf{1461.63} (221.82) & 3428.21 (385.53) & \textbf{3612.81} (412.54) & 2021.66 (295.90) \\
 mor & seyc & least\_utilized & 1444.67 (180.97) & 1604.82 (243.43) & 3889.13 (396.44) & 4197.38 (495.10) & 2157.57 (297.76) \\
 mwkr\_t & spt & nearest & 1465.36 (219.07) & 1802.05 (271.75) & 4166.26 (455.83) & 5165.29 (639.81) & 2840.45 (378.50) \\
 mwkr\_t & spt & earliest\_arrival & 1352.22 (217.31) & 1562.92 (242.15) & 3514.56 (354.63) & 4096.38 (446.96) & 2313.62 (296.33) \\
@@ -232,19 +239,32 @@ size, so its advantage over a fixed policy shrinks as the instance grows. That
 is a limit on its generalization, not on its search. Third, the learned baselines are behind
 at all five sizes. The retrained architecture of Wang et al.\ is 207.89, 257.57,
 1317.17, 1283.68 and 235.15 above our model, and Li et al.\ is 292.84, 389.42, 902.27,
-916.36 and 315.26 above it. 
+916.36 and 315.26 above it.
+
+Figure~\ref{fig:main} shows these means as grouped bars, one panel per
+family: our model is second at the two smaller sizes and first at the three
+larger. The panel title $a\times b\times c$ gives $a$ jobs, $b$ machines and
+$c$ workshops, each bar is the mean over the 100 test instances, and the black
+vertical lines give the seed standard deviation of the learned methods; PDR
+and RGA lack them because they are deterministic. Figure~\ref{fig:radar}
+summarises the same mean values along six axes: makespan, processing energy, transport time, idle energy, 
+the objective, and the per-instance standard deviation. Each axis is min-max normalised inside its panel, 
+with the smallest value at the outer radius, so a larger polygon is better on every axis.
 
 Table~\ref{tab:pdr} lists the twelve job--machine rule pairs, each run under
-the three AGV rules, so it has 36 rows per family. The best pair is mor/spt at
+the three AGV rules, so it has 36 rows per family. The six job rules and two
+machine rules follow Wang et al.~\cite{wang2025multitarget}; the three AGV
+dispatch rules are our own design. The best pair is mor/spt at
 $6\times6\times2$, $10\times10\times2$ and $20\times6\times3$, and mor/seyc at
-$10\times6\times2$ and $15\times10\times2$. The earliest-arrival AGV rule is
-the best of the three for every pair and every family. Table~\ref{tab:time} reports the wall-clock time to
+$10\times6\times2$ and $15\times10\times2$; the earliest-arrival AGV rule is
+the best of the three for every pair and every family. The PDR row of
+Table~\ref{tab:baselines} reports, for each family, the best cell of this
+table, marked in bold; the other cells are the alternatives.
+Table~\ref{tab:time} reports the wall-clock time to
 build one schedule for every method and family. Every row is timed through the same simulator, one process at a time. 
 The learned methods run on the GPU, the others on one CPU core. 
 PDR applies a single pair of rules, whereas RGA performs a full run of 4850 schedule evaluations. 
-Therefore, the cost reported for RGA corresponds to the entire run. Figure~\ref{fig:radar}
-summarises the same means on six axes; each axis is min-max normalised inside
-its panel, and the outward direction is the better value.
+Therefore, the cost reported for RGA corresponds to the entire run.
 
 \paragraph{Significance} Table~\ref{tab:baselines} compares methods by the
 mean objective over the 100 test instances, and a gap between two means may
@@ -255,7 +275,10 @@ test to the resulting 100 differences, which asks whether they are
 systematically different from zero. The learned methods enter as the mean of
 their three training seeds on each instance, so that each method contributes
 one value per instance. The 20 tests, five sizes against four baselines, are
-corrected together with Holm's procedure at $\alpha=0.05$.
+corrected together with Holm's procedure at $\alpha=0.05$. In
+Table~\ref{tab:signif}, a negative median difference means that our model
+performs better, and wins count the instances where our model yields a lower
+objective than the baseline.
 
 The result is the same against three of the four baselines: our model has a
 lower objective than PDR and than the adapted baselines of Wang et al.\ and
@@ -274,8 +297,7 @@ size.
 \centering
 \caption{Paired Wilcoxon signed-rank test of our model against each
 baseline over the 100 test instances, with Holm's correction over the 20
-comparisons. Median difference is negative when our model performs better; 
-wins count the instances where our model yields a lower value than the baseline.}
+comparisons.}
 \label{tab:signif}
 \footnotesize
 \setlength{\tabcolsep}{3.0pt}
@@ -306,33 +328,6 @@ $20\times6\times3$ & RGA & $-186.86$ & 97 & $<10^{-16}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.92\linewidth]{fig_main_comparison.pdf}
-\caption{Objective of every method on the five instance families, from
-Table~\ref{tab:baselines}. The panel title $a\times b\times c$ gives $a$ jobs,
-$b$ machines and $c$ workshops. Each bar represents the average performance over the 100 test instances.
-Black vertical lines denote the seed standard deviation of the learned methods.
-The deterministic baselines lack these lines due to their deterministic nature.
-Our model is second at the two smaller sizes and first at the three larger.}
-\label{fig:main}
-\end{figure*}
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.92\linewidth]{fig_radar.pdf}
-\caption{Objective, its four terms and the per-instance spread, by method and
-family. Each axis is min-max normalised inside its panel, with the smallest
-value at the outer radius, so a larger polygon is better on every axis. The
-axes are makespan, processing energy, transport time, idle energy, the
-objective and the per-instance standard deviation. The figure is a descriptive
-summary; the means in Table~\ref{tab:baselines} and the paired tests in
-Table~\ref{tab:signif} carry the claims.}
-\label{fig:radar}
-\end{figure*}
 
 Figure~\ref{fig:distribution} compares the objective in two scenarios: with and without a selector.
 The top row pools the 300 values of each configuration (100 instances, three
@@ -366,11 +361,8 @@ $10\times10\times2$.
 \caption{Per-instance objective with and without the rule selector, on three
 families. (a) Per-instance objective at $6\times6\times2$, $10\times6\times2$
 and $10\times10\times2$, pooling 100 instances and three seeds (300 values per
-configuration); the violin is thinned to a light point cloud, the thick bar is
-the interquartile range, the white dot the median and the diamond the mean.
-(b) The five objective terms at each family, each divided by its value without
-the selector. The dashed pentagon is the baseline, so the outside is better,
-and the rings mark steps of 5 percent.}
+configuration). (b) Five objective terms per family, each normalised by its baseline value without the selector. 
+Dashed pentagon: baseline, outside indicates better performance; rings: $5\%$ increments.}
 \label{fig:distribution}
 \end{figure*}
 
@@ -388,8 +380,7 @@ intervals, and the vehicle busy intervals follow.
 \centering
 \includegraphics[width=0.96\linewidth]{fig_gantt.pdf}
 \caption{One $6\times6\times2$ instance. (a) Our model. (b) Best PDR rule.
-The lower six rows are machines (bars are operations; colors are jobs). The
-upper six rows are AGVs: A1 to A6, one color each (bar length is the busy
+The lower six rows are machines. The upper six rows are AGVs: A1 to A6, one color each (bar length is the busy
 interval, including empty travel).}
 \label{fig:gantt}
 \end{figure*}
@@ -431,7 +422,9 @@ separately below.
 
 \paragraph{Encoder} Table~\ref{tab:encoder} reports a $2\times2$ factorial
 over the job and machine encoders at $6\times6$, without AGVs and without the
-rule selector. The all-ST cell obtains 798.06 and the job-GNN/machine-ST cell
+rule selector. All rows use GRPO. Reported values are means over three seeds and 100 test instances, 
+with the standard deviation computed across seeds as well as Table~\ref{tab:encoderfull}. 
+The all-ST cell obtains 798.06 and the job-GNN/machine-ST cell
 797.11; the two are indistinguishable, because the all-ST cell is better in
 one seed out of three and the 0.95 difference is far inside the seed spread.
 Machine encoding behaves differently. Replacing the ST machine encoder by a
@@ -446,10 +439,8 @@ $10\times6$ encoder cells were deferred and are not reported.
 
 \begin{table}[t]
 \centering
-\caption{Encoder ablation at $6\times6\times2$ under the protocol of Wang et
-al.~\cite{wang2025multitarget}: no AGV fleet and no rule selector. All rows
-use GRPO. Values are three-seed means over the 100 test
-instances, with the seed standard deviation. ST is the Set-Transformer; GNN
+\caption{Encoder ablation under the protocol of Wang et
+al.~\cite{wang2025multitarget}. ST is the Set-Transformer; GNN
 and GAT are the two graph-network encoders of Wang et
 al.~\cite{wang2025multitarget}; intra0 removes the machine-internal attention.}
 \label{tab:encoder}
@@ -461,7 +452,6 @@ ST & ST & 798.06 & 5.83 \\
 GNN & ST & 797.11 & 12.00 \\
 ST & GAT & 883.86 & 24.60 \\
 GNN & GAT & 925.21 & 26.56 \\
-\midrule
 ST & ST (intra0) & 845.81 & 13.30 \\
 \bottomrule
 \end{tabular}
@@ -479,17 +469,13 @@ is a small effect whose sign depends on size, and we do not claim a main effect.
 Swapping the machine encoder to GAT costs 95.10 with the job encoder at ST and
 99.21 with it at GNN at $6\times6$, and 109.30 and 99.77 at $10\times6$; the
 ordering holds in all three seeds at both job settings and both sizes.
-Removing the machine-internal attention costs 34.26 at $6\times6$; it was not
-run at $10\times6$. The machine encoder is the component that matters at both
-sizes.
+Removing the machine-internal attention costs 34.26 at $6\times6$, 
+which indicates that machine-internal attention is effective at both sizes.
 
 \begin{table}[t]
 \centering
-\caption{Encoder ablation under the full protocol of this paper: AGV agent,
-rule selector and station transport model enabled, at $6\times6\times2$ and
-$10\times6\times2$. All rows use GRPO. Values are three-seed means over the 100
-test instances, with the seed standard deviation. The intra0 row removes the
-machine-internal attention; it was run at $6\times6\times2$ only, and the
+\caption{Encoder ablation under the full protocol of this paper. 
+The intra0 row removes the machine-internal attention, which run at $6\times6\times2$ only, and the
 $10\times6\times2$ block keeps the attention in all four cells.}
 \label{tab:encoderfull}
 \small
@@ -502,7 +488,6 @@ $6\times6\times2$ & ST & ST & 867.75 & 11.86 \\
  & GNN & ST & 865.01 & 18.50 \\
  & ST & GAT & 962.85 & 3.95 \\
  & GNN & GAT & 964.22 & 20.12 \\
-\midrule
  & ST & ST (intra0) & 902.01 & 21.70 \\
 \midrule
 $10\times6\times2$ & ST & ST & 825.20 & 4.96 \\
@@ -520,7 +505,13 @@ selector enabled, the gap widens at $6\times6$ (867.75 against 966.13),
 narrows at $10\times6$ (808.67 against 864.69) and widens again at
 $10\times10$ (1836.64 against 2116.78). GRPO is better in all three
 seeds at every setting. The critic-free update is the better choice in both
-resource regimes.
+resource regimes. A paired test over the 100 instances, with Holm correction
+over the three sizes, gives $p=9.0\times10^{-16}$ at $6\times6$,
+$p=1.4\times10^{-9}$ at $10\times6$ and $p=1.8\times10^{-16}$ at $10\times10$,
+with GRPO lower on 90, 77 and 96 of them. Across the two protocols, the
+encoder span is 96.47--127.15 and the algorithm span 56.02--280.14, so
+neither dominates consistently; we do not claim a general ordering between
+representation and update.
 
 \begin{table}[t]
 \centering
@@ -549,29 +540,24 @@ Full & $6\times6\times2$ & GRPO & 867.75 & 11.86 \\
 \end{table}
 
 \paragraph{AGV agent} Figure~\ref{fig:agv-ablation} shows the distribution of the
-per-instance change across the five families. Under the same checkpoint,
-replacing the learned AGV agent
-by the better fixed AGV rule changes the objective from 867.75 to 888.46 at
+per-instance objective change across the five families when the learned AGV
+agent is replaced by the earliest-arrival rule. Each distribution pools 100
+instances and three seeds, and the two conditions are paired on the same
+instance. Positive values mean that the fixed rule is worse; the dashed line
+marks no change. Under the same checkpoint, the replacement changes the
+objective from 867.75 to 888.46 at
 $6\times6\times2$, from 808.67 to 867.99 at $10\times6\times2$, from 1836.64 to
 1916.16 at $10\times10\times2$, from 1542.33 to 1685.68 at $15\times10\times2$,
 and from 994.55 to 1019.26 at $20\times6\times3$. The learned AGV agent is
 better in all three seeds at every size, by 0.4 to 3.6\% at $6\times6\times2$,
 6.1 to 8.1\% at $10\times6\times2$, 1.7 to 7.5\% at $10\times10\times2$, 7.6 to
-10.7\% at $15\times10\times2$ and 1.5 to 3.8\% at $20\times6\times3$, relative to
-our model. The no-AGV configuration in
-Table~\ref{tab:encoder} is a different resource regime (an unbounded fleet),
-not an AGV-policy baseline.
+10.7\% at $15\times10\times2$ and 1.5 to 3.8\% at $20\times6\times3$, relative to our model. 
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{fig_agv_ablation.pdf}
-\caption{Distribution of the per-instance objective change when the learned AGV
-agent is replaced by the earliest-arrival rule, on five families. Each
-distribution pools 100 instances and three seeds, and the two conditions are
-paired on the same instance. The box spans the interquartile range, the line is
-the median, the diamond the mean, and the whiskers 1.5 times the interquartile
-range. Positive values mean that the fixed rule is worse; the dashed line marks
-no change.}
+\caption{Per-instance change in the objective when replacing the learned AGV agent with the earliest-arrival rule, 
+for five families. The whiskers extend to 1.5 times the interquartile range.}
 \label{fig:agv-ablation}
 \end{figure}
 
@@ -586,14 +572,15 @@ selector is lower on 67 of them; $p=0.167$ at $10\times6$, where it is lower on
 54; and $p=0.0146$ at $10\times10$, where it is lower on 64. So the selector is
 a small and consistent gain at two sizes and a small and uneven one at the
 third. It is not the source of the margin over the rule baseline: without it
-our model is still 424.03 below the best PDR pair. The rule-usage analysis
-below shows what the selector changes.
+our model is still 424.03 below the best PDR pair. The selector makes only a
+few decisions per episode, so its update sees a few dozen transitions per
+group; we therefore report this comparison as an analysis rather than a
+headline claim. The rule-usage analysis below shows what the selector
+changes.
 
 \begin{table}[t]
 \centering
-\caption{Rule-selection ablation. Same encoder, algorithm, and AGV agent;
-only the top-level selector is removed; with and without refer to it. Values
-are three-seed means over the 100 test instances.}
+\caption{Rule-selection ablation. Values are three-seed means over the 100 test instances.}
 \label{tab:rule-selector}
 \small
 \setlength{\tabcolsep}{2.5pt}
@@ -624,22 +611,25 @@ selector is meant to produce.
 
 \subsection{Analysis}
 
-\paragraph{Amortization against per-instance search}
-RGA evaluates 4850 schedules per instance, each scored by the same simulator
-that scores our model. Our model constructs one schedule in a single
-pass and takes about 0.95~s. One RGA run takes 437.8~s at $6\times6$, 1426~s
-at $10\times6$ and 4161~s at $10\times10$, which is 461, 717 and 1000 times
-one pass. Our model amortizes the search over the training set; RGA
-spends the search budget on each instance.
-
-\paragraph{Equal-budget comparison}
-We cut the RGA budget and record the objective at each point. At $6\times6$ our model obtains 867.75 in one pass. RGA reaches the same objective at about
-1{,}400 evaluations: it obtains 932.83 at 914, 868.20 at 1{,}394 and 803.85 at
-2{,}306. One environment evaluation costs 0.091~s, so 1{,}394 evaluations need
-about 127~s, which is 134 times one pass of 0.95~s. At its full budget of
-4{,}850 evaluations, 437.8~s, RGA is 12.2\% better. The search buys its margin
-by spending two orders of magnitude more online time.
-Figure~\ref{fig:budget} shows the curve.
+\paragraph{Operating point}
+Our model is not the best at every size: it is better than the rule-based and
+adapted DRL baselines at every size, but at $6\times6$ RGA obtains 762.04
+against 867.75, 12.2\% ahead. That gain is bought with online search. RGA
+evaluates 4{,}850 schedules per instance, each scored by the same simulator
+that scores our model, so one run takes 437.8~s at $6\times6$, 1{,}426~s at
+$10\times6$ and 4{,}161~s at $10\times10$, against 0.95, 1.99 and 4.16~s for
+one pass of our model, i.e. 461, 717 and 1000 times one pass. Because the
+model amortizes the search over the training set while RGA spends it on each
+instance, the fair comparison is at equal online time. At $6\times6$, RGA
+reaches our objective only at about 1{,}400 evaluations, 127~s, which is 134
+times one pass; the full-budget margin of 12.2\% therefore costs two orders
+of magnitude more online time (Figure~\ref{fig:budget}). The same trade-off
+appears in the implementation of Wang et al.~\cite{wang2025multitarget}: their
+RGA needs 638.8, 1{,}994.0 and 5{,}590.3~s per instance at the three sizes,
+against 0.529, 0.883 and 2.443~s for their learned policy. The claim is
+therefore an operating point rather than a dominance: a feasible schedule in
+about a second, for a shop that reschedules often or evaluates many what-if
+scenarios, and a method whose cost grows slowly with the instance size.
 
 \begin{figure}[t]
 \centering
@@ -652,97 +642,18 @@ which cost 126~s against 0.95~s.}
 \label{fig:budget}
 \end{figure}
 
-\paragraph{Training dynamics}
-The validation objective falls from 967 at episode 25 to 923 at episode 50 and
-then stays between 890 and 930 (Figure~\ref{fig:curve}). The seeds converge
-over the same run: they differ by 186 points at episode 25 and by 13 at episode
-200. The best checkpoint still falls at a different episode for each seed, 125,
-150 and 200, so we select one checkpoint per seed on the validation set rather
-than take the last episode.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{fig_training_curve.pdf}
-\caption{Validation objective of the three seeds of our model, the mean
-over the 100 validation instances, recorded every 25 episodes. The line is the
-seed mean and the band the seed range. The best checkpoint falls at a
-different episode for each seed.}
-\label{fig:curve}
-\end{figure}
-
-\paragraph{Spread across instances}
-A difference in the tail is hidden by the mean. The per-instance standard deviation
-of the seed-averaged values of our model is 109.9, and across individual seeds it
-ranges from 127.0 to 140.0. RGA has 79.7 on the same basis, so the
-seed-averaged spread of our model is 38\% wider.
-The same pattern appears in the validation readings, and a single-pass policy
-has no mechanism to recover from a
+\paragraph{Robustness}
+The validation objective falls from 967 at episode 25 to 923 at episode 50
+and then stays between 890 and 930; the seeds differ by 13 points at episode
+200, and the best checkpoint falls at a different episode for each seed. A
+difference in the tail is hidden by the mean: the per-instance standard
+deviation of the seed-averaged values is 109.9, against 79.7 for RGA, so our
+spread is 38\% wider. A single-pass policy has no mechanism to recover from a
 bad early assignment on a hard instance.
 
-\paragraph{Why the rule selector has a small effect}
-The mean difference is 27.46, or 3.1\%, at $6\times6$, and the selector is
-better in all three seeds there.
-Per-seed
-differences are $-29.82$, $-15.61$, and $-36.97$ (with selector minus
-without), so
-the sign is stable while the size varies by a factor of 2.4. At $10\times10$
-the mean difference is 43.76, or 2.3\%, and all three seeds favour the
-selector, with per-seed differences of $-44.00$, $-82.84$ and $-4.44$; the
-sign is again stable, but the size varies by a factor of 19. At $10\times6$
-the mean difference falls to 10.66 and the sign is no longer stable. The selector makes a
-few decisions per episode, so its update sees a few dozen transitions per
-group. The effect is real but small next to the 451.49 that separates our model from the best PDR pair. We report the comparison as an analysis
-and do not use it as a headline claim.
 
-\paragraph{Why the encoder matters more than the algorithm}
-Under the protocol of Wang et al.\ the encoder ablation spans 127.15 between
-the all-Set-Transformer and the all-GNN configurations, and the ordering holds
-in all three seeds; under the full protocol the same span is 96.47 at
-$6\times6$ and 99.78 at $10\times6$. The
-algorithm ablation spans 72.98 at $6\times6$ under the first protocol and
-98.38 under the second. Whereas the
-encoder changes the representation that all three agents share, the algorithm
-changes how the same representation is updated. Representation is the
-larger lever in the first protocol and the smaller one in the second, so we do
-not claim a general ordering between the two. Machine-internal attention
-accounts for 47.75 of the encoder gap, which is consistent with the three
-feature groups carrying complementary information: processing time, processing
-energy, and transport distance.
 
-\paragraph{Why GRPO differs from PPO here}
-PPO trains a value critic for each agent and a centralized critic for the team.
-The update sees one group of eight episodes, so each critic is fitted to eight
-returns per group while the actor networks are shared across all steps. So the
-critic's error enters the advantage of every agent. GRPO replaces
-those critics by the within-group mean and standard deviation of the same
-eight returns, so no critic is fitted at the low level. The gap is 72.98 at
-$6\times6$ under the protocol of Wang et al., 98.38 at $6\times6$ under the
-full protocol, 56.02 at $10\times6$ and 280.14 at $10\times10$. The gap is
-therefore not monotone in size: it falls from $6\times6$ to $10\times6$ and
-rises at $10\times10$, so we do not claim a trend with size. A paired test on
-the 100 instances, with Holm correction over the three sizes, gives
-$p=9.0\times10^{-16}$ at $6\times6$, $p=1.4\times10^{-9}$ at $10\times6$ and
-$p=1.8\times10^{-16}$ at $10\times10$, with GRPO lower on 90, 77 and 96 of
-them. Both algorithms used one weight vector
-per group, so the gap is attributed to the estimator.
 
-\paragraph{What our model is for}
-We do not claim the best objective at every size. Our model is better
-than the rule-based and the adapted DRL baselines at every size, but RGA is
-ahead of it at $6\times6$. RGA obtains 762.04 on that test set against 867.75
-for our model, so it is 12.2\% ahead. The search pays for that quality in
-online time. Under the same budget of 4850 schedule evaluations per instance,
-and with every candidate scored by the same simulator our model is scored
-with, one RGA run takes 437.8~s per instance at $6\times6$ against 0.95~s for
-one pass of our model. The cost of the search grows steeply with the
-instance. In the implementation of Wang et
-al.~\cite{wang2025multitarget} their RGA needs 638.8, 1994.0 and 5590.3~s per
-instance at the three sizes, against 0.529, 0.883 and 2.443~s for their learned
-policy. The two implementations agree on the order of magnitude at every size.
-The claim is an operating point
-rather than a dominance: a feasible schedule in about a second, for a shop
-that reschedules often or evaluates many what-if scenarios, and a method whose
-cost grows slowly with the instance size.
 
 \paragraph{Scope} Section~\ref{sec:problem} states the transport
 assumptions (A1)--(A5).
@@ -763,23 +674,9 @@ The protocol above has no failures, by assumption~(A3). We relax that
 assumption once, as a separate scenario, to see what each method does when a
 resource needs a repair halfway through.
 
-At step 14 of 36, the machine that step used needs 100 time units of repair.
-Every operation the method places on that machine later pays the repair; the
-vehicle that made the last trip pays it too. Machine and vehicle stay in the
-candidate set, so a method that re-decides at every step can take another one,
-and a method that fixes its plan up front cannot. Nothing is retrained for this
-scenario: the same checkpoints, and each baseline is re-run inside the
-experiment. The repair falls on the
-machine each method used itself at step 14, so the three methods meet the same
-kind of disruption rather than the same machine.
-
 \begin{table}[t]
 \centering
-\caption{Objective with and without one repair, mean over the 100 test
-instances of each family. The row of our model is the mean of the three seeds.
-The no-repair column is recomputed inside this experiment, with PDR on the
-mor/spt pair and RGA on the earliest-free AGV rule, so its values differ
-slightly from Table~\ref{tab:baselines}. Lower is better.}
+\caption{Objective with and without one repair, mean over the 100 test instances of each family.}
 \label{tab:repair}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{llrrr}
@@ -823,9 +720,7 @@ nine.
 \begin{table}[t]
 \centering
 \caption{Objective at nine weight points on $6\times6\times2$, $10\times6\times2$ and
-$10\times10\times2$, mean
-over the 100 test instances. Our model is the mean of the three seeds and is
-not retrained for any point. The last column is our model against RGA; a
+$10\times10\times2$, mean over the 100 test instances. The last column is our model against RGA, a
 positive value means our model is higher.}
 \label{tab:weights}
 \footnotesize

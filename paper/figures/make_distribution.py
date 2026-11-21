@@ -88,6 +88,9 @@ def _radar(ax, ratio):
     ax.fill(angles, r, color=BLUE, alpha=0.14, zorder=1)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(RADAR_AXES, fontsize=8)
+    for tick in ax.xaxis.get_major_ticks():
+        if tick.label1.get_text() == "PEC":
+            tick.set_pad(-2)
     ax.set_ylim(0.94, 1.08)
     ax.set_yticks([0.95, 1.0, 1.05])
     ax.set_yticklabels(["0.95", "1", "1.05"], fontsize=7.5)
@@ -125,7 +128,7 @@ def main() -> None:
         hi = max(g.max() for g in groups)
         ax.set_ylim(lo - 0.08 * (hi - lo), hi + 0.08 * (hi - lo))
         ax.set_ylabel("Objective", fontsize=7.5)
-        ax.set_title(label, fontsize=9, pad=3)
+        ax.set_title(label, fontsize=8, pad=3)
         ax.spines[["top", "right"]].set_visible(False)
         ax.tick_params(labelsize=8, length=2.8, width=1.0)
         ax.grid(axis="y", linewidth=0.3, color="#CFCECE", alpha=0.6)
@@ -133,16 +136,16 @@ def main() -> None:
 
         axr = fig.add_subplot(gs[1, col], projection="polar")
         _radar(axr, ratios[col])
-        axr.set_title(label, fontsize=9, pad=8)
+        axr.set_title(label, fontsize=8, pad=8)
 
-    fig.text(0.005, 0.965, "(a) per-instance objective", fontsize=9.5,
+    fig.text(0.005, 0.965, "(a) per-instance objective", fontsize=8,
              ha="left", va="bottom")
     fig.text(0.005, 0.53, "(b) objective terms, divided by the value "
-             "without the selector", fontsize=9.5, ha="left", va="bottom")
+             "without the selector", fontsize=8, ha="left", va="bottom")
     cond = [plt.Line2D([], [], color=RED, linewidth=2.0),
             plt.Line2D([], [], color=BLUE, linewidth=2.0)]
     fig.legend(cond, ["without selector", "with selector"],
-               loc="upper right", ncol=2, fontsize=8.5, frameon=False,
+               loc="upper right", ncol=2, fontsize=7.5, frameon=False,
                bbox_to_anchor=(1.0, 0.995), handlelength=1.4,
                columnspacing=1.4)
     finalize_figure(fig, OUT / "fig_distribution", formats=["pdf"])

@@ -127,7 +127,7 @@ def main():
     handles += [Patch(facecolor=AGV_COLORS[a], label=f"A{a+1}")
                 for a in range(6)]
     fig.legend(handles=handles, loc="lower center", ncol=6, frameon=False,
-               bbox_to_anchor=(0.5, 0.005), fontsize=6.0)
+               bbox_to_anchor=(0.5, 0.005), fontsize=7.0)
     fig.tight_layout(rect=(0, 0.07, 1, 1))
     finalize_figure(fig, OUT / "fig_gantt", formats=["pdf"])
     print("wrote fig_gantt.pdf", "agv legs ours/pdr", len(ours["agv_rows"]),

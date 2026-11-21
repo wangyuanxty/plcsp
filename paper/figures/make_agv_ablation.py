@@ -19,7 +19,7 @@ OUT = Path(__file__).resolve().parent
 ROOT = Path(__file__).resolve().parents[2]
 TR = ROOT / "plcsp_v5/trained_model"
 
-COLORS = ["#0F4D92", "#42949E", "#8BCF8B", "#B64342", "#9A4D8E"]
+COLORS = ["#0D6EFD", "#00B3B3", "#2ECC71", "#E63946", "#9B5DE5"]
 GREY = "#555555"
 
 FAMILIES = [
@@ -64,9 +64,9 @@ def main() -> None:
                                 "markeredgecolor": "none", "alpha": 0.5})
     for patch, color in zip(bp["boxes"], COLORS):
         patch.set_facecolor(color)
-        patch.set_alpha(0.85)
-        patch.set_edgecolor("white")
-        patch.set_linewidth(0.5)
+        patch.set_alpha(1.0)
+        patch.set_edgecolor("#333333")
+        patch.set_linewidth(0.8)
     means = [row.mean() for row in rows]
     ax.plot(means, ypos, "D", markersize=3.6, color="white",
             markeredgecolor=GREY, markeredgewidth=0.6, zorder=5,

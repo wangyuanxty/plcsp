@@ -4,27 +4,27 @@
 \subsection{Overview}
 
 At each low-level step, our model selects an operation, a machine, and an AGV. Each decision is
-produced by its own agent. A top-level policy selects one rule for each
-agent every $\Delta T$ low-level steps. The selected rules bias the low-level
+produced by its own agent. A top-level rule selector holds one rule head per
+shop agent and sets their rule priors every $\Delta T$ low-level steps (eight
+in our experiments). The selected rules bias the low-level
 agents, but they do not replace them. We refer to the resulting model as
 H-ST-GRPO. Figure~\ref{fig:method} summarizes the architecture and the
-training loop.
+training loop. In panel (a), each shop agent reads its own token set, encodes
+it, scores its candidates, masks the infeasible ones, and returns one action,
+and the machine agent's encoder applies attention within a machine and then
+across machines. The three actions form the joint action, and the shop
+updates. Credit returns along two paths: the team return gives the three shop
+agents one shared group-relative advantage, while the per-agent costs, which
+are signals and not part of the objective, credit each selector head with the
+change of its own agent's cost. Panel (b) shows the training pipeline for one
+group of eight episodes: group sampling, rollout, segment close, and the GRPO
+and PPO updates.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_method.pdf}
-\caption{Method overview. (a) Four agents. The rule selector agent holds one
-rule head per shop agent and sets their rule priors every eight steps. Each
-shop agent reads its own token set, encodes it, scores its candidates, masks
-the infeasible ones and returns one action; the machine encoder applies
-attention within a machine and then across machines. The three actions form
-the joint action, and the shop updates. Credit returns along two paths: the
-team return gives the three shop agents one shared group-relative advantage,
-while the per-agent costs, which are signals and not part of the objective,
-credit each selector head with the change of its own agent's cost.
-(b) Training
-pipeline for one group of eight episodes: group sampling, rollout, segment
-close, and the GRPO and PPO updates.}
+\caption{Method overview. (a) The four agents and the two credit paths.
+(b) The training pipeline for one group of eight episodes.}
 \label{fig:method}
 \end{figure*}
 
