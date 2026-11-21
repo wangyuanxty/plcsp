@@ -40,6 +40,17 @@
 
 \journal{Journal of Manufacturing Systems}
 
+% Abstract: centred heading, and first-line indent on each paragraph
+% (elsarticle defaults to a flush-left bold heading and a \noindent body).
+\makeatletter
+\renewenvironment{abstract}{%
+  \global\setbox\absbox=\vbox\bgroup
+  \hsize=\textwidth\def\baselinestretch{1}%
+  \noindent\unskip{\centering\textbf{\@elsarticleabstitle}\par}%
+  \medskip\ignorespaces}
+  {\egroup}
+\makeatother
+
 \setlength{\emergencystretch}{2em}
 
 \begin{document}
