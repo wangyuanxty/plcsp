@@ -35,17 +35,7 @@ vehicle of the second workshop instead, the first machine stays
 idle. The dispatching decision affects the makespan, the idle energy consumption of both workshops, 
 and the loaded travel time. A nearest-vehicle-first rule cannot capture this trade-off, 
 whereas an always-wait rule fails to account for the first machine.
-Figure~\ref{fig:workshop} shows an AGV workshop of this kind, and
 Figure~\ref{fig:motivated} shows the shop and the two transport cases.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{agv_workshop.png}
-\caption{An AGV workshop in a flexible manufacturing plant. Vehicles
-carry jobs between processing areas; coordinating them with the machines
-is the scheduling problem studied in this paper. Photo courtesy of DMEGC.}
-\label{fig:workshop}
-\end{figure}
 
 This example is the setting of the paper. In a flexible job shop scheduling problem, 
 each operation must be assigned to one machine selected from a set of eligible machines, 
@@ -58,19 +48,30 @@ and the objective becomes tighter, because idle machines incur energy consumptio
 they do not affect the makespan. The objective considered in this paper therefore integrates the makespan, 
 the processing and idle energy consumption, and the loaded travel time.
 
-\begin{figure*}[t]
+\begin{figure*}[!t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_environment.pdf}
-\caption{The shop environment and the logistics process. (a) Four agents are included: 
-a rule selector and the operation, machine, and AGV agents. The latter three make the three coupled decisions, 
-and the four objective terms are listed below them. (b) Two workshops, six machines, one load/unload
-station and three AGVs per workshop; a job crosses the boundary.
-(c) Cross-workshop transport: empty travel to the pickup machine, loaded travel
-to the source station, a transfer between the two stations, and loaded travel
-from the target station to the destination. (d) Same-workshop transport: one
-AGV moves the job between two machines of one workshop, with no station
-transfer. In (c) and (d) the bar under the route shows how one trip spends its
-time, segmented in the order the AGV meets them.}
+\caption{The shop environment and the decision problem. (a) Two workshops, six
+machines, one load/unload station and three AGVs per workshop, separated by a
+boundary. A job is picked up at M2, carried to station R1 by AGV A2, transferred
+to station R2, and delivered to M5 by AGV A5; the circled numbers mark the
+pickup, the source station, the boundary crossing and the destination. Solid
+gold lines show loaded travel, dashed lines empty travel, and the double line
+the transfer between the two stations. (b) Trip timeline. The upper three rows
+follow the cross-workshop trip: the source AGV travels empty and then loaded to
+the source station, the job is transferred between the stations, and the target
+AGV waits for the transfer and then carries the job to its destination. The
+bottom row shows a same-workshop trip, in which one AGV moves the job between
+two machines with no transfer. (c) Decisions and objective. The rule selector
+holds one rule head per shop agent and sets a rule prior for each; the
+operation, machine and AGV agents form the joint action, and the resulting
+schedule is scored by the four objective terms: the makespan $C_{\max}$, the
+processing energy $\bar{E}_{\mathrm{proc}}$, the idle energy $E_{\mathrm{idle}}$,
+and the transport time $T_{\mathrm{trans}}$. Each head selects one rule:
+earliest finish, least work remaining or most remaining work (operation);
+shortest processing time, lowest processing energy, shortest transport time or
+minimum ready time (machine); and nearest, earliest arrival or least utilized
+(AGV).}
 \label{fig:motivated}
 \end{figure*}
 

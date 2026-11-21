@@ -375,10 +375,10 @@ and the rings mark steps of 5 percent.}
 \end{figure*}
 
 \paragraph{Case study}
-Figure~\ref{fig:gantt} shows one $6\times6$ instance under two schedules:
+Figure~\ref{fig:gantt} shows one $6\times6\times2$ instance under two schedules:
 our model (a) and the best PDR rule (b). The lower six rows are
 machines; the upper six rows are AGVs. Our model returns an objective of
-568.4 against 751.3 for the rule on this seed. It uses 29 AGV trips against 33
+785.3 against 1117.8 for the rule on this seed. It uses 26 AGV trips against 39
 for the rule. The
 figure shows that the assignment, the machine sequence, and the vehicle
 sequence change together: the operations are packed into shorter machine
@@ -387,10 +387,10 @@ intervals, and the vehicle busy intervals follow.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.96\linewidth]{fig_gantt.pdf}
-\caption{One $6\times6$ instance. (a) Our model. (b) Best PDR rule.
+\caption{One $6\times6\times2$ instance. (a) Our model. (b) Best PDR rule.
 The lower six rows are machines (bars are operations; colors are jobs). The
-upper six rows are AGVs (bar length is the busy interval, including empty
-travel).}
+upper six rows are AGVs: A1 to A6, one color each (bar length is the busy
+interval, including empty travel).}
 \label{fig:gantt}
 \end{figure*}
 
@@ -469,34 +469,46 @@ ST & ST (intra0) & 845.81 & 13.30 \\
 
 \paragraph{Encoder under the full protocol} Table~\ref{tab:encoderfull}
 repeats the ablation with the full protocol of this paper, with the AGV agent,
-the rule selector and the station transport model enabled. The ordering is the
-same as in Table~\ref{tab:encoder}, though the gaps differ. Swapping the job
-encoder from ST to GNN changes nothing: 865.01 against 867.75, inside the seed
-spread exactly as in Table~\ref{tab:encoder}. Swapping the machine encoder to
-GAT costs 95.10 with the job encoder at ST and 99.21 with it at GNN, and the
-ordering holds in all three seeds at both job settings. Removing the
-machine-internal attention costs 34.26. The
-job encoder carries no main effect in either protocol; the
-machine encoder is the component that matters.
+the rule selector and the station transport model enabled, at $6\times6$ and
+$10\times6$. At $6\times6$ the ordering is the same as in
+Table~\ref{tab:encoder}, though the gaps differ. Swapping the job encoder from
+ST to GNN changes nothing: 865.01 against 867.75, inside the seed spread exactly
+as in Table~\ref{tab:encoder}. At $10\times6$ the all-ST cell obtains 825.20 and
+the GNN job encoder 813.42, lower by 11.78 in all three seeds; the job encoder
+is a small effect whose sign depends on size, and we do not claim a main effect.
+Swapping the machine encoder to GAT costs 95.10 with the job encoder at ST and
+99.21 with it at GNN at $6\times6$, and 109.30 and 99.77 at $10\times6$; the
+ordering holds in all three seeds at both job settings and both sizes.
+Removing the machine-internal attention costs 34.26 at $6\times6$; it was not
+run at $10\times6$. The machine encoder is the component that matters at both
+sizes.
 
 \begin{table}[t]
 \centering
-\caption{Encoder ablation at $6\times6\times2$ under the full protocol of this paper:
-AGV agent, rule selector and station transport model enabled. All rows use
-GRPO. Values are three-seed means over the 100 test instances, with the seed
-standard deviation. The rows above the midrule keep the machine-internal
-attention; the last row removes it (intra0).}
+\caption{Encoder ablation under the full protocol of this paper: AGV agent,
+rule selector and station transport model enabled, at $6\times6\times2$ and
+$10\times6\times2$. All rows use GRPO. Values are three-seed means over the 100
+test instances, with the seed standard deviation. The intra0 row removes the
+machine-internal attention; it was run at $6\times6\times2$ only, and the
+$10\times6\times2$ block keeps the attention in all four cells.}
 \label{tab:encoderfull}
-\begin{tabular}{llrr}
+\small
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{lllrr}
 \toprule
-Job enc. & Machine enc. & Objective & Std \\
+Size & Job enc. & Machine enc. & Objective & Std \\
 \midrule
-ST & ST & 867.75 & 11.86 \\
-GNN & ST & 865.01 & 18.50 \\
-ST & GAT & 962.85 & 3.95 \\
-GNN & GAT & 964.22 & 20.12 \\
+$6\times6\times2$ & ST & ST & 867.75 & 11.86 \\
+ & GNN & ST & 865.01 & 18.50 \\
+ & ST & GAT & 962.85 & 3.95 \\
+ & GNN & GAT & 964.22 & 20.12 \\
 \midrule
-ST & ST (intra0) & 902.01 & 21.70 \\
+ & ST & ST (intra0) & 902.01 & 21.70 \\
+\midrule
+$10\times6\times2$ & ST & ST & 825.20 & 4.96 \\
+ & GNN & ST & 813.42 & 6.01 \\
+ & ST & GAT & 934.50 & 28.09 \\
+ & GNN & GAT & 924.98 & 39.64 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -504,8 +516,9 @@ ST & ST (intra0) & 902.01 & 21.70 \\
 \paragraph{Algorithm} Table~\ref{tab:algo} compares GRPO with PPO in the
 same architecture. Under the protocol of Wang et al.\ at $6\times6$, GRPO
 obtains 798.06 against 871.04 for PPO. With the AGV fleet and the rule
-selector enabled, the gap widens at $6\times6$ (867.75 against 966.13) and
-narrows at $10\times6$ (808.67 against 864.69). GRPO is better in all three
+selector enabled, the gap widens at $6\times6$ (867.75 against 966.13),
+narrows at $10\times6$ (808.67 against 864.69) and widens again at
+$10\times10$ (1836.64 against 2116.78). GRPO is better in all three
 seeds at every setting. The critic-free update is the better choice in both
 resource regimes.
 
@@ -516,6 +529,8 @@ al.~\cite{wang2025multitarget}, with no AGV fleet and no rule selector; the
 second uses the full protocol. Values are three-seed means over the 100 test
 instances, with the seed standard deviation.}
 \label{tab:algo}
+\small
+\setlength{\tabcolsep}{2.5pt}
 \begin{tabular}{lllrr}
 \toprule
 Protocol & Size & Algorithm & Objective & Std \\
@@ -527,6 +542,8 @@ Full & $6\times6\times2$ & GRPO & 867.75 & 11.86 \\
  & $6\times6\times2$ & PPO & 966.13 & 44.82 \\
  & $10\times6\times2$ & GRPO & 808.67 & 12.83 \\
  & $10\times6\times2$ & PPO & 864.69 & 30.60 \\
+ & $10\times10\times2$ & GRPO & 1836.64 & 43.46 \\
+ & $10\times10\times2$ & PPO & 2116.78 & 39.94 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -680,7 +697,8 @@ and do not use it as a headline claim.
 \paragraph{Why the encoder matters more than the algorithm}
 Under the protocol of Wang et al.\ the encoder ablation spans 127.15 between
 the all-Set-Transformer and the all-GNN configurations, and the ordering holds
-in all three seeds; under the full protocol the same span is 96.47. The
+in all three seeds; under the full protocol the same span is 96.47 at
+$6\times6$ and 99.78 at $10\times6$. The
 algorithm ablation spans 72.98 at $6\times6$ under the first protocol and
 98.38 under the second. Whereas the
 encoder changes the representation that all three agents share, the algorithm
@@ -699,11 +717,13 @@ critic's error enters the advantage of every agent. GRPO replaces
 those critics by the within-group mean and standard deviation of the same
 eight returns, so no critic is fitted at the low level. The gap is 72.98 at
 $6\times6$ under the protocol of Wang et al., 98.38 at $6\times6$ under the
-full protocol and 56.02 at $10\times6$. It does not grow with the instance, so
-we do not claim a trend with size. A paired test on the 100 instances, with
-Holm correction over the two sizes, gives
-$p=9.0\times10^{-16}$ at $6\times6$ and $p=1.4\times10^{-9}$ at $10\times6$,
-with GRPO lower on 90 and 77 of them. Both algorithms used one weight vector
+full protocol, 56.02 at $10\times6$ and 280.14 at $10\times10$. The gap is
+therefore not monotone in size: it falls from $6\times6$ to $10\times6$ and
+rises at $10\times10$, so we do not claim a trend with size. A paired test on
+the 100 instances, with Holm correction over the three sizes, gives
+$p=9.0\times10^{-16}$ at $6\times6$, $p=1.4\times10^{-9}$ at $10\times6$ and
+$p=1.8\times10^{-16}$ at $10\times10$, with GRPO lower on 90, 77 and 96 of
+them. Both algorithms used one weight vector
 per group, so the gap is attributed to the estimator.
 
 \paragraph{What our model is for}
@@ -748,7 +768,8 @@ Every operation the method places on that machine later pays the repair; the
 vehicle that made the last trip pays it too. Machine and vehicle stay in the
 candidate set, so a method that re-decides at every step can take another one,
 and a method that fixes its plan up front cannot. Nothing is retrained for this
-scenario: the same checkpoints and the same baselines. The repair falls on the
+scenario: the same checkpoints, and each baseline is re-run inside the
+experiment. The repair falls on the
 machine each method used itself at step 14, so the three methods meet the same
 kind of disruption rather than the same machine.
 
@@ -756,7 +777,9 @@ kind of disruption rather than the same machine.
 \centering
 \caption{Objective with and without one repair, mean over the 100 test
 instances of each family. The row of our model is the mean of the three seeds.
-Lower is better. }
+The no-repair column is recomputed inside this experiment, with PDR on the
+mor/spt pair and RGA on the earliest-free AGV rule, so its values differ
+slightly from Table~\ref{tab:baselines}. Lower is better.}
 \label{tab:repair}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{llrrr}
@@ -793,12 +816,14 @@ would come.
 
 The weights enter the state, so one policy covers the whole trade-off surface:
 a different weight vector needs no retraining, while the genetic algorithm must
-be solved once per weight. We check this at $6\times6$ and $10\times10$ on the
-same nine weight points and compare with RGA at the same nine.
+be solved once per weight. We check this at $6\times6$, $10\times6$ and
+$10\times10$ on the same nine weight points and compare with RGA at the same
+nine.
 
 \begin{table}[t]
 \centering
-\caption{Objective at nine weight points on $6\times6\times2$ and $10\times10\times2$, mean
+\caption{Objective at nine weight points on $6\times6\times2$, $10\times6\times2$ and
+$10\times10\times2$, mean
 over the 100 test instances. Our model is the mean of the three seeds and is
 not retrained for any point. The last column is our model against RGA; a
 positive value means our model is higher.}
@@ -819,6 +844,16 @@ $6\times6\times2$ & (1, 0, 0) & 479.40 & 436.10 & $+9.9\%$ \\
  & (0.2, 0.4, 0.4) & 805.36 & 693.03 & $+16.2\%$ \\
  & (0.4, 0.2, 0.4) & 581.70 & 506.48 & $+14.9\%$ \\
 \midrule
+$10\times6\times2$ & (1, 0, 0) & 613.93 & 602.44 & $+1.9\%$ \\
+ & (0, 1, 0) & 1206.57 & 1168.67 & $+3.2\%$ \\
+ & (0, 0, 1) & 410.95 & 180.03 & $+128.3\%$ \\
+ & (0.5, 0.5, 0) & 909.89 & 886.37 & $+2.7\%$ \\
+ & (0.5, 0, 0.5) & 512.29 & 436.03 & $+17.5\%$ \\
+ & (0, 0.5, 0.5) & 808.52 & 753.69 & $+7.3\%$ \\
+ & (1/3, 1/3, 1/3) & 744.99 & 696.10 & $+7.0\%$ \\
+ & (0.2, 0.4, 0.4) & 770.34 & 721.25 & $+6.8\%$ \\
+ & (0.4, 0.2, 0.4) & 650.21 & 602.45 & $+7.9\%$ \\
+\midrule
 $10\times10\times2$ & (1, 0, 0) & 798.09 & 902.37 & $-11.6\%$ \\
  & (0, 1, 0) & 3522.51 & 4609.60 & $-23.6\%$ \\
  & (0, 0, 1) & 534.16 & 769.29 & $-30.6\%$ \\
@@ -837,9 +872,13 @@ points fall between 9.9 and 19.0\% above RGA, and the default weights of
 Table~\ref{tab:baselines} sit at 12.2\%, so the relative position of our model
 does not drift with the weights. The exception is transport alone, where our
 model is 88.7\% above RGA; without the makespan and the energy terms our model
-travels about twice as far. At $10\times10$ the sign reverses: our model is
+travels about twice as far. At $10\times6$ our model is above RGA at all nine
+points, by 1.9 to 128.3\%: 1.9\% on makespan alone, 3.2\% on energy alone,
+128.3\% on transport alone, and 2.7 to 17.5\% on the mixed points. At
+$10\times10$ the sign reverses: our model is
 below RGA at all nine points, by 11.6 to 30.6\%. The smallest margin is on
 makespan alone (11.6\%) and the largest on transport alone (30.6\%). What the
 nine points buy is not a smaller gap but a gap that does not need a new run:
-RGA is re-solved at each point, 437.8~s per instance at $6\times6$ and
-4161~s at $10\times10$, against 0.95 and 4.16~s for one pass of our model.
+RGA is re-solved at each point, 437.8~s per instance at $6\times6$, 1426~s at
+$10\times6$ and 4161~s at $10\times10$, against 0.95, 1.99 and 4.16~s for one
+pass of our model.

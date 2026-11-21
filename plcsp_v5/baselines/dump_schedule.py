@@ -7,16 +7,13 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
-import torch
-
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "plcsp_v5"))
 sys.path.insert(0, str(ROOT / "plcsp_v5" / "graph-jsp-env" / "src"))
 
-from graph_jsp_env.disjunctive_graph_jsp_env_singlestep import (
-    DisjunctiveGraphJspEnv_singleStep)  # noqa: E402
+from graph_jsp_env.disjunctive_graph_jsp_env_singlestep import (  # noqa: E402
+    DisjunctiveGraphJspEnv_singleStep)
 from baselines.diag_rs_actions import run_arm  # noqa: E402
 from instance.generate_allsize_mofjsp_dataset import Instance_Dataset  # noqa: E402
 
@@ -45,41 +42,56 @@ try:
 except ImportError:
     from plcsp_v5.agv import state as agv_state  # noqa: E402
 
-_ORIG_TT = agv_state.transport_timing
 
-
-def _tt(src, pickup, dropoff, ready, total, travel, **kw):
-    out = _ORIG_TT(src, pickup, dropoff, ready, total, travel, **kw)
-    AGV_ROWS.append({
-        "agv": int(src.idx),
-        "start": max(float(ready), float(src.free_time)),
-        "end": float(out["src_free"]),
-    })
-    dst = kw.get("dst")
-    if dst is not None:
+def _make_tt(orig):
+    def _tt(src, *args, **kw):
+        out = orig(src, *args, **kw)
+        ready = float(args[2]) if len(args) > 2 else float(kw.get("ready", 0.0))
         AGV_ROWS.append({
-            "agv": int(dst.idx),
-            "start": float(out["dst_free"]) - float(out["dst_travelled"]),
-            "end": float(out["dst_free"]),
+            "agv": int(src.idx),
+            "start": max(ready, float(src.free_time)),
+            "end": float(out["src_free"]),
         })
-    return out
+        dst = kw.get("dst")
+        if dst is not None:
+            AGV_ROWS.append({
+                "agv": int(dst.idx),
+                "start": float(out["dst_free"]) - float(out["dst_travelled"]),
+                "end": float(out["dst_free"]),
+            })
+        return out
+    return _tt
 
 
-agv_state.transport_timing = _tt
+_state_mods = [agv_state]
+try:
+    import plcsp_v5.agv.state as _state_b  # noqa: E402
+    if _state_b is not agv_state:
+        _state_mods.append(_state_b)
+except ImportError:
+    pass
+
+for _mod in _state_mods:
+    for _name in ("transport_timing", "transport_timing_m2"):
+        _orig_fn = getattr(_mod, _name, None)
+        if _orig_fn is not None:
+            setattr(_mod, _name, _make_tt(_orig_fn))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--run-tag", default="plancredit_local_E4b_J6M6E2_s1_remote")
+    ap.add_argument("--credit", default="team")
+    ap.add_argument("--instance", default="test_Instance_J6M6E2.pkl")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
     data = Instance_Dataset(
         generate_true=0,
         dataset_pth=str(ROOT / "plcsp_v5" / "instance" /
-                        "test_Instance_J6M6E2.pkl"))
-    run_arm("E4b", args.seed, data, 1, args.run_tag, credit="local")
+                        args.instance))
+    run_arm("E4b", args.seed, data, 1, args.run_tag, credit=args.credit)
 
     rows = []
     for i, node in HOLDER["nodes"]:

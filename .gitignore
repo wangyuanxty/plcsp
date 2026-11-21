@@ -47,3 +47,8 @@ CLAUDE.md
 Thumbs.db
 desktop.ini
 plcsp_v4/training_results/
+/temp/
+
+paper/figures/*_tikz.aux
+paper/figures/*_tikz.log
+paper/figures/*_tikz.pdf
