@@ -36,6 +36,9 @@ from pubstyle import FigureStyle, apply_publication_style, finalize_figure  # no
 
 
 def draw(ax, rows, legs, n_op, n_machine, n_agv, title):
+    for i in range(n_machine + n_agv):
+        if i % 2 == 1:
+            ax.axhspan(i - 0.5, i + 0.5, color="#E9EEF3", zorder=0, lw=0)
     for r in rows:
         job = int(r["task"]) // n_op
         ax.barh(int(r["machine"]),
@@ -114,7 +117,7 @@ def main():
         pdr_rows.append({"task": t, "start": float(env["starts"][t]),
                          "finish": float(env["finishes"][t]), "machine": m})
 
-    fig, axes = plt.subplots(2, 1, figsize=(7.0, 4.0), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(7.0, 5.6), sharex=True)
     draw(axes[0], ours["rows"], ours["agv_rows"], n_op,
          n_machine, 6, "(a) H-ST-GRPO")
     draw(axes[1], pdr_rows, pdr_legs, n_op, n_machine, 6,
@@ -124,7 +127,7 @@ def main():
     handles += [Patch(facecolor=AGV_COLORS[a], label=f"A{a+1}")
                 for a in range(6)]
     fig.legend(handles=handles, loc="lower center", ncol=6, frameon=False,
-               bbox_to_anchor=(0.5, 0.005), fontsize=5.2)
+               bbox_to_anchor=(0.5, 0.005), fontsize=6.0)
     fig.tight_layout(rect=(0, 0.07, 1, 1))
     finalize_figure(fig, OUT / "fig_gantt", formats=["pdf"])
     print("wrote fig_gantt.pdf", "agv legs ours/pdr", len(ours["agv_rows"]),
@@ -132,5 +135,5 @@ def main():
 
 
 if __name__ == "__main__":
-    apply_publication_style(FigureStyle(font_size=7, axes_linewidth=0.9))
+    apply_publication_style(FigureStyle(font_size=8, axes_linewidth=0.9))
     main()
