@@ -459,24 +459,27 @@ ST & ST (intra0) & 845.81 & 13.30 \\
 
 \paragraph{Encoder under the full protocol} Table~\ref{tab:encoderfull}
 repeats the ablation with the full protocol of this paper, with the AGV agent,
-the rule selector and the station transport model enabled, at $6\times6$ and
-$10\times6$. At $6\times6$ the ordering is the same as in
+the rule selector and the station transport model enabled, at $6\times6$,
+$10\times6$ and $10\times10$. At $6\times6$ the ordering is the same as in
 Table~\ref{tab:encoder}, though the gaps differ. Swapping the job encoder from
 ST to GNN changes nothing: 865.01 against 867.75, inside the seed spread exactly
 as in Table~\ref{tab:encoder}. At $10\times6$ the all-ST cell obtains 825.20 and
-the GNN job encoder 813.42, lower by 11.78 in all three seeds; the job encoder
+the GNN job encoder 813.42, lower by 11.78 in all three seeds; at $10\times10$
+the order reverses, 1805.45 against 1829.72. The job encoder
 is a small effect whose sign depends on size, and we do not claim a main effect.
 Swapping the machine encoder to GAT costs 95.10 with the job encoder at ST and
-99.21 with it at GNN at $6\times6$, and 109.30 and 99.77 at $10\times6$; the
-ordering holds in all three seeds at both job settings and both sizes.
-Removing the machine-internal attention costs 34.26 at $6\times6$, 
-which indicates that machine-internal attention is effective at both sizes.
+99.21 with it at GNN at $6\times6$, 109.30 and 111.56 at $10\times6$, and
+447.36 and 473.04 at $10\times10$; the ordering holds in all three seeds at
+every size and job setting. Removing the machine-internal attention costs 34.26
+at $6\times6$; it was not run at the larger sizes. The machine encoder is the
+component that matters at every size, and its cost grows with the instance.
 
 \begin{table}[t]
 \centering
-\caption{Encoder ablation under the full protocol of this paper. 
-The intra0 row removes the machine-internal attention, which run at $6\times6\times2$ only, and the
-$10\times6\times2$ block keeps the attention in all four cells.}
+\caption{Encoder ablation under the full protocol of this paper. The intra0 row
+removes the machine-internal attention and was run at $6\times6\times2$ only;
+the $10\times6\times2$ and $10\times10\times2$ blocks keep the attention in all
+four cells.}
 \label{tab:encoderfull}
 \small
 \setlength{\tabcolsep}{2.5pt}
@@ -494,6 +497,11 @@ $10\times6\times2$ & ST & ST & 825.20 & 4.96 \\
  & GNN & ST & 813.42 & 6.01 \\
  & ST & GAT & 934.50 & 28.09 \\
  & GNN & GAT & 924.98 & 39.64 \\
+\midrule
+$10\times10\times2$ & ST & ST & 1805.45 & 30.50 \\
+ & GNN & ST & 1829.72 & 33.04 \\
+ & ST & GAT & 2252.81 & 301.85 \\
+ & GNN & GAT & 2302.76 & 234.13 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -504,13 +512,15 @@ obtains 798.06 against 871.04 for PPO. With the AGV fleet and the rule
 selector enabled, the gap widens at $6\times6$ (867.75 against 966.13),
 narrows at $10\times6$ (808.67 against 864.69) and widens again at
 $10\times10$ (1836.64 against 2116.78). GRPO is better in all three
-seeds at every setting. The critic-free update is the better choice in both
-resource regimes. A paired test over the 100 instances, with Holm correction
+seeds at every setting. The critic-free update is the better choice at every
+size. A paired test over the 100 instances, with Holm correction
 over the three sizes, gives $p=9.0\times10^{-16}$ at $6\times6$,
 $p=1.4\times10^{-9}$ at $10\times6$ and $p=1.8\times10^{-16}$ at $10\times10$,
 with GRPO lower on 90, 77 and 96 of them. Across the two protocols, the
-encoder span is 96.47--127.15 and the algorithm span 56.02--280.14, so
-neither dominates consistently; we do not claim a general ordering between
+encoder gap (all-ST to the worst cell) ranges from 96.47 to 497.31 and the
+algorithm gap from 56.02 to 280.14. At $6\times6$ and $10\times6$ the two
+effects are comparable; at $10\times10$ the machine encoder matters more than
+the choice of update, so we do not claim a general ordering between
 representation and update.
 
 \begin{table}[t]
@@ -631,16 +641,22 @@ therefore an operating point rather than a dominance: a feasible schedule in
 about a second, for a shop that reschedules often or evaluates many what-if
 scenarios, and a method whose cost grows slowly with the instance size.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
 \includegraphics[width=\linewidth]{fig_budget.pdf}
-\caption{Equal-budget comparison at $6\times6$. The line is the RGA objective
-at five budgets; the dashed line is one pass of our model, which has no budget
-axis. The upper axis converts evaluations into wall time in the environment
-(0.0903~s per evaluation). The two are equal at about 1{,}400 evaluations,
-which cost 126~s against 0.95~s.}
+\caption{Equal-budget comparison. (a) At $6\times6\times2$, the RGA objective
+against its evaluation budget, a three-seed mean over the 100 test instances
+(the 530 point is one seed over five instances); the dashed line is one pass of
+our model, which has no budget axis. The two are equal at about 1{,}400
+evaluations, which cost 126~s against 0.95~s. (b, c) The same sweep at
+$10\times6\times2$ and $10\times10\times2$, three-seed means over the first ten
+test instances; the dashed lines are the 100-instance means of
+Table~\ref{tab:baselines}. RGA reaches the controller line only near its full
+budget at $10\times6$ and stays above it at $10\times10$. The instance sets of
+(b) and (c) differ from the controller means, so these panels show the budget
+trend, not a paired comparison.}
 \label{fig:budget}
-\end{figure}
+\end{figure*}
 
 \paragraph{Robustness}
 The validation objective falls from 967 at episode 25 to 923 at episode 50
