@@ -8,7 +8,7 @@ produced by its own agent. A top-level rule selector holds one rule head per
 shop agent and sets their rule priors every $\Delta T$ low-level steps (eight
 in our experiments). The selected rules bias the low-level
 agents, but they do not replace them. We refer to the resulting model as
-H-ST-GRPO. Figure~\ref{fig:method} summarizes the architecture and the
+HSTGRA. Figure~\ref{fig:method} summarizes the architecture and the
 training loop. In panel (a), each shop agent reads its own token set, encodes
 it, scores its candidates, masks the infeasible ones, and returns one action,
 and the machine agent's encoder applies attention within a machine and then
@@ -17,7 +17,7 @@ updates. Credit returns along two paths: the team return gives the three shop
 agents one shared group-relative advantage, while the per-agent costs, which
 are signals and not part of the objective, credit each selector head with the
 change of its own agent's cost. Panel (b) shows the training pipeline for one
-group of eight episodes: group sampling, rollout, segment close, and the GRPO
+group of eight episodes: group sampling, rollout (one episode), segment close, and the group-relative
 and PPO updates.
 
 \begin{figure*}[t]
@@ -54,8 +54,7 @@ one team return, and training uses a centralized group-relative advantage. This
 scheme therefore follows centralized training with decentralized execution: no
 per-agent reward is required, and each agent selects from its own candidates.
 
-Low-level training uses group-relative policy optimization
-(GRPO) and no value critic, while the top-level policy is trained with proximal
+Low-level training uses a group-relative advantage and no value critic, while the top-level policy is trained with proximal
 policy optimization (PPO) on the weighted-cost change of each segment. Both
 levels run online in the same episode loop.
 
@@ -145,7 +144,7 @@ scores use the same weights.
 All three encoders are permutation-invariant over their candidate sets, so
 the same weights apply to different numbers of jobs, machines, and AGVs.
 
-\subsection{Multi-actor GRPO}
+\subsection{Multi-actor group-relative advantage}
 
 A group contains $G$ episodes on the same instance batch. Episode $i$
 produces a scalar return $R_i$, the negative objective \eqref{eq:objective}
@@ -225,12 +224,12 @@ busy time plus empty travel), or least utilized (minimum cumulative travel)
 (3).
 \end{itemize}
 
-The selected rule adds a bias $b$ to the logits of the corresponding
+The selected rule adds a bias $b$ to the action scores of the corresponding
 low-level agent,
 \begin{equation}
 \ell'_{i}(a)=\ell_{i}(a)+\alpha\,b_{i}(a),
 \end{equation}
-where $\ell_i$ are the logits of agent $i$ and $\alpha=0.5$. The low-level
+where $\ell_i$ are the action scores of agent $i$ and $\alpha=0.5$. The low-level
 agents keep the final decision, so the rule acts as a prior rather than a hard
 constraint. Each rule is associated with a non-zero bias, so the action set does not contain a ``no rule'' arm.
 
@@ -278,7 +277,7 @@ every 8 episodes. We use a learning rate of $10^{-3}$ with Adam and no
 decay. The
 PPO clip is 0.2, the entropy bonus of the top level is 0.01, and the gradient
 norm is clipped at 0.5. The top-level policy performs four epochs per
-episode. Evaluation is greedy on 100 instances with fixed weights.
+episode. Evaluation takes the highest-probability action on 100 instances with fixed weights.
 
 
 Algorithm~\ref{alg:train} summarizes one episode.
@@ -323,7 +322,7 @@ Entropy bonus & 0.01 \\
 Gradient-norm clip & 0.5 \\
 Segment length $\Delta T$ & 8 \\
 Rule-bias scale $\alpha$ & 0.5 \\
-Evaluation & greedy, 100 instances \\
+Evaluation & highest-probability, 100 instances \\
 Evaluation weights & 0.4 / 0.4 / 0.2 \\
 \bottomrule
 \end{tabular}

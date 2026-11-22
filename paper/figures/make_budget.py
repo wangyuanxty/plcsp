@@ -1,10 +1,11 @@
-"""Equal-budget curve: RGA objective against its evaluation budget.
+"""Equal-budget curve: RGA objective against its computation time.
 
 Three instance families.  The controller builds one schedule in a single pass,
 so it has no budget axis and is drawn as a horizontal line.  The 6x6 curve is
 the three-seed mean over the 100 test instances (the 530 point is one seed over
 five instances); the 10x6 and 10x10 curves are three-seed means over the first
-ten test instances.
+ten test instances.  Time is the number of evaluations times the per-evaluation
+simulator cost at each size (437.8, 1,426 and 4,161 s for 4,850 evaluations).
 """
 
 from pathlib import Path
@@ -20,42 +21,60 @@ from pubstyle import (PALETTE, FigureStyle, apply_publication_style,
 OUT = Path(__file__).resolve().parent
 
 EVALS = np.array([530, 914, 1394, 2306, 4850])
+SEC_PER_EVAL = {"6x6": 437.8 / 4850.0,
+                "10x6": 1426.0 / 4850.0,
+                "10x10": 4161.0 / 4850.0}
 
 CURVES = {
-    r"$6\times6\times2$": (np.array([1036.52, 932.83, 868.20, 803.85, 762.04]),
-                           867.75),
-    r"$10\times6\times2$": (np.array([1245.44, 1101.34, 997.46, 892.33, 769.26]),
-                            808.67),
-    r"$10\times10\times2$": (np.array([3703.24, 3339.82, 3073.87, 2734.32,
-                                       2399.74]), 1836.64),
+    "6x6": (r"$6\times6\times2$",
+            np.array([1036.52, 932.83, 868.20, 803.85, 762.04]), 867.75),
+    "10x6": (r"$10\times6\times2$",
+             np.array([1245.44, 1101.34, 997.46, 892.33, 769.26]), 808.67),
+    "10x10": (r"$10\times10\times2$",
+              np.array([3703.24, 3339.82, 3073.87, 2734.32, 2399.74]),
+              1836.64),
 }
 
 YLIMS = [(700, 1120), (700, 1300), (1750, 3900)]
+XLIMS = [(0, 470), (0, 1520), (0, 4400)]
 CROSS_EVALS = 1394
 
 
 def main() -> None:
     fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.35))
 
-    for ax, (title, (obj, ours)), ylim in zip(axes, CURVES.items(), YLIMS):
-        ax.plot(EVALS, obj, color=PALETTE["teal"], marker="o",
-                markersize=3.0, linewidth=1.1, zorder=3, label="RGA")
+    for ax, (key, (title, obj, ours)), ylim, xlim in zip(
+            axes, CURVES.items(), YLIMS, XLIMS):
+        t = EVALS * SEC_PER_EVAL[key]
+        ax.plot(t, obj, color=PALETTE["teal"], marker="o", markersize=3.0,
+                linewidth=1.1, zorder=3, label="RGA")
         ax.axhline(ours, color=PALETTE["blue_main"], linestyle="--",
-                   linewidth=1.1, zorder=2, label="Our model, one pass")
+                   linewidth=1.1, zorder=2, label="Our model, one schedule")
         ax.set_title(title, loc="left", fontsize=7.4)
-        ax.set_xlabel("RGA schedule evaluations", fontsize=6.6)
-        ax.set_xlim(200, 5300)
+        ax.set_xlabel("RGA computation time (s)", fontsize=6.6)
+        ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
         ax.spines[["top", "right"]].set_visible(False)
         ax.tick_params(labelsize=6.2)
 
     axes[0].set_ylabel("Objective", fontsize=6.8)
-    axes[0].plot([CROSS_EVALS], [CURVES[r"$6\times6\times2$"][1]],
-                 marker="o", markersize=4.0, markerfacecolor="white",
-                 markeredgecolor=PALETTE["teal"], markeredgewidth=1.0,
-                 zorder=4)
-    axes[0].annotate("1,394 evaluations", xy=(CROSS_EVALS, 867.75),
-                     xytext=(2250, 960), fontsize=5.6,
+    cross_t = CROSS_EVALS * SEC_PER_EVAL["6x6"]
+    axes[0].plot([cross_t], [CURVES["6x6"][2]], marker="o", markersize=4.0,
+                 markerfacecolor="white", markeredgecolor=PALETTE["teal"],
+                 markeredgewidth=1.0, zorder=4)
+    axes[0].annotate("126 s", xy=(cross_t, CURVES["6x6"][2]),
+                     xytext=(190, 960), fontsize=5.6,
+                     color=PALETTE["blue_main"], ha="left", va="bottom",
+                     arrowprops=dict(arrowstyle="-", color=PALETTE["blue_main"],
+                                     linewidth=0.6, shrinkA=1, shrinkB=2))
+
+    cross_e = 4035.3
+    t106 = cross_e * SEC_PER_EVAL["10x6"]
+    axes[1].plot([t106], [CURVES["10x6"][2]], marker="o", markersize=4.0,
+                 markerfacecolor="white", markeredgecolor=PALETTE["teal"],
+                 markeredgewidth=1.0, zorder=4)
+    axes[1].annotate("≈1,186 s", xy=(t106, CURVES["10x6"][2]),
+                     xytext=(620, 985), fontsize=5.6,
                      color=PALETTE["blue_main"], ha="left", va="bottom",
                      arrowprops=dict(arrowstyle="-", color=PALETTE["blue_main"],
                                      linewidth=0.6, shrinkA=1, shrinkB=2))

@@ -12,7 +12,7 @@ Li is an adapted baseline written from the paper, not a reproduction.}
 \toprule
 Method & $6\times6\times2$ & $10\times6\times2$ & $10\times10\times2$ & $15\times10\times2$ & $20\times6\times3$ \\
 \midrule
-Ours (H-ST-GRPO) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} & 1542.33 {\scriptsize$\pm$19.10} & 994.55 {\scriptsize$\pm$7.51} \\
+Ours (HSTGRA) & 867.75 {\scriptsize$\pm$11.86} & 808.67 {\scriptsize$\pm$12.83} & 1836.64 {\scriptsize$\pm$43.45} & 1542.33 {\scriptsize$\pm$19.10} & 994.55 {\scriptsize$\pm$7.51} \\
 RGA & 762.04 & 796.70 & 2298.63 & 2693.74 & 1181.77 \\
 PDR (best rule pair and AGV rule) & 1319.24 & 1461.63 & 3288.35 & 3612.81 & 1977.13 \\
 Wang et al.~(retrained) & 1075.64 {\scriptsize$\pm$73.82} & 1066.24 {\scriptsize$\pm$102.61} & 3153.81 {\scriptsize$\pm$530.01} & 2826.01 {\scriptsize$\pm$280.79} & 1229.70 {\scriptsize$\pm$60.15} \\
@@ -117,7 +117,7 @@ training procedure, not from the environment. One seed reaches 1255.72 at
 $6\times6$; the other two give 2045.72 and 2571.56. We exclude the method
 because this spread does not support a fair comparison.
 
-\paragraph{Learned baselines} PPO with per-agent critics replaces GRPO in the
+\paragraph{Learned baselines} PPO with per-agent critics replaces the group-relative update in the
 same architecture. The variant without the rule selector removes the top-level
 component.
 
@@ -228,7 +228,7 @@ RGA & 437.8 & 1426 & 4161 \\
 In addition, three observations follow. First, RGA is stronger where the shop is small. At
 $6\times6$ it obtains 762.04, which is 105.71 below our model, and at
 $10\times6$ it is 11.97 below. It pays for that margin: one run evaluates 4850
-schedules per instance, against 0.95 and 1.99~s for one pass of our model.
+schedules per instance, against 0.95 and 1.99~s for one schedule construction of our model.
 Second, the ordering reverses as the instance grows. At
 $10\times10$ our model obtains 1836.64, which is 20.1\% below RGA, at
 $15\times10$ it obtains 1542.33, which is 42.7\% below RGA, and at
@@ -422,7 +422,7 @@ separately below.
 
 \paragraph{Encoder} Table~\ref{tab:encoder} reports a $2\times2$ factorial
 over the job and machine encoders at $6\times6$, without AGVs and without the
-rule selector. All rows use GRPO. Reported values are means over three seeds and 100 test instances, 
+rule selector. All rows use the group-relative update. Reported values are means over three seeds and 100 test instances, 
 with the standard deviation computed across seeds as well as Table~\ref{tab:encoderfull}. 
 The all-ST cell obtains 798.06 and the job-GNN/machine-ST cell
 797.11; the two are indistinguishable, because the all-ST cell is better in
@@ -506,17 +506,17 @@ $10\times10\times2$ & ST & ST & 1805.45 & 30.50 \\
 \end{tabular}
 \end{table}
 
-\paragraph{Algorithm} Table~\ref{tab:algo} compares GRPO with PPO in the
-same architecture. Under the protocol of Wang et al.\ at $6\times6$, GRPO
+\paragraph{Algorithm} Table~\ref{tab:algo} compares our group-relative update with PPO in the
+same architecture. Under the protocol of Wang et al.\ at $6\times6$, our update
 obtains 798.06 against 871.04 for PPO. With the AGV fleet and the rule
 selector enabled, the gap widens at $6\times6$ (867.75 against 966.13),
 narrows at $10\times6$ (808.67 against 864.69) and widens again at
-$10\times10$ (1836.64 against 2116.78). GRPO is better in all three
+$10\times10$ (1836.64 against 2116.78). The group-relative update is better in all three
 seeds at every setting. The critic-free update is the better choice at every
 size. A paired test over the 100 instances, with Holm correction
 over the three sizes, gives $p=9.0\times10^{-16}$ at $6\times6$,
 $p=1.4\times10^{-9}$ at $10\times6$ and $p=1.8\times10^{-16}$ at $10\times10$,
-with GRPO lower on 90, 77 and 96 of them. Across the two protocols, the
+with our update lower on 90, 77 and 96 of them. Across the two protocols, the
 encoder gap (all-ST to the worst cell) ranges from 96.47 to 497.31 and the
 algorithm gap from 56.02 to 280.14. At $6\times6$ and $10\times6$ the two
 effects are comparable; at $10\times10$ the machine encoder matters more than
@@ -536,14 +536,14 @@ instances, with the seed standard deviation.}
 \toprule
 Protocol & Size & Algorithm & Objective & Std \\
 \midrule
-Wang et al. & $6\times6\times2$ & GRPO & 798.06 & 5.83 \\
+Wang et al. & $6\times6\times2$ & Group-relative & 798.06 & 5.83 \\
  & $6\times6\times2$ & PPO & 871.04 & 54.27 \\
 \midrule
-Full & $6\times6\times2$ & GRPO & 867.75 & 11.86 \\
+Full & $6\times6\times2$ & Group-relative & 867.75 & 11.86 \\
  & $6\times6\times2$ & PPO & 966.13 & 44.82 \\
- & $10\times6\times2$ & GRPO & 808.67 & 12.83 \\
+ & $10\times6\times2$ & Group-relative & 808.67 & 12.83 \\
  & $10\times6\times2$ & PPO & 864.69 & 30.60 \\
- & $10\times10\times2$ & GRPO & 1836.64 & 43.46 \\
+ & $10\times10\times2$ & Group-relative & 1836.64 & 43.46 \\
  & $10\times10\times2$ & PPO & 2116.78 & 39.94 \\
 \bottomrule
 \end{tabular}
@@ -628,12 +628,12 @@ against 867.75, 12.2\% ahead. That gain is bought with online search. RGA
 evaluates 4{,}850 schedules per instance, each scored by the same simulator
 that scores our model, so one run takes 437.8~s at $6\times6$, 1{,}426~s at
 $10\times6$ and 4{,}161~s at $10\times10$, against 0.95, 1.99 and 4.16~s for
-one pass of our model, i.e. 461, 717 and 1000 times one pass. Because the
-model amortizes the search over the training set while RGA spends it on each
-instance, the fair comparison is at equal online time. At $6\times6$, RGA
+one schedule construction of our model, i.e. 461, 717 and 1000 times one construction. Because the
+model moves the search cost into training while RGA spends it on each
+instance, the fair comparison is at equal computation time. At $6\times6$, RGA
 reaches our objective only at about 1{,}400 evaluations, 127~s, which is 134
-times one pass; the full-budget margin of 12.2\% therefore costs two orders
-of magnitude more online time (Figure~\ref{fig:budget}). The same trade-off
+times one construction; the full-budget margin of 12.2\% therefore costs two orders
+of magnitude more computation time (Figure~\ref{fig:budget}). The same trade-off
 appears in the implementation of Wang et al.~\cite{wang2025multitarget}: their
 RGA needs 638.8, 1{,}994.0 and 5{,}590.3~s per instance at the three sizes,
 against 0.529, 0.883 and 2.443~s for their learned policy. The claim is
@@ -645,10 +645,11 @@ scenarios, and a method whose cost grows slowly with the instance size.
 \centering
 \includegraphics[width=\linewidth]{fig_budget.pdf}
 \caption{Equal-budget comparison. (a) At $6\times6\times2$, the RGA objective
-against its evaluation budget, a three-seed mean over the 100 test instances
-(the 530 point is one seed over five instances); the dashed line is one pass of
-our model, which has no budget axis. The two are equal at about 1{,}400
-evaluations, which cost 126~s against 0.95~s. (b, c) The same sweep at
+against its computation time, a three-seed mean over the 100 test instances (the 530
+point is one seed over five instances). The five points are 530 to 4{,}850
+evaluations, each converted at the simulator cost of the size. The dashed line
+is one schedule construction of our model, which has no budget axis. RGA reaches it at about
+126~s against 0.95~s. (b, c) The same sweep at
 $10\times6\times2$ and $10\times10\times2$, three-seed means over the first ten
 test instances; the dashed lines are the 100-instance means of
 Table~\ref{tab:baselines}. RGA reaches the controller line only near its full

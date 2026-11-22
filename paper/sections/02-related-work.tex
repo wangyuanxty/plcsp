@@ -118,7 +118,9 @@ ratio and uses a value critic. Group-relative policy optimization
 same input provides a baseline, and the advantage is the within-group
 z-score. GRPO was introduced for language-model reasoning, where a group of
 responses to one prompt is natural. A scheduling episode also admits a
-group: several rollouts on the same instance batch share a scalar return.
+group: several rollouts on the same instance batch share a scalar return. Our
+update keeps the group-normalized advantage but shares one advantage across
+the three shop agents and uses no reference policy.
 
 Cooperative multi-agent methods use a centralized critic during training.
 Yu et al.~\cite{yu2022mappo} show that PPO with a centralized critic is a
