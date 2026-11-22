@@ -411,14 +411,14 @@ reading.
 \subsection{Ablations}
 \label{sec:ablations}
 
-Both ablations in this subsection are run under the protocol of Wang et
-al.~\cite{wang2025multitarget}: no AGV fleet,
-machine-to-machine travel, and loaded travel only. That is the protocol in
-which the architecture of Wang et al.\ was published, so the encoder and the estimator
-are compared with their architecture on the same footing rather than in a
-regime where only one side was measured. The AGV agent and the rule selector
-are not part of these ablations; each is removed from the full model
-separately below.
+This subsection reports four ablations: the encoder, the update rule, the AGV
+agent, and the rule selector. The encoder and update-rule ablations each have
+two blocks. The Wang-protocol block uses the published protocol of Wang et
+al.~\cite{wang2025multitarget}: no AGV fleet, machine-to-machine travel, and
+loaded travel only, so the encoder and the estimator are compared with their
+architecture on the same footing. The full-protocol block enables the AGV
+agent, the rule selector and the station transport model. The AGV agent and
+the rule selector are ablated separately below.
 
 \paragraph{Encoder} Table~\ref{tab:encoder} reports a $2\times2$ factorial
 over the job and machine encoders at $6\times6$, without AGVs and without the
@@ -434,8 +434,9 @@ the ordering holds in all three seeds at both job settings. For the job
 encoder we find no such main effect: its cost appears only at the GNN machine
 setting. The interaction is not small, so we do not report a
 job-encoder main effect. Machine-internal attention is a design detail inside the ST
-machine encoder: removing it costs 47.75 (845.81 against 798.06). The
-$10\times6$ encoder cells were deferred and are not reported.
+machine encoder: removing it costs 47.75 (845.81 against 798.06). Only the
+$6\times6$ cells are reported under the Wang protocol; the full-protocol cells
+at $10\times6$ and $10\times10$ are in Table~\ref{tab:encoderfull}.
 
 \begin{table}[t]
 \centering
@@ -471,15 +472,16 @@ Swapping the machine encoder to GAT costs 95.10 with the job encoder at ST and
 99.21 with it at GNN at $6\times6$, 109.30 and 111.56 at $10\times6$, and
 447.36 and 473.04 at $10\times10$; the ordering holds in all three seeds at
 every size and job setting. Removing the machine-internal attention costs 34.26
-at $6\times6$; it was not run at the larger sizes. The machine encoder is the
-component that matters at every size, and its cost grows with the instance.
+at $6\times6$, 36.83 at $10\times6$ and 298.60 at $10\times10$. The machine
+encoder is the component that matters at every size, and its cost grows with the
+instance.
 
 \begin{table}[t]
 \centering
-\caption{Encoder ablation under the full protocol of this paper. The intra0 row
-removes the machine-internal attention and was run at $6\times6\times2$ only;
-the $10\times6\times2$ and $10\times10\times2$ blocks keep the attention in all
-four cells.}
+\caption{Encoder ablation under the full protocol of this paper. The intra0 rows
+remove the machine-internal attention and keep the job encoder at ST; all other
+rows keep the attention. The ST/ST row is the control of this ablation, not the
+Ours row of Table~\ref{tab:baselines}.}
 \label{tab:encoderfull}
 \small
 \setlength{\tabcolsep}{2.5pt}
@@ -497,11 +499,13 @@ $10\times6\times2$ & ST & ST & 825.20 & 4.96 \\
  & GNN & ST & 813.42 & 6.01 \\
  & ST & GAT & 934.50 & 28.09 \\
  & GNN & GAT & 924.98 & 39.64 \\
+ & ST & ST (intra0) & 862.03 & 29.45 \\
 \midrule
 $10\times10\times2$ & ST & ST & 1805.45 & 30.50 \\
  & GNN & ST & 1829.72 & 33.04 \\
  & ST & GAT & 2252.81 & 301.85 \\
  & GNN & GAT & 2302.76 & 234.13 \\
+ & ST & ST (intra0) & 2104.05 & 140.89 \\
 \bottomrule
 \end{tabular}
 \end{table}

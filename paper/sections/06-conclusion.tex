@@ -24,7 +24,9 @@ with several workshops. Four agents carry it: a rule selector sets a rule prior 
 and three shop agents make the operation, machine, and AGV decisions. Each shop agent encodes its own candidates 
 with a Set Transformer. The shop agents are trained with a shared group-relative advantage without critic. 
 Consequently, in this scenario, it adapts better to changes in workshop conditions than fixed dispatching rules, 
-and provides more accurate attribution than staged learning methods. Furthermore, for large-scale instances, 
+and provides more accurate attribution than staged learning methods. Under the full protocol,
+removing the machine-internal attention costs 34.26, 36.83 and 298.60 at $6\times6$,
+$10\times6$ and $10\times10$, so it matters most at the largest size. Furthermore, for large-scale instances, 
 it can—within seconds rather than minutes—achieve objective values that are $19\%$–$57\%$ lower than 
 those produced by rule-based methods or DRL baselines, and which also outperform the results obtained 
 via genetic algorithms.

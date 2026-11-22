@@ -132,8 +132,8 @@ eligible machines for the chosen operation.
 Grouping the features before attention keeps the token count at $3M$ instead
 of one token per feature. It also lets the model compare the three feature
 views of one machine before it compares machines. We ablate the intra-machine
-layer in Section~\ref{sec:ablations}; removing it costs 47.75 on
-$6\times6$.
+layer in Section~\ref{sec:ablations}; under the full protocol, removing it costs
+34.26 at $6\times6$ and 298.60 at $10\times10$.
 
 \paragraph{AGV encoder}
 The AGV encoder applies one self-attention block to the AGV tokens, and the
