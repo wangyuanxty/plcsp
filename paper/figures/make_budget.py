@@ -36,12 +36,12 @@ CURVES = {
 }
 
 YLIMS = [(700, 1120), (700, 1300), (1750, 3900)]
-XLIMS = [(0, 470), (0, 1520), (0, 4400)]
+XLIMS = [(0, 500), (0, 1520), (0, 4400)]
 CROSS_EVALS = 1394
 
 
 def main() -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.35))
+    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.6))
 
     for ax, (key, (title, obj, ours)), ylim, xlim in zip(
             axes, CURVES.items(), YLIMS, XLIMS):
@@ -50,7 +50,17 @@ def main() -> None:
                 linewidth=1.1, zorder=3, label="RGA")
         ax.axhline(ours, color=PALETTE["blue_main"], linestyle="--",
                    linewidth=1.1, zorder=2, label="Our model, one schedule")
-        ax.set_title(title, loc="left", fontsize=7.4)
+        ax.text(0.02, 0.96, title, transform=ax.transAxes, ha="left",
+                va="top", fontsize=7.4, zorder=5)
+        for e, y in zip(EVALS, obj):
+            if key == "6x6" and e == 1394:
+                continue
+            first = e == EVALS[0]
+            ax.annotate(f"{int(e):,}", (e * SEC_PER_EVAL[key], y),
+                        textcoords="offset points",
+                        xytext=(5, -7) if first else (-5, -7),
+                        fontsize=5.6, color=PALETTE["teal"],
+                        ha="left" if first else "right", va="top")
         ax.set_xlabel("RGA computation time (s)", fontsize=6.6)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
@@ -62,8 +72,8 @@ def main() -> None:
     axes[0].plot([cross_t], [CURVES["6x6"][2]], marker="o", markersize=4.0,
                  markerfacecolor="white", markeredgecolor=PALETTE["teal"],
                  markeredgewidth=1.0, zorder=4)
-    axes[0].annotate("126 s", xy=(cross_t, CURVES["6x6"][2]),
-                     xytext=(190, 960), fontsize=5.6,
+    axes[0].annotate("1,394 evals\n126 s", xy=(cross_t, CURVES["6x6"][2]),
+                     xytext=(150, 915), fontsize=5.6,
                      color=PALETTE["blue_main"], ha="left", va="bottom",
                      arrowprops=dict(arrowstyle="-", color=PALETTE["blue_main"],
                                      linewidth=0.6, shrinkA=1, shrinkB=2))
@@ -73,8 +83,8 @@ def main() -> None:
     axes[1].plot([t106], [CURVES["10x6"][2]], marker="o", markersize=4.0,
                  markerfacecolor="white", markeredgecolor=PALETTE["teal"],
                  markeredgewidth=1.0, zorder=4)
-    axes[1].annotate("≈1,186 s", xy=(t106, CURVES["10x6"][2]),
-                     xytext=(620, 985), fontsize=5.6,
+    axes[1].annotate("4,035 evals\n1,186 s", xy=(t106, CURVES["10x6"][2]),
+                     xytext=(1000, 950), fontsize=5.6,
                      color=PALETTE["blue_main"], ha="left", va="bottom",
                      arrowprops=dict(arrowstyle="-", color=PALETTE["blue_main"],
                                      linewidth=0.6, shrinkA=1, shrinkB=2))
@@ -83,7 +93,7 @@ def main() -> None:
     fig.legend(handles, labels, loc="lower center", ncol=2, frameon=False,
                fontsize=6.2, bbox_to_anchor=(0.5, 0.0))
 
-    fig.tight_layout(rect=(0, 0.06, 1, 1), w_pad=0.8)
+    fig.tight_layout(rect=(0, 0.07, 1, 1), w_pad=0.8)
     finalize_figure(fig, OUT / "fig_budget", formats=["pdf"])
 
 

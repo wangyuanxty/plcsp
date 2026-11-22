@@ -154,11 +154,12 @@ def main() -> None:
         ax.set_xticklabels(AXES, fontsize=9.5)
         ax.set_ylim(0, 1.12)
         ax.set_yticks([0.25, 0.5, 0.75, 1.0])
-        ax.set_yticklabels(["0.25", "0.5", "0.75", "1"], fontsize=10.5)
+        ax.set_yticklabels(["0.25", "0.5", "0.75", "1"], fontsize=8.0)
+        ax.set_rlabel_position(75)
         for lab in ax.get_yticklabels():
             lab.set_bbox({"facecolor": "white", "edgecolor": "none",
                           "alpha": 0.75, "pad": 0.3})
-        ax.tick_params(pad=1)
+        ax.tick_params(pad=6)
         ax.set_title(TITLES[size], fontsize=11, pad=10)
         ax.grid(linewidth=0.3, color=PALETTE["neutral"], alpha=0.6)
         ax.spines["polar"].set_linewidth(0.5)
