@@ -625,6 +625,16 @@ selector is meant to produce.
 
 \subsection{Analysis}
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_budget.pdf}
+\caption{Equal-budget comparison at (a) $6\times6\times2$, (b) $10\times6\times2$
+and (c) $10\times10\times2$: the RGA objective against its computation time,
+with the evaluation counts labelled. Dashed lines: one schedule construction of
+our model (a); the controller means of Table~\ref{tab:baselines} (b, c).}
+\label{fig:budget}
+\end{figure*}
+
 \paragraph{Operating point}
 Our model is not the best at every size: it is better than the rule-based and
 adapted DRL baselines at every size, but at $6\times6$ RGA obtains 762.04
@@ -634,35 +644,33 @@ that scores our model, so one run takes 437.8~s at $6\times6$, 1{,}426~s at
 $10\times6$ and 4{,}161~s at $10\times10$, against 0.95, 1.99 and 4.16~s for
 one schedule construction of our model, i.e. 461, 717 and 1000 times one construction. Because the
 model moves the search cost into training while RGA spends it on each
-instance, the fair comparison is at equal computation time. At $6\times6$, RGA
-reaches our objective only at about 1{,}400 evaluations, 126~s, which is 134
-times one construction; the full-budget margin of 12.2\% therefore costs two orders
-of magnitude more computation time (Figure~\ref{fig:budget}). The same trade-off
+instance, the fair comparison is at equal computation time.
+
+Figure~\ref{fig:budget} makes the crossing visible. Panel~(a) is
+$6\times6\times2$: the RGA objective against its computation time, a
+three-seed mean over the 100 test instances, with the 530-evaluation point
+taken from one seed over five instances. The five points run from 530 to
+4{,}850 evaluations, each converted at the simulator cost of the size and
+labelled with its evaluation count. The dashed line is one schedule
+construction of our model, which has no budget axis. RGA reaches it at the
+1{,}394-evaluation point, about 126~s against 0.95~s, which is 134 times one
+construction; the full-budget margin of 12.2\% therefore costs two orders of
+magnitude more computation time. Panels~(b) and~(c) repeat the sweep at
+$10\times6\times2$ and $10\times10\times2$, three-seed means over the first ten
+test instances, and their dashed lines are the 100-instance means of
+Table~\ref{tab:baselines}. RGA reaches the controller line only near its full
+budget at $10\times6$, at 4{,}035 evaluations and 1{,}186~s on the segment
+between the last two points, and stays above it at $10\times10$. Because the
+instance sets of (b) and (c) differ from the controller means, those panels
+show the budget trend, not a paired comparison.
+
+The same trade-off
 appears in the implementation of Wang et al.~\cite{wang2025multitarget}: their
 RGA needs 638.8, 1{,}994.0 and 5{,}590.3~s per instance at the three sizes,
 against 0.529, 0.883 and 2.443~s for their learned policy. The claim is
 therefore an operating point rather than a dominance: a feasible schedule in
 about a second, for a shop that reschedules often or evaluates many what-if
 scenarios, and a method whose cost grows slowly with the instance size.
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\linewidth]{fig_budget.pdf}
-\caption{Equal-budget comparison. (a) At $6\times6\times2$, the RGA objective
-against its computation time, a three-seed mean over the 100 test instances (the 530
-point is one seed over five instances). The five points are 530 to 4{,}850
-evaluations, each converted at the simulator cost of the size; each point is labelled with its evaluation count. The dashed line
-is one schedule construction of our model, which has no budget axis. RGA reaches it at about
-126~s against 0.95~s, at the 1{,}394-evaluation point. (b, c) The same sweep at
-$10\times6\times2$ and $10\times10\times2$, three-seed means over the first ten
-test instances; the dashed lines are the 100-instance means of
-Table~\ref{tab:baselines}. RGA reaches the controller line only near its full
-budget at $10\times6$, at 4{,}035 evaluations and 1{,}186~s on the segment
-between the last two points, and stays above it at $10\times10$. The instance sets of
-(b) and (c) differ from the controller means, so these panels show the budget
-trend, not a paired comparison.}
-\label{fig:budget}
-\end{figure*}
 
 \paragraph{Robustness}
 The validation objective falls from 967 at episode 25 to 923 at episode 50
