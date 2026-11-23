@@ -634,7 +634,7 @@ selector is meant to produce.
 \caption{Equal-budget comparison at (a) $6\times6\times2$, (b) $10\times6\times2$
 and (c) $10\times10\times2$: the RGA objective against its computation time,
 with the evaluation counts labelled. Dashed lines: one schedule construction of
-our model (a); the controller means of Table~\ref{tab:baselines} (b, c).}
+our model on the same instances as the curve.}
 \label{fig:budget}
 \end{figure*}
 
@@ -660,12 +660,11 @@ construction of our model, which has no budget axis. RGA reaches it at the
 construction; the full-budget margin of 12.2\% therefore costs two orders of
 magnitude more computation time. Panels~(b) and~(c) repeat the sweep at
 $10\times6\times2$ and $10\times10\times2$, three-seed means over the first ten
-test instances, and their dashed lines are the 100-instance means of
-Table~\ref{tab:baselines}. RGA reaches the controller line only near its full
-budget at $10\times6$, at 4{,}035 evaluations and 1{,}186~s on the segment
-between the last two points, and stays above it at $10\times10$. Because the
-instance sets of (b) and (c) differ from the controller means, those panels
-show the budget trend, not a paired comparison.
+test instances, and their dashed lines are the mean of one schedule
+construction of our model over the same ten instances. RGA reaches the
+controller line only near its full budget at $10\times6$, at 4{,}035
+evaluations and 1{,}186~s on the segment between the last two points, and
+stays above it at $10\times10$.
 
 The same trade-off
 appears in the implementation of Wang et al.~\cite{wang2025multitarget}: their
