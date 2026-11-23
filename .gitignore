@@ -18,6 +18,8 @@ __pycache__/
 # ── LaTeX 编译产物（源文件入库，中间产物不入库）──
 # `paper/*.pdf` 只匹配 paper/ 直属层，figures/ 里的矢量图不受影响，必须入库
 paper/*.pdf
+!paper/title-page.pdf
+!paper/manuscript-anonymized.pdf
 paper/*.aux
 paper/*.bbl
 paper/*.blg
