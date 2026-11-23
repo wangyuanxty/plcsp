@@ -741,13 +741,10 @@ would come.
 \subsection{Weight transfer}
 \label{sec:weights}
 
-The weights enter the state, so one policy covers the whole trade-off surface:
-a different weight vector needs no retraining, while the genetic algorithm must
-be solved once per weight. We check this at $6\times6$, $10\times6$ and
-$10\times10$ on the same nine weight points and compare with RGA at the same
-nine.
-
-\begin{table}[t]
+The weights enter the state, so the trained policy can be evaluated at a new weight
+vector without retraining, while the genetic algorithm must be solved once
+per weight. We test nine weight points at $6\times6$, $10\times6$ and
+$10\times10$ and compare with RGA at the same nine.\begin{table}[t]
 \centering
 \caption{Objective at nine weight points on $6\times6\times2$, $10\times6\times2$ and
 $10\times10\times2$, mean over the 100 test instances. The last column is our model against RGA, a
