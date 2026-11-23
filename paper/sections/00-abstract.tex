@@ -1,20 +1,27 @@
-In modern manufacturing systems, especially in multi-workshop production environments, 
-automated guided vehicles (AGVs) play a critical role in transporting jobs between machines and workshops.
-Existing flexible job shop scheduling studies largely decouple processing and transportation decisions, 
-making it difficult to jointly optimize machine availability, energy consumption, 
-and makespan under dynamically varying candidate action sets and shared rewards. Consequently, 
-rule-based methods lack adaptability, while staged learning-based methods cannot accurately 
-attribute the contribution of each decision.
-To address these challenges, we build a multi-agent model that makes decisions
-in one step with four agents: a rule selector and three shop actors. Each of
-the three actors encodes its own candidates with a Set Transformer. Training
-of the low-level agents relies on a shared group-relative advantage and omits
-the critic, and a higher-level policy periodically assigns a rule prior to
-each agent. The weights are an input, so one policy covers the weight surface
-without retraining. It achieves objective values $19\%$ to $57\%$ lower than
-those of the rule-based dispatch and the adapted DRL baselines across all
-problem sizes, and also outperforms the genetic algorithm on large instances,
-finding solutions in seconds rather than minutes. Ablation experiments
-demonstrate the effectiveness of the Set Transformer encoders, including the
-machine-internal attention at the largest size, the critic-free
-update, and the hierarchical rule selector.
+In flexible production systems with multiple workshops, machine assignments
+determine whether a job needs to move between workshops. These moves require
+an automated guided vehicle (AGV) from each workshop and a handoff through
+load/unload stations. The timing of the handoff affects when the next
+operation can start. We therefore integrate operation sequencing, machine
+assignment, and AGV dispatch into one decision process. The weighted objective
+combines makespan, processing energy, idle energy, and loaded transport time.
+We propose HSTGRA, a hierarchical multi-agent policy. A high-level selector
+periodically assigns rule priors to three low-level agents. At each scheduling
+step, these agents jointly select the operation, machine, and AGVs. Each agent
+uses a Set Transformer to encode its variable-size candidate set. The
+low-level agents train without a critic and share a group-relative advantage.
+Across five test instance families, HSTGRA achieves lower mean objective
+values than dispatching rules. Its mean objective is approximately
+$19\%$--$37\%$ lower than that of the better of the two deep reinforcement
+learning baselines in each family. Compared with the random-key genetic
+algorithm, HSTGRA achieves mean objective values approximately $16\%$--$43\%$
+lower on the three larger instance families, but higher on the two smaller
+families. HSTGRA constructs a schedule in seconds on each of the three
+instance families used for the runtime comparison. In the ablation
+experiments, using a Set Transformer for machine
+encoding, retaining within-machine attention, using the group-relative
+advantage update, and enabling the high-level rule selector each lowered the
+mean scheduling objective relative to its corresponding comparison
+configuration. The same trained
+policy also generates schedules under nine tested weight settings without
+retraining.

@@ -676,10 +676,7 @@ about a second, for a shop that reschedules often or evaluates many what-if
 scenarios, and a method whose cost grows slowly with the instance size.
 
 \paragraph{Robustness}
-The validation objective falls from 967 at episode 25 to 923 at episode 50
-and then stays between 890 and 930; the seeds differ by 13 points at episode
-200, and the best checkpoint falls at a different episode for each seed. A
-difference in the tail is hidden by the mean: the per-instance standard
+A difference in the tail is hidden by the mean: the per-instance standard
 deviation of the seed-averaged values is 109.9, against 79.7 for RGA, so our
 spread is 38\% wider. A single-pass policy has no mechanism to recover from a
 bad early assignment on a hard instance.

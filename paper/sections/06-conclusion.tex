@@ -2,44 +2,62 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-This paper focuses on manufacturing plants with multiple workshops, such as those for automotive components 
-or 3C electronics assembly. In such flexible job-shop multi-workshop scheduling problem, 
-each workshop contains multiple machines, and workpieces are transferred between workshops 
-by the respective AGV fleets through loading/unloading stations. After a batch of workpieces enters the system, 
-each workpiece consists of a fixed sequence of multiple operations, and each operation has different 
-candidate machines as well as different processing times and power consumption. 
-Scheduling tasks are advanced through a step-by-step decision-making process: operation, machine, vehicle. 
-At each step, one operation is selected from all schedulable operations whose previous operations have been completed, 
-and a feasible machine is assigned to it. If the operation is not in the same workshop or not on the same machine 
-as its previous operation, an AGV will be selected from the fleet of the relevant workshop to handle the transportation. 
-For transfers within the same workshop, the local AGV first travels empty to the pickup machine and then 
-delivers the loaded workpiece. For cross-workshop transfers, the transportation is completed in segments 
-through the pickup machine, the source workshop loading/unloading station, the destination workshop 
-loading/unloading station, and the destination machine. This process is repeated until a complete schedule is obtained. 
-The objective is to minimize the makespan while reducing the weighted sum of processing and idle energy consumption 
-and AGV loaded transportation time.
+We developed HSTGRA for joint production and transport scheduling in
+multi-workshop flexible job shops. Each workshop operates its own AGV fleet,
+and cross-workshop transfers use load/unload stations. HSTGRA jointly selects
+an operation, a machine, and any required AGVs at each scheduling step. A
+high-level selector periodically chooses rules that guide these decisions.
+The weighted objective combines makespan, machine energy consumption, and
+transport cost.
 
-We propose a hierarchical multi-agent model for joint production and logistics scheduling in a flexible job shop 
-with several workshops. Four agents carry it: a rule selector sets a rule prior every few steps, 
-and three shop agents make the operation, machine, and AGV decisions. Each shop agent encodes its own candidates 
-with a Set Transformer. The shop agents are trained with a shared group-relative advantage without critic. 
-Consequently, in this scenario, it adapts better to changes in workshop conditions than fixed dispatching rules, 
-and provides more accurate attribution than staged learning methods. Under the full protocol,
-removing the machine-internal attention costs 34.26, 36.83 and 298.60 at $6\times6$,
-$10\times6$ and $10\times10$, so it matters most at the largest size. Furthermore, for large-scale instances, 
-it can—within seconds rather than minutes—achieve objective values that are $19\%$–$57\%$ lower than 
-those produced by rule-based methods or DRL baselines, and which also outperform the results obtained 
-via genetic algorithms.
+Across five test instance families, HSTGRA achieved lower mean objective
+values than dispatching rules and reduced the mean objective by about
+$19\%$--$37\%$ relative to the best-performing DRL baseline in each family.
+The random-key genetic algorithm achieved lower mean objective values in
+the two smaller families, whereas HSTGRA achieved values about
+$16\%$--$43\%$ lower in the three larger families. In the runtime tests,
+HSTGRA constructed schedules in seconds. The machine-side Set Transformer,
+within-machine attention, group-relative update, and high-level rule selector
+each reduced the mean objective relative to its corresponding ablation
+control.
 
-From the perspective of production logistics scheduling managers, the following management strategies are summarized: 
-search-based approaches are better suited to small-scale job shops with static, one-off schedules, 
-while policy-based approaches are better suited to large-scale job shops and to dynamic settings where 
-disruptions and changing priorities necessitate frequent rescheduling. Future work will focus on extending 
-the proposed joint scheduling framework to cross-enterprise supply chain coordination and integrating it 
-with organizational decision-making processes, so as to further enhance the managerial decision-making value of the 
-dynamic scheduling method.
+For schedulers, genetic search remains a competitive option for smaller
+instances when time is available for search. HSTGRA offers an alternative
+when a schedule is needed quickly. The same trained policy also constructs
+schedules under different tested objective weights without retraining. The
+repair experiment examined how the schedule objective changes when a machine
+requires repair during schedule construction. Future work will study repeated
+machine disruptions and additional fleet constraints, such as battery charging.
+
+\section*{CRediT authorship contribution statement}
+
+Yuan Wang: Writing -- original draft, Visualization, Software,
+Methodology, Data curation, Conceptualization. Naiming Xie: Writing --
+review and editing, Validation, Supervision, Conceptualization. Mingshan
+Li: Writing -- review and editing, Validation, Supervision,
+Conceptualization.
+
+\section*{Declaration of competing interest}
+
+The authors declare that they have no known competing financial interests
+or personal relationships that could have appeared to influence the work
+reported in this paper.
+
+\section*{Funding}
+
+This work was supported by the National Natural Science Foundation of China
+(Grant No.~72571138), the Projects of Talents Recruitment of Guangdong
+University of Petrochemical Technology (Grant No.~2026rcyj1003), and the
+Maoming Science and Technology Program Project (Grant No.~2026013).
 
 \section*{Data availability}
 
 The simulator, the instance generator, and the baseline implementations are
 available at \url{https://github.com/wangyuanxty/plcsp}.
+
+\section*{Declaration of Generative AI and AI-assisted technologies in the writing process}
+
+During the preparation of this work, the authors used DeepSeek V4 Flash to
+improve the language and readability of the text. After using these tools, the
+authors reviewed and edited the content as needed and take full responsibility
+for the content of the published article.

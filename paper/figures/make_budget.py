@@ -41,17 +41,18 @@ CROSS_EVALS = 1394
 
 
 def main() -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.6))
+    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.9))
 
-    for ax, (key, (title, obj, ours)), ylim, xlim in zip(
-            axes, CURVES.items(), YLIMS, XLIMS):
+    for idx, (ax, (key, (title, obj, ours)), ylim, xlim) in enumerate(zip(
+            axes, CURVES.items(), YLIMS, XLIMS)):
         t = EVALS * SEC_PER_EVAL[key]
         ax.plot(t, obj, color=PALETTE["teal"], marker="o", markersize=3.0,
                 linewidth=1.1, zorder=3, label="RGA")
         ax.axhline(ours, color=PALETTE["blue_main"], linestyle="--",
                    linewidth=1.1, zorder=2, label="Our model, one schedule")
-        ax.text(0.02, 0.96, title, transform=ax.transAxes, ha="left",
-                va="top", fontsize=7.4, zorder=5)
+        ax.set_xlabel(
+            f"({chr(97 + idx)}) {title}\nRGA computation time (s)",
+            fontsize=7.2, labelpad=4)
         for e, y in zip(EVALS, obj):
             if key == "6x6" and e == 1394:
                 continue
@@ -61,7 +62,6 @@ def main() -> None:
                         xytext=(5, -7) if first else (-5, -7),
                         fontsize=5.6, color=PALETTE["teal"],
                         ha="left" if first else "right", va="top")
-        ax.set_xlabel("RGA computation time (s)", fontsize=6.6)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
         ax.spines[["top", "right"]].set_visible(False)
@@ -93,7 +93,7 @@ def main() -> None:
     fig.legend(handles, labels, loc="lower center", ncol=2, frameon=False,
                fontsize=6.2, bbox_to_anchor=(0.5, 0.0))
 
-    fig.tight_layout(rect=(0, 0.07, 1, 1), w_pad=0.8)
+    fig.tight_layout(rect=(0, 0.13, 1, 1), w_pad=0.8)
     finalize_figure(fig, OUT / "fig_budget", formats=["pdf"])
 
 
