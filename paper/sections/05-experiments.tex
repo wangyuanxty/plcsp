@@ -4,8 +4,8 @@
 
 \begin{table*}[t]
 \centering
-\caption{Objective on five instance families.  As deterministic methods, 
-PDR and RGA exhibit no variability attributable to seed selection.
+\caption{Objective on five instance families. PDR is deterministic; RGA is
+stochastic and is reported as a three-seed mean where three seeds were run.
 Li is an adapted baseline written from the paper, not a reproduction.}
 \label{tab:baselines}
 \begin{tabular}{lccccc}
@@ -29,8 +29,10 @@ $10 \times 10 \times 2$, $15 \times 10 \times 2$, and $20 \times 6 \times 3$.
 Each family has 100 test instances. All methods are evaluated on the same instances, with the weights fixed to
 $(0.4,0.4,0.2)$ in \eqref{eq:objective}. The learned policies are evaluated
 greedily. Each learned method is trained with three seeds and the reported value
-is the mean of the three seed-level test means. Rule-based and
-metaheuristic baselines are deterministic given their own seed.
+is the mean of the three seed-level test means. PDR is deterministic. RGA is a
+random-key genetic algorithm; at $6\times6$, $10\times6$, $10\times10$ and
+$20\times6$ the reported value is the mean over three seeds, with seed standard
+deviations 1.8, 4.2, 23.1 and 7.7.
 
 Our model, the ablations and the retrained baseline of Wang et al.~\cite{wang2025multitarget} use 200 training
 episodes; Li et al.\ uses the budget of its own paper, as noted below. The group
@@ -52,8 +54,9 @@ eligible on a subset of machines. The mean processing time is drawn from
 $U(1,99)$ and the mean processing power from $U(1,20)$; the value on a given
 machine is the mean multiplied by a factor from $U(0.8,1.2)$. Same-workshop
 travel times are drawn from $U(1,10)$ and cross-workshop travel times from
-$U(10,20)$. The machines are split equally between the two workshops, and
-each workshop has three AGVs. A checkpoint is selected on the validation set,
+$U(10,20)$. The shop is multi-workshop: the machines are split equally between
+the $W$ workshops, and each workshop has one load/unload station and three AGVs.
+A cross-workshop transfer uses the source and target stations. A checkpoint is selected on the validation set,
 and the test set is used once after training.
 
 The objective of Wang et al.~\cite{wang2025multitarget} uses the same four
@@ -700,13 +703,17 @@ case study read one seed, and say so where they are reported.
 \subsection{One repair in the middle of the schedule}
 \label{sec:repair}
 
-The protocol above has no failures, by assumption~(A3). We relax that
-assumption once, as a separate scenario, to see what each method does when a
-resource needs a repair halfway through.
+The main experiments have no machine failures. This section adds one repair.
+For each method, the no-repair and one-repair values use the same schedule and
+simulator: PDR and RGA are replayed with a fixed-schedule simulator, and the
+policy is re-evaluated in the main environment. Only the degradation is
+compared across methods.
 
 \begin{table}[t]
 \centering
-\caption{Objective with and without one repair, mean over the 100 test instances of each family.}
+\caption{Objective with and without one repair. Ours and RGA are three-seed
+means over the 100 test instances; PDR is deterministic. No-repair and
+one-repair values are paired within each method.}
 \label{tab:repair}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{llrrr}
@@ -729,12 +736,8 @@ $10\times10\times2$ & Ours & 1836.64 & 2269.87 & $+23.6\%$ \\
 \end{table}
 
 Table~\ref{tab:repair} reports the result on the three families. Our model loses 35.3, 30.0 and 23.6\%, PDR 46.2, 72.3 and 36.5\%, and RGA
-97.9, 163.5 and 78.8\%. With the repair our model has the lowest absolute
-objective of the three at every size: 1173.95 against 1484.57 for RGA at
-$6\times6$, 1050.96 against 2067.90 at $10\times6$, and 2269.87 against
-4245.15 at $10\times10$. RGA is the strongest method without a repair and the
-most fragile with one, because its plan leaves little slack and concentrates
-the work on few machines, so one repair is paid many times. The gap is widest
+97.9, 163.5 and 78.8\%. The policy has the smallest degradation at every size;
+RGA has the largest. The gap is widest
 at $10\times6$, where our model gives up 30.0\% and RGA 163.5\%. What our model loses is the price of a plan built without knowing that the repair
 would come.
 

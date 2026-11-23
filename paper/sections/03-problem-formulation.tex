@@ -32,6 +32,8 @@ $J$, $O$, $M$, $W$ & number of jobs, operations per job, machines, workshops \\
 $\mathcal{M}_{j,o}$ & eligible machines of operation $(j,o)$ \\
 $t_{j,o,m}$, $p_{j,o,m}$ & processing time and power \\
 $e_{j,o,m}$ & processing energy \\
+$x_{j,o,m}$ & assignment indicator \\
+$\tau_{j,o}$ & transport time between consecutive operations \\
 $\mathcal{A}_w$ & AGV fleet of workshop $w$ \\
 $d_{a,b}$ & travel time between two nodes (machines or stations) \\
 $u_w$ & load/unload station of workshop $w$ \\
@@ -177,28 +179,64 @@ reported numbers.
 
 The schedule is constructed in $J \times O$ low-level steps. At step $t$, the state
 $s_t$ contains the partial disjunctive graph, the machine routes, the AGV
-states, and the current weights. The action is a triple
-$a_t=(a^{\mathrm{job}}_t,a^{\mathrm{mach}}_t,a^{\mathrm{agv}}_t)$. 
-At each step, an operation is selected from unscheduled operations whose predecessors are complete, 
-a machine is chosen from the machines eligible for that operation, and, if transport is required, 
-an AGV is selected from the source workshop for intra-workshop moves or from the target workshop for cross-workshop moves.
+states, and the current weights. The action is a tuple
+$a_t=(a^{\mathrm{job}}_t,a^{\mathrm{mach}}_t,a^{\mathrm{agv}}_t)$.
+At each step, an operation is selected from unscheduled operations whose predecessors are complete,
+a machine is chosen from the machines eligible for that operation, and, if transport is required,
+an AGV is selected from the source workshop for intra-workshop moves. For a cross-workshop move,
+$a^{\mathrm{agv}}_t=(a^{\mathrm{src}}_t,a^{\mathrm{dst}}_t)$: the policy selects the source
+vehicle and the target vehicle in the same step, and the target vehicle can start only after the
+source vehicle reaches the station and the transfer delay has elapsed.
 
 A transition applies the assignment, inserts the operation into the machine
 route, updates the AGV states, and returns the next state. One episode ends
 after $J \times O$ steps, and the return is the negative objective
-\eqref{eq:objective} under the weights of the episode.
+\eqref{eq:objective} under the weights of the episode. The two AGV selections of
+a cross-workshop move are sub-decisions of one low-level step; they do not add a
+step to the episode.
 
 At step $t$ the number of joint actions is
 \begin{equation}
 |\mathcal{A}_t|=
 |\mathcal{O}^{\mathrm{feas}}_t|\times
 |\mathcal{M}_{j,o}|\times
-|\mathcal{A}_{w}|,
+\begin{cases}
+|\mathcal{A}_{w}|, & \text{same-workshop},\\
+|\mathcal{A}_{w}|\times|\mathcal{A}_{w'}|, & \text{cross-workshop},
+\end{cases}
 \end{equation}
-where the last factor is present only when a transport is needed. It grows
+where the AGV factor is present only when a transport is needed, and a
+cross-workshop move has one factor for each fleet. It grows
 with the number of jobs, machines, and AGVs. A policy must rank
 the candidates without enumerating the product, which motivates the
 factorized policy in \eqref{eq:factor}.
+
+\subsection{Feasibility constraints}
+
+Let $x_{j,o,m}\in\{0,1\}$ indicate that operation $(j,o)$ uses machine $m$,
+and let $m(j,o)$ be the selected machine. A schedule is feasible if
+\begin{align}
+&\sum_{m\in\mathcal{M}_{j,o}} x_{j,o,m}=1, \label{eq:assign}\\
+&C_{j,o}=S_{j,o}+t_{j,o,m(j,o)}, \label{eq:completion}\\
+&S_{j,o+1}\ge C_{j,o}+\tau_{j,o}, \label{eq:precedence}\\
+&S_{i'}\ge C_i \ \text{or}\ S_i\ge C_{i'}, \quad \text{if } m(i)=m(i'), \label{eq:machine}\\
+&C_{\max}\ge C_{j,o}, \label{eq:cmax}\\
+&x_{j,o,m}\in\{0,1\},\quad S_{j,o},C_{j,o}\ge0, \label{eq:domain}
+\end{align}
+where $i=(j,o)$ and $i'=(j',o')$ index operations, $m(i)$ is the selected
+machine of operation $i$, and $\tau_{j,o}$ is the
+transport time between consecutive operations (zero
+if they use the same machine). For each transport $k$, let $a^{\mathrm{s}}_k$ be
+the source AGV and, for a cross-workshop move, $a^{\mathrm{t}}_k$ the target
+AGV. The source AGV must be free when it starts the empty trip to the pickup
+machine. The target AGV must be free for the empty trip to the target station,
+and its loaded leg
+starts only after the source AGV reaches the source station and the transfer
+delay has elapsed. An AGV carries one load at a time, and the loaded and empty
+travel intervals assigned to one AGV do not overlap. The same two-leg model
+applies to any pair of workshops; a transfer between non-adjacent workshops
+uses the source and target stations directly. The environment exposes only
+actions that satisfy these constraints.
 
 \subsection{Complexity}
 

@@ -37,7 +37,9 @@ the three shop agents,
 \pi^{\mathrm{agv}}_\theta(a^{\mathrm{agv}}_t\mid s_t),
 \label{eq:factor}
 \end{equation}
-where the AGV factor is omitted when the AGV module is disabled. Each factor
+where the AGV factor is omitted when the AGV module is disabled. For a
+cross-workshop move the AGV factor is the product of a source-fleet and a
+target-fleet categorical distribution, which share weights. Each factor
 is a categorical distribution over a candidate set. The candidate set is
 masked to the feasible actions: an operation is feasible when its predecessor
 is complete, a machine is feasible when the operation can be processed on it,
@@ -59,7 +61,8 @@ policy optimization (PPO) on the weighted-cost change of each segment. Both
 levels run online in the same episode loop.
 
 \paragraph{Design rationale}
-The joint action is a product of three candidate sets, and its size grows
+The joint action is a product of the candidate sets; a cross-workshop move has
+a source-fleet factor and a target-fleet factor. Its size grows
 with the number of jobs, machines, and vehicles. The factorized policy
 \eqref{eq:factor} avoids enumerating the product: each agent scores its own
 candidate set and the log-probabilities are summed. A shared advantage is
@@ -92,10 +95,12 @@ For the AGV agent, each AGV in the relevant workshop is a token. The token
 carries its home workshop, its current position, its free time, and the empty
 and loaded travel times to the pickup and drop-off machines.
 
-An action is a triple: an operation index, a machine index, and an AGV index.
-The operation and machine are selected at every low-level step. The AGV is
-selected only when a transport is needed, that is, when the previous
-operation of the same job is complete on a different machine.
+An action is a tuple: an operation index, a machine index, and an AGV choice.
+The operation and machine are selected at every low-level step. The AGV choice
+is made only when a transport is needed, that is, when the previous operation of
+the same job is complete on a different machine. For a same-workshop move the
+choice is one AGV index; for a cross-workshop move it is a pair (source, target),
+and the same AGV actor scores the source and target fleets with the same weights.
 
 \subsection{Set Transformer encoders}
 
