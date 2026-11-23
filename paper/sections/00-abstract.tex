@@ -2,19 +2,19 @@ In flexible production systems with multiple workshops, machine assignments
 determine whether a job needs to move between workshops. These moves require
 an automated guided vehicle (AGV) from each workshop and a handoff through
 load/unload stations. The timing of the handoff affects when the next
-operation can start. Therefore, we integrate operation sequencing, machine assignment, 
-and AGV dispatch into a unified decision-making process. To balance multiple optimization objectives, 
-a weighted objective that combines makespan, processing energy, idle energy, and loaded transport time is formulated. 
-Under this formulation, we propose HMAGRA (Hierarchical Multi-Agent Group-Relative Advantage), 
+operation can start. Therefore, we integrate operation sequencing, machine assignment,
+and AGV dispatch into a unified decision-making process. To balance multiple optimization objectives,
+a weighted objective that combines makespan, processing energy, idle energy, and loaded transport time is formulated.
+Under this formulation, we propose HMAGRA (Hierarchical Multi-Agent Group-Relative Advantage),
 a multi-agent policy tailored for the integrated scheduling problem. A high-level selector
 periodically assigns rule priors to three low-level agents. At each scheduling
 step, these agents jointly select the operation, machine, and AGVs. Each agent
 uses a Set Transformer to encode its variable-size candidate set. The
 low-level agents train without a critic and share a group-relative advantage.
-Across five test instance families, HMAGRA achieves significant lower mean objective
+Across five test instance families, HMAGRA achieves significantly lower mean objective
 values than dispatching rules and two deep reinforcement learning baselines. Compared with the random-key genetic
 algorithm, HMAGRA also achieves mean objective values approximately $16\%$--$43\%$
 lower on three larger instance families. Besides, HMAGRA constructs a schedule in seconds on each of the three
-instance families used for the runtime comparison. In the ablation experiments, Set Transformer for machine encoding, 
-within-machine attention, group-relative advantage, and the high-level rule selector each lowered the 
-mean scheduling objective relative to its corresponding comparison configuration. 
+instance families used for the runtime comparison. In the ablation experiments, Set Transformer for machine encoding,
+within-machine attention, group-relative advantage, and the high-level rule selector each lowered the
+mean scheduling objective relative to its corresponding comparison configuration.
