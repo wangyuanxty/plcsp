@@ -5,6 +5,13 @@
 % =====================================================================
 \documentclass[final,5p,times,twocolumn,number]{elsarticle}
 
+% Build the double-blind copy with: latexmk -jobname=main-anonymized -pdf main.tex
+\newif\ifanonymized
+\ifdefined\pdfstrcmp
+  \ifnum\pdfstrcmp{\jobname}{main-anonymized}=0 \anonymizedtrue\fi
+\fi
+\ifdefined\ANONYMIZED\anonymizedtrue\fi
+
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
@@ -12,6 +19,7 @@
 \usepackage{threeparttable}
 \usepackage{siunitx}
 \usepackage[hidelinks]{hyperref}
+\ifanonymized\hypersetup{pdfauthor={},pdfcreator={}}\fi
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{xcolor}
@@ -62,6 +70,7 @@
 \title{Hierarchical multi-agent group-relative advantage learning for
 multi-workshop flexible job shop scheduling with automated guided vehicle transport}
 
+\ifanonymized\else
 \author[a]{Yuan Wang}
 \author[a]{Naiming Xie\corref{cor1}}
 \ead{xienaiming@nuaa.edu.cn}
@@ -73,6 +82,7 @@ multi-workshop flexible job shop scheduling with automated guided vehicle transp
 Aeronautics and Astronautics, 29 Jiangjun Avenue, Nanjing, 211106, China}
 \address[b]{Guangdong University of Petrochemical Technology, 139 Guanduer Rd,
 Maoming, 525011, China}
+\fi
 
 \begin{abstract}
 \input{sections/00-abstract}
