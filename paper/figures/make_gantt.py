@@ -119,7 +119,7 @@ def main():
 
     fig, axes = plt.subplots(2, 1, figsize=(7.0, 5.6), sharex=True)
     draw(axes[0], ours["rows"], ours["agv_rows"], n_op,
-         n_machine, 6, "(a) HSTGRA")
+         n_machine, 6, "(a) HMAGRA")
     draw(axes[1], pdr_rows, pdr_legs, n_op, n_machine, 6,
          f"(b) PDR, objective {env['obj']:.1f}")
     handles = [Patch(facecolor=JOB_COLORS[j], edgecolor="white",

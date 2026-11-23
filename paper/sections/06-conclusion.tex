@@ -2,27 +2,27 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We developed HSTGRA for joint production and transport scheduling in
+We developed HMAGRA for joint production and transport scheduling in
 multi-workshop flexible job shops. Each workshop operates its own AGV fleet,
-and cross-workshop transfers use load/unload stations. HSTGRA jointly selects
+and cross-workshop transfers use load/unload stations. HMAGRA jointly selects
 an operation, a machine, and any required AGVs at each scheduling step. A
 high-level selector periodically chooses rules that guide these decisions.
 The weighted objective combines makespan, machine energy consumption, and
 transport cost.
 
-Across five test instance families, HSTGRA achieved lower mean objective
+Across five test instance families, HMAGRA achieved lower mean objective
 values than dispatching rules and reduced the mean objective by about
 $19\%$--$37\%$ relative to the best-performing DRL baseline in each family.
 The random-key genetic algorithm achieved lower mean objective values in
-the two smaller families, whereas HSTGRA achieved values about
+the two smaller families, whereas HMAGRA achieved values about
 $16\%$--$43\%$ lower in the three larger families. In the runtime tests,
-HSTGRA constructed schedules in seconds. The machine-side Set Transformer,
+HMAGRA constructed schedules in seconds. The machine-side Set Transformer,
 within-machine attention, group-relative update, and high-level rule selector
 each reduced the mean objective relative to its corresponding ablation
 control.
 
 For schedulers, genetic search remains a competitive option for smaller
-instances when time is available for search. HSTGRA offers an alternative
+instances when time is available for search. HMAGRA offers an alternative
 when a schedule is needed quickly. The same trained policy also constructs
 schedules under different tested objective weights without retraining. The
 repair experiment examined how the schedule objective changes when a machine

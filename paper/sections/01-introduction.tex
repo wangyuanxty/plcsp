@@ -83,7 +83,7 @@ one return that does not directly identify the contribution of each agent. Third
 four to thirteen decisions per episode. The sample is small, and a
 counterfactual baseline must generalize to actions that were not taken.
 
-We propose HSTGRA, a hierarchical multi-agent policy for these three decisions. Three actor networks make the operation, machine, and AGV
+We propose HMAGRA (Hierarchical Multi-Agent Group-Relative Advantage) for these three decisions. Three actor networks make the operation, machine, and AGV
 decisions. Each of the three shop agents encodes its own candidates with a
 Set Transformer. The machine encoder groups its features into three views and
 applies attention within a machine before it applies attention across machines. We train the
@@ -121,11 +121,11 @@ subsequently across different machines. The shop agents are trained without a
 critic and share a single group-relative advantage. The policy takes objective weights as inputs. One trained policy generates
 schedules under nine tested weight settings without retraining.
 
-\item \emph{Empirical findings.} HSTGRA achieves lower mean objective values
+\item \emph{Empirical findings.} HMAGRA achieves lower mean objective values
 than dispatching rules and the adapted DRL baselines in all five test
 instance families. Genetic search achieves lower means in the two smaller
-families, whereas HSTGRA achieves lower means in the three larger families.
-In the runtime tests, HSTGRA constructs schedules in seconds.
+families, whereas HMAGRA achieves lower means in the three larger families.
+In the runtime tests, HMAGRA constructs schedules in seconds.
 \end{enumerate}
 
 The experiments also examine the effect of a machine repair introduced

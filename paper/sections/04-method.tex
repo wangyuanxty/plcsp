@@ -8,7 +8,7 @@ produced by its own agent. A top-level rule selector holds one rule head per
 shop agent and sets their rule priors every $\Delta T$ low-level steps (eight
 in our experiments). The selected rules bias the low-level
 agents, but they do not replace them. We refer to the resulting model as
-HSTGRA. Figure~\ref{fig:method} summarizes the architecture and the
+HMAGRA. Figure~\ref{fig:method} summarizes the architecture and the
 training loop. In panel (a), each shop agent reads its own token set, encodes
 it, scores its candidates, masks the infeasible ones, and returns one action,
 and the machine agent's encoder applies attention within a machine and then

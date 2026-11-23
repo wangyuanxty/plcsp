@@ -5,18 +5,18 @@ load/unload stations. The timing of the handoff affects when the next
 operation can start. We therefore integrate operation sequencing, machine
 assignment, and AGV dispatch into one decision process. The weighted objective
 combines makespan, processing energy, idle energy, and loaded transport time.
-We propose HSTGRA, a hierarchical multi-agent policy. A high-level selector
+We propose HMAGRA (Hierarchical Multi-Agent Group-Relative Advantage). A high-level selector
 periodically assigns rule priors to three low-level agents. At each scheduling
 step, these agents jointly select the operation, machine, and AGVs. Each agent
 uses a Set Transformer to encode its variable-size candidate set. The
 low-level agents train without a critic and share a group-relative advantage.
-Across five test instance families, HSTGRA achieves lower mean objective
+Across five test instance families, HMAGRA achieves lower mean objective
 values than dispatching rules. Its mean objective is approximately
 $19\%$--$37\%$ lower than that of the better of the two deep reinforcement
 learning baselines in each family. Compared with the random-key genetic
-algorithm, HSTGRA achieves mean objective values approximately $16\%$--$43\%$
+algorithm, HMAGRA achieves mean objective values approximately $16\%$--$43\%$
 lower on the three larger instance families, but higher on the two smaller
-families. HSTGRA constructs a schedule in seconds on each of the three
+families. HMAGRA constructs a schedule in seconds on each of the three
 instance families used for the runtime comparison. In the ablation
 experiments, using a Set Transformer for machine
 encoding, retaining within-machine attention, using the group-relative
